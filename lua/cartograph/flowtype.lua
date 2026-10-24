@@ -777,7 +777,7 @@ local function build(store, opts)
         -- outside the dump, whose recorder alone cleared it, CART-1821)
         local nk = G7.NEXTK
         G7.NEXTK = nil
-        if f == '[]' and nk then G7.LOADK[dst] = nk; G7.DYNL[#G7.DYNL + 1] = { x, nk } end
+        if f == '[]' and nk then G7.LOADK[dst] = nk; G7.DYNL[#G7.DYNL + 1] = { x, nk, dst } end
         local l = loads[x]
         if not l then l = {}; loads[x] = l end
         l[#l + 1] = { f, dst, strict }
@@ -3844,6 +3844,96 @@ local function build(store, opts)
         end
         table.sort(UNFIN)
     end
+    -- ★ THE LITERALS A STRING PORT MAY HOLD (CART-1820, CART-1823): a backward search over the solved value flow among
+    -- STRING-holding ports — copies, and a cell's readers back to the cell; a saturated port is unknown text, FLOW-0108's —
+    -- from `keys`, then the literal texts (G7.LITV) forward along the same edges. Returns the union of the texts found and
+    -- lits[port] = { set = { text = true }, n = count }, or true past 64 texts (any of the union)
+    function G7.isgbase(x) for o in each(x) do if G7.ISG[o] then return true end end return false end
+    function G7.strlits(keys)
+        local rev, revr = {}, {}
+        for a, sa in pairs(succ) do
+            if has(a, STR) then for b in sit(sa) do if has(b, STR) then local l = rev[b]; if not l then l = {}; rev[b] = l end; l[#l + 1] = a end end end
+        end
+        for o, r in pairs(rd) do
+            for g, l in pairs(r) do
+                if g ~= NS then for dst in pairs(l) do if has(dst, STR) then local m = revr[dst]; if not m then m = {}; revr[dst] = m end; m[#m + 1] = { o, g } end end end
+            end
+        end
+        local seen, q, i, fwd, names = {}, {}, 1, {}, {}
+        for _, k in ipairs(keys) do if not seen[k] then seen[k] = true; q[#q + 1] = k end end
+        local function visit(p, to)
+            if p and not top[p] and has(p, STR) then
+                local l = fwd[p]; if not l then l = {}; fwd[p] = l end; l[#l + 1] = to
+                if not seen[p] then seen[p] = true; q[#q + 1] = p end
+            end
+        end
+        while i <= #q do
+            local p = q[i]; i = i + 1
+            local s_ = G7.LITV[p]
+            if s_ then names[s_] = true end
+            for _, a in ipairs(rev[p] or NOTHING) do visit(a, p) end
+            for _, og in ipairs(revr[p] or NOTHING) do
+                local m = ofield[og[1]] or NOTHING
+                -- (a dynamic read reads every value cell; a named or key read its cell, and the dynamic cell)
+                if og[2] == '[]' then for f, fp in pairs(m) do if f ~= '{k}' then visit(fp, p) end end
+                else visit(m[og[2]], p); visit(m['[]'], p) end
+            end
+        end
+        local lits, wl, inw, h = {}, {}, {}, 1
+        for _, p in ipairs(q) do local s_ = G7.LITV[p]; if s_ then lits[p] = { set = { [s_] = true }, n = 1 }; wl[#wl + 1] = p; inw[p] = true end end
+        while h <= #wl do
+            local p = wl[h]; h = h + 1; inw[p] = nil
+            local L = lits[p]
+            for _, to in ipairs(fwd[p] or NOTHING) do
+                local M, grew = lits[to], false
+                if M ~= true then
+                    if L == true then lits[to] = true; grew = true
+                    else
+                        if not M then M = { set = {}, n = 0 }; lits[to] = M end
+                        for s_ in pairs(L.set) do if not M.set[s_] then M.set[s_] = true; M.n = M.n + 1; grew = true end end
+                        if M.n > 64 then lits[to] = true end
+                    end
+                end
+                if grew and not inw[to] then inw[to] = true; wl[#wl + 1] = to end
+            end
+        end
+        return names, lits
+    end
+    -- ★ A DYNAMIC _G READ SEES THE NAMED GLOBALS ITS KEY MAY NAME (CART-1823): the clause computed-global keeps a
+    -- dynamic `_G[k]` off the named globals (CART-1707: all of them made WoW's solve 41 -> 632 s), and CART-1820 takes
+    -- the names a LITERAL reaches out of GN's named set — so for those a dynamic read must see the named cell too, or
+    -- `Foo = {…}; local k = "Foo"; _G[k].g()` answered whole with no callee. Per load, the literals ITS key may hold
+    -- (G7.strlits); past 64, the union. Rounds, since a new value may carry a new literal to a key
+    G7.DYNGN = { loads = 0, edges = 0, rounds = 0 } -- (R.stats.dyngn)
+    do
+        local done = {}
+        while true do
+            local keys, ld = {}, {}
+            for _, a in ipairs(G7.DYNL) do if a[3] and not top[a[1]] and not top[a[2]] and G7.isgbase(a[1]) then keys[#keys + 1] = a[2]; ld[#ld + 1] = a end end
+            if #keys == 0 or not next(G7.LITV) then break end
+            local names, lits = G7.strlits(keys)
+            local grew = false
+            for _, a in ipairs(ld) do
+                local L = lits[a[2]]
+                local set = L == true and names or L and L.set
+                if set then
+                    for name in sorted(set) do
+                        for o in each(a[1]) do
+                            local cell = G7.ISG[o] and ofield[o] and ofield[o][name]
+                            if cell then
+                                local dk = done[cell]; if not dk then dk = {}; done[cell] = dk end
+                                if not dk[a[3]] then dk[a[3]] = true; edge(cell, a[3]); grew = true; G7.DYNGN.edges = G7.DYNGN.edges + 1 end
+                            end
+                        end
+                    end
+                end
+            end
+            G7.DYNGN.loads = #ld
+            if not grew then break end
+            G7.DYNGN.rounds = G7.DYNGN.rounds + 1
+            solve()
+        end
+    end
     -- ★ WHAT UNKNOWN CODE IS HANDED ESCAPES (CART-1707): load's chunk, a module outside the tree may write any field of
     -- it, set its metatable, keep it — closed over its fields and prototypes. Its field reads are tainted below, and
     -- it is prototype-incomplete; a function among them is called with EXT (G7.EXTCALL's call)
@@ -3872,36 +3962,9 @@ local function build(store, opts)
     -- the dump states them as gn_exclude. After the solve: what those reads already listed stays, a superset
     do
         local keys = {}
-        local function isg_base(x) for o in each(x) do if G7.ISG[o] then return true end end return false end
-        for _, l in ipairs({ G7.DYNL, G7.DYNS }) do for _, a in ipairs(l) do if not top[a[1]] and isg_base(a[1]) and not top[a[2]] then keys[#keys + 1] = a[2] end end end
+        for _, l in ipairs({ G7.DYNL, G7.DYNS }) do for _, a in ipairs(l) do if not top[a[1]] and G7.isgbase(a[1]) and not top[a[2]] then keys[#keys + 1] = a[2] end end end
         local names = {}
-        if #keys > 0 and next(G7.LITV) then
-            -- (the reverse value flow among STRING-holding ports: copies, and a cell's readers back to the cell)
-            local rev, revr = {}, {}
-            for a, sa in pairs(succ) do
-                if has(a, STR) then for b in sit(sa) do if has(b, STR) then local l = rev[b]; if not l then l = {}; rev[b] = l end; l[#l + 1] = a end end end
-            end
-            for o, r in pairs(rd) do
-                for g, l in pairs(r) do
-                    if g ~= NS then for dst in pairs(l) do if has(dst, STR) then local m = revr[dst]; if not m then m = {}; revr[dst] = m end; m[#m + 1] = { o, g } end end end
-                end
-            end
-            local seen, q, i = {}, {}, 1
-            for _, k in ipairs(keys) do if not seen[k] then seen[k] = true; q[#q + 1] = k end end
-            local function visit(p) if p and not seen[p] and not top[p] and has(p, STR) then seen[p] = true; q[#q + 1] = p end end
-            while i <= #q do
-                local p = q[i]; i = i + 1
-                local s_ = G7.LITV[p]
-                if s_ then names[s_] = true end
-                for _, a in ipairs(rev[p] or NOTHING) do visit(a) end
-                for _, og in ipairs(revr[p] or NOTHING) do
-                    local m = ofield[og[1]] or NOTHING
-                    -- (a dynamic read reads every value cell; a named or key read its cell, and the dynamic cell)
-                    if og[2] == '[]' then for f, fp in pairs(m) do if f ~= '{k}' then visit(fp) end end
-                    else visit(m[og[2]]); visit(m['[]']) end
-                end
-            end
-        end
+        if #keys > 0 and next(G7.LITV) then names = G7.strlits(keys) end
         G7.GNEXCL = names
         for name in sorted(names) do
             for o in pairs(G7.ISG) do
@@ -4486,6 +4549,7 @@ local function build(store, opts)
     -- (refl-scope: what the region taint inspected, and the capabilities that fell back — DIAGNOSTIC counts: which port a
     -- capability is first seen at depends on the drain order, string-keyed walks among it; which tops escape does not)
     stats.rcap = G7.RCAP
+    stats.dyngn = G7.DYNGN
     if G7.RCAP then -- (and the region tops: all, those that held a table or a function, those whose holdings escaped)
         local n, h, e = 0, 0, 0
         for p in pairs(G7.RTOP) do n = n + 1; if G7.RHT[p] then h = h + 1 end; if G7.RESCT[p] then e = e + 1 end end

@@ -2997,3 +2997,30 @@ test('flowtype litkeys: `_G[addonName]` is the addon\'s global by name, read and
     eq('Addon/a.lua::g@1 whole', callee('Addon/b.lua', 2, 'addon.g'), '_G[addonName] read by name')
     eq('Addon/a.lua::g@1 whole', callee('Addon/b.lua', 3, 'Addon.g'), 'and the global itself: the store was by name')
 end)
+
+-- (CART-1823: a dynamic `_G[k]` read sees the named globals ITS key's literals name — the clause computed-global kept it
+-- off every named global, and `Foo = {…}; local k = "Foo"; _G[k].g()` answered whole with no callee)
+test('flowtype: a dynamic _G read sees the named global its literal key names (CART-1823)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'Foo = { g = function () return 1 end }',
+        'Bar = { g = function () return 2 end }',
+        'local k = "Foo"',
+        'local x = _G[k].g()',
+        'local function get(n) return _G[n] end',
+        'local y = get("Bar").g()',
+        'local z = _G["Fo" .. "o"]',
+    }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    vim.fn.delete(root, 'rf')
+    local function callee(line)
+        for _, c in ipairs(store.data.calls) do
+            if c.line == line and (c.full or c.callee or ''):find('%.g$') then
+                local fns, how = R.callee_of(c); return (fns and table.concat(fns, ',') or '') .. ' ' .. tostring(how)
+            end
+        end
+    end
+    eq('m.lua::g@0 whole', callee(3), 'the literal through a local: Foo alone')
+    eq('m.lua::g@1 whole', callee(5), 'through a parameter: only the literal its caller passed')
+end)
