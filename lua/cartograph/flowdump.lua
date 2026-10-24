@@ -449,13 +449,52 @@ function M.build(rec, X)
             end
         end
     end
+    -- (KEY-SHAPED region variables, rtopk: every instruction that may write a region value into it is a `keys` read
+    -- through a region base, or a copy / argument / return of a key-shaped variable. flowpath gives them the union of
+    -- UR's key sets, not UR — a module's key names concatenated, `n .. "." .. k`, no longer dispatch into a reflected
+    -- module's __concat (flowpath's opfix probe on CART-1817). The greatest fixpoint: candidates are dropped until stable)
+    local RK2 = {}
+    if X.RTOP and next(RV) then
+        local writers = {} -- var -> { { kind, source } ... } for the region-delivering writes
+        local function w(dst, kind, src) if dst and RV[dst] and (src == true or RV[src]) then local l = writers[dst]; if not l then l = {}; writers[dst] = l end; l[#l + 1] = { kind, src } end end
+        for _, l in pairs(rec.fns) do
+            for _, ins in ipairs(l) do
+                local op = ins[1]
+                if op == 'copy' then w(ins[2], 'copy', ins[3])
+                elseif op == 'keys' then w(ins[2], 'keys', ins[3])
+                elseif op == 'load' or op == 'loadRaw' or op == 'getmeta' then w(ins[2], 'field', ins[3])
+                elseif op == 'call' or op == 'pcall' then
+                    local sh = op == 'pcall' and 1 or 0
+                    for o in X.each(ins[3]) do
+                        local fp = X.fnports[o]
+                        if fp then
+                            for i, a in ipairs(ins[4]) do w(fp.params[i] or fp.vararg, 'pass', a) end
+                            for i, r in ipairs(fp.rets or { fp.ret }) do w(ins[2][i + sh], 'pass', r) end
+                        end
+                    end
+                elseif op == 'op' then for _, a in ipairs(ins[3]) do w(ins[2], 'other', a) end
+                elseif op == 'resume' or op == 'yield' then for _, d in ipairs(ins[2]) do for _, a in ipairs(ins[#ins] or {}) do w(d, 'other', a) end end end
+            end
+        end
+        for v in pairs(writers) do RK2[v] = true end -- (every region variable a write was recorded for; dropped below)
+        local changed = true
+        while changed do
+            changed = false
+            for v in pairs(RK2) do
+                for _, e in ipairs(writers[v]) do
+                    local ok_ = e[1] == 'keys' or ((e[1] == 'copy' or e[1] == 'pass') and RK2[e[2]])
+                    if not ok_ then RK2[v] = nil; changed = true; break end
+                end
+            end
+        end
+    end
     local function rlive(p) return p ~= nil and RV[p] == true end
-    local vj, topj, rtopj, rcj = {}, {}, {}, {}
+    local vj, topj, rtopj, rcj, rtopkj = {}, {}, {}, {}, {}
     local vlist = {}
     for p in pairs(used) do vlist[#vlist + 1] = p end
     table.sort(vlist)
     for _, p in ipairs(vlist) do
-        if rlive(p) then rtopj[#rtopj + 1] = p end
+        if rlive(p) then if RK2[p] then rtopkj[#rtopkj + 1] = p else rtopj[#rtopj + 1] = p end end
         if X.top[p] then if not rlive(p) then topj[#topj + 1] = tostring(p) end
         else
             local ss = rec._self[p]
@@ -749,7 +788,7 @@ function M.build(rec, X)
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
         .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
         .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}'
-        .. ((#rtopj > 0 or #rcj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rcells":[' .. table.concat(rcj, ',') .. ']'
+        .. ((#rtopj > 0 or #rcj > 0 or #rtopkj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rtopk":' .. jarr(rtopkj) .. ',"rcells":[' .. table.concat(rcj, ',') .. ']'
             .. ',"rkeys":' .. jarr((function () local l = {}; for o in pairs(RK) do l[#l + 1] = o end; table.sort(l); return l end)())
             .. ',"rroots":' .. jarr((function ()
             local set, l = {}, {}

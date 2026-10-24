@@ -1318,3 +1318,32 @@ test('flowdump: refl-scope — what a capability escapes is not stated as region
     ok(ma and vim.tbl_contains(D.solution.taint.escaped, ma), 'the call through the region escaped ma')
     for _, c in ipairs(D.solution.rcells or {}) do ok(c[1] ~= ma, 'an escaped module\'s cell is not region: ' .. vim.inspect(c)) end
 end)
+
+-- (a variable that only ever holds KEYS read from region objects is rtopk: flowpath gives it the union of UR's key sets,
+-- not UR — `n .. "." .. k` over the modules' keys, where the one __concat object is itself a module, was refused at the
+-- concatenations with k as rtop; flowpath's opfix probe on CART-1817)
+test('flowdump: refl-scope — a key read from the region is rtopk, and its copy too (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'for n, mod in pairs(package.loaded) do if type(mod) == "table" then for k in pairs(mod) do print(n .. "." .. k) end end end\n',
+        ['lua/hz.lua'] = 'local H = setmetatable({}, { __concat = function (x, y) return "h" end })\nreturn H\n',
+        ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = 'pkg-modules,refl-scope' })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    local D = vim.json.decode(R.dump)
+    local S = D.solution
+    local keysdst, copied
+    for _, F in ipairs(D.functions) do
+        for _, ins in ipairs(F.body) do
+            if ins[1] == 'keys' and vim.tbl_contains(S.rtop, ins[3]) then keysdst = ins[2] end
+        end
+        for _, ins in ipairs(F.body) do if ins[1] == 'copy' and ins[3] == keysdst then copied = ins[2] end end
+    end
+    ok(keysdst and vim.tbl_contains(S.rtopk, keysdst), 'the keys read through a region base: rtopk ' .. vim.inspect(S.rtopk))
+    ok(copied and vim.tbl_contains(S.rtopk, copied), 'and the loop variable it is copied into')
+    ok(not vim.tbl_contains(S.rtop, keysdst) and not vim.tbl_contains(S.rtop, copied), 'neither is rtop: ' .. vim.inspect(S.rtop))
+end)
