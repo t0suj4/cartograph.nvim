@@ -428,7 +428,15 @@ function M.build(rec, X)
     -- lists there the region universe, the closure of rroots and the escaped universe over the solution's cells. The
     -- roots: package.loaded's entries, and everything a live top held — its values of a type too, which the closure over
     -- cells would not reach)
-    local function rlive(p) return X.RTOP ~= nil and p ~= nil and ((X.RTOP[p] and not X.RESCT[p]) or X.tainted[p] == 'r') or false end
+    -- (and a port the ordinary taint reached that ALSO carries a live top's mark: it may hold that top's holdings too —
+    -- the self tree's `local m = package.loaded[k]` copied from the region into such a port, refused. A live top's mark
+    -- is followed to its whole closure, so which ports carry it is no matter of the drain order)
+    local function rlive(p)
+        if X.RTOP == nil or p == nil then return false end
+        if (X.RTOP[p] and not X.RESCT[p]) or X.tainted[p] == 'r' then return true end
+        for t in pairs(X.REG and X.REG[p] or {}) do if not X.RESCT[t] then return true end end
+        return false
+    end
     local vj, topj, rtopj, rcj = {}, {}, {}, {}
     local vlist = {}
     for p in pairs(used) do vlist[#vlist + 1] = p end

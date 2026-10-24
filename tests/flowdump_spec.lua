@@ -1234,3 +1234,28 @@ test('flowdump: refl-scope states the region as rtop / rcells / rroots, and its 
     ok(vim.tbl_contains(S.rroots, ma1), 'the module is a region root: ' .. vim.inspect(S.rroots))
     for _, x in ipairs(S.rtop) do ok(not vim.tbl_contains(S.top, x), 'a region top is not ⊤: ' .. x) end
 end)
+
+-- (and a port the ORDINARY taint reached that also carries a live region top's mark is region too: an escaped function's
+-- parameter, handed a module by an inspecting loop, may hold the region — listed as plain taint it held none of it, and
+-- the copy into it was refused; the self tree's resolve_requires)
+test('flowdump: refl-scope — a tainted port the region reaches is in rtop (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = CLASSES .. table.concat({
+        'local function g(x) print(x) end', 'local function g2(x) end', 'local function g3(x) end',
+        'local h = g; if math.random() > 0.3 then h = g2 elseif math.random() > 0.5 then h = g3 end; h(1)',
+        'for _, mod in pairs(package.loaded) do g(mod) end' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'return { f = 1 }\n', ['lua/mb.lua'] = 'return { x = 1 }\n',
+        ['lua/mc.lua'] = 'return { y = 2 }\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = 'pkg-modules,refl-scope' })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    local D = vim.json.decode(R.dump)
+    local x
+    for _, F in ipairs(D.functions) do if D.names.functions[F.id + 1]:match('::g@') then x = F.params[1] end end
+    ok(x and vim.tbl_contains(D.solution.taint.ports, x), 'g escaped: its parameter is tainted: ' .. tostring(x))
+    ok(vim.tbl_contains(D.solution.rtop, x), 'and the region reaches it: rtop ' .. vim.inspect(D.solution.rtop))
+end)
