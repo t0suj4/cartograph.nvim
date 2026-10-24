@@ -57,6 +57,7 @@ M.EXPERIMENTS = {
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
+    ['refl-scope'] = 'MEASUREMENT, stage 1 of scoped saturation (CART-1817, flowpath FLOW-0093): a port of the REFLECTION REGION — seeded at the computed-key / pairs / keys reads of package.loaded, flagged along copies, arguments, returns, cells and reads through a non-library base (the CART-1816 label\'s channels) — that passes CAP becomes a region top (G7.RTOP): it saturates as today, but its contents are not added to the escaped universe',
     ['refl-nocap'] = 'MEASUREMENT: the reflection region\'s ports — every port the walk made in a file that uses package.loaded reflectively (a computed key, pairs, handed on as a value) — are exempt from CAP, so saturation inside the region does not escape every module (flowpath on CART-1816). Measured 2026-10-24 on cartograph\'s own tree with pkg-modules, CAP 64: 81 s / 2.5 GB -> 267 s / 10.9 GB and no dump — the file-wide region uncaps mixalg\'s algebra walkers too; scoped saturation is flowpath\'s FLOW-0093',
     ['pkg-modules'] = 'package.loaded also lists the tree\'s modules by name (sound: without it `package.loaded.m.x = a` is lost) — measured: a computed-key read of package.loaded (hot-spots, mixalg, packmap, self_oracle) merges every module into one port, it saturates, and saturation escapes every module (repo 938 rows partial, oracle exact RIGHT 32 -> 2), CART-1797',
     ['libs-escape'] = 'the library tables (each library, the string library, package, package.loaded) follow the escape closure as ordinary objects — the reading without the clause libraries-never-escape: runtime oracle with ctx, string RIGHT 92 -> 52, typed 124 -> 43 (CART-1797)',
@@ -379,7 +380,8 @@ local function build(store, opts)
             elseif s and s.bs then for o in bs_iter(s) do ESCAT[o] = ESCAT[o] or p end
             elseif s then for o in pairs(s) do ESCAT[o] = ESCAT[o] or p end end
         end
-        if type(s) == 'number' then escaped[s] = true
+        if G7.RG and G7.RG[p] then G7.RTOP[p] = true -- (refl-scope: a region top escapes nothing, CART-1817)
+        elseif type(s) == 'number' then escaped[s] = true
         elseif s and s.bs then for o in bs_iter(s) do escaped[o] = true end
         elseif s then for o in pairs(s) do escaped[o] = true end end
         if opts.keepsat then
@@ -432,7 +434,7 @@ local function build(store, opts)
         return b
     end
     local function addobj(p, o)
-        if top[p] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end; return end
+        if top[p] then if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end end; return end
         local s = pts[p]
         if s == nil then pts[p] = o; cnt[p] = 1
         elseif type(s) == 'number' then
@@ -463,7 +465,7 @@ local function build(store, opts)
     end
     -- the bitset d into q: word by word, what was new becomes q's delta
     local function addbits(q, d)
-        if top[q] then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end return end
+        if top[q] then if not (G7.RTOP and G7.RTOP[q]) then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end end return end
         local t = tobits(q)
         if t.nw < d.nw then bs_grow(t, d.nw) end
         local tb, db = t.bs, d.bs
@@ -532,6 +534,7 @@ local function build(store, opts)
     end
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
+        if G7.RG and G7.RG[a] and not G7.RG[b] then G7.rgflag(b) end
         if G7.TOPL and top[b] then b = G7.TOPL; if a == b then return end end -- CART-1742
         -- (a port's successors as its objects are: ONE is the port number itself, more a set — a set per source port was
         -- the census's second site, 0.64 M per run. The set is grown key by key, as before: its pairs ORDER is the
@@ -674,6 +677,7 @@ local function build(store, opts)
         if f == '\1mt' and fnports[o] then return end
         -- (`#` — `_G[1]`, ipairs(_G) — is no NAME: a numeric key is what a dynamic store may write, so it reads them, CART-1799)
         if not strict and f ~= '[]' and f ~= '#' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
+        if G7.RG and G7.PKGL[o] and (f == '[]' or f == '{k}') and not G7.RG[dst] then G7.rgflag(dst) end -- (refl-scope: a reflective read)
         local r = rd[o]
         if not r then r = {}; rd[o] = r end
         local l = r[f]
@@ -1453,6 +1457,7 @@ local function build(store, opts)
             else
                 local d = delta[p]
                 delta[p] = nil
+                if G7.RG and G7.RG[p] then G7.rgspread(p) end
                 if type(d) == 'table' and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
                     local db = d
@@ -1472,7 +1477,10 @@ local function build(store, opts)
                     if G7.TR then G7.TSRC, G7.TKIND = nil, nil end
                 end
                 if d then
-                    for _, ld in ipairs(loads[p] or NOTHING) do for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end end
+                    for _, ld in ipairs(loads[p] or NOTHING) do
+                        if G7.RG and G7.RG[p] and not G7.RG[ld[2]] then G7.rgthru(d, ld[2], dit) end
+                        for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end
+                    end
                     for _, st in ipairs(stores[p] or NOTHING) do
                         for _, o in dit(d) do
                             -- (a host object takes a store only when its kind is OPEN: a 'prim' raises, a 'members' one has
@@ -1559,6 +1567,19 @@ local function build(store, opts)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     if G7.EXP['refl-nocap'] then G7.PORTFILE, G7.REFLFILE = {}, {} else G7.PORTFILE, G7.REFLFILE = nil, nil end
+    -- (refl-scope, CART-1817: the region flag — set before a port saturates, it makes the port a region top; set after,
+    -- the port stays an ordinary saturation, counted in G7.RGLATE)
+    if G7.EXP['refl-scope'] then
+        G7.RG, G7.RTOP, G7.RGLATE = {}, {}, 0
+        function G7.rgflag(q) G7.RG[q] = true; if top[q] and not G7.RTOP[q] then G7.RGLATE = G7.RGLATE + 1 end end
+        function G7.rgspread(p)
+            for q in sit(succ[p]) do if not G7.RG[q] then G7.rgflag(q) end end
+            if fowner[p] then readers(fowner[p], fname[p], function (q) if not G7.RG[q] then G7.rgflag(q) end end) end
+        end
+        function G7.rgthru(d, dst, dit_) -- (a read through a region base: reflected content where the base is no library)
+            for _, o in dit_(d) do if not (G7.ISG[o] or G7.LIBSITES[o] or G7.PKGL[o]) then G7.rgflag(dst); return end end
+        end
+    else G7.RG, G7.RTOP = nil, nil end
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {}
