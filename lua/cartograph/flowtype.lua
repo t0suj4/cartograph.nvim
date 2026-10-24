@@ -1949,6 +1949,41 @@ local function build(store, opts)
         end
         for k, l in pairs(sm.results or NOTHING) do if resl[k] then edge(srcport(l), resl[k]) end end
     end
+    -- ★ A FILE CHUNK'S `...` (CART-1822): what its host passes — one port per file. A file in a package whose ecosystem
+    -- DECLARES its loader (`chunk_args`, spec/ecosystem: WoW's addon name and private table) holds those values, each
+    -- position its own port, created in the dump's init (G7.CHUNKINIT): one private table per package, shared by its
+    -- files; the name a string whose text is the package's (G7.LITV, what CART-1820's key search reads). Any other
+    -- file's `...` is unknown host values: tainted in the taint phase (G7.CHUNKVA), as a lost caller's arguments
+    G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS = {}, {}, {}
+    function G7.chunkva(file)
+        local va = port('va:chunk:' .. file)
+        if G7.CHUNKVA[file] == va then return va, nil end
+        if G7.CHUNKPOS[file] then return va, G7.CHUNKPOS[file] end
+        local seg, eco
+        local okL, L = pcall(require, 'cartograph.spec.lua')
+        if okL and L.package_of then seg, eco = L.package_of(file, store.data.root) end
+        local E = eco and require('cartograph.spec.ecosystem').load(eco)
+        local args = E and E.chunk_args
+        if not args then G7.CHUNKVA[file] = va; return va, nil end
+        local pos = {}
+        G7.mu(function ()
+            for k, a in ipairs(args) do
+                local pk, o = port('va:chunk:' .. file .. '#' .. k), nil
+                if a == 'package-name' then o = STR; G7.LITV[pk] = seg
+                elseif a == 'package-table' then
+                    o = G7.PKGTBL[seg]
+                    if not o then o = newobj('tbl:package:' .. seg); G7.PKGTBL[seg] = o end
+                end
+                if o then
+                    addobj(pk, o); edge(pk, va)
+                    G7.CHUNKINIT[#G7.CHUNKINIT + 1] = { pk, o, va }
+                end
+                pos[k] = pk
+            end
+        end)
+        G7.CHUNKPOS[file] = pos
+        return va, pos
+    end
     local function walk_file(file, src, clone)
         local isctx = clone and clone.ctx
         local wf0 = G7.WALKFILE
@@ -2894,8 +2929,10 @@ local function build(store, opts)
                     local l = callv(x, want - #xs + 1)
                     if type(l) == 'table' then for _, r in ipairs(l) do vals[#vals + 1] = r end else vals[#vals + 1] = l end
                 elseif i == #xs and want > #xs and x:type() == 'vararg_expression' then
-                    local v = expr(x) -- (`local a, b = ...`: every value still wanted is a vararg)
-                    for _ = i, want do vals[#vals + 1] = v end
+                    local v, pos = expr(x) -- (`local a, b = ...`: every value still wanted is a vararg)
+                    -- (a chunk whose loader is declared: each its own position, past them nil, CART-1822)
+                    if not fnstack[#fnstack] and not G7.HOSTWALK then v, pos = G7.chunkva(file) end
+                    for k = i, want do vals[#vals + 1] = pos and (pos[k - i + 1] or new()) or v end
                 else vals[#vals + 1] = expr(x) end
             end
             return vals
@@ -2922,9 +2959,7 @@ local function build(store, opts)
                 local f = fnstack[#fnstack]
                 if f then return f.vararg end
                 if G7.HOSTWALK then return new() end
-                local p = port('va:chunk:' .. file)
-                G7.CHUNKVA[file] = p
-                return p
+                return (G7.chunkva(file))
             end
             if t == 'dot_index_expression' then
                 -- (refl-nocap: `package.loaded` used as a VALUE — not under a literal key or a field name — makes this file a
@@ -5103,7 +5138,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot

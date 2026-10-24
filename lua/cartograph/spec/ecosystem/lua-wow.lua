@@ -44,6 +44,14 @@ return {
             .. ' across the tree' },
     },
 
+    -- ── WHAT THE LOADER PASSES EACH FILE (CART-1822) ─────────────────────────
+    -- The client runs every file an addon's .toc lists as a chunk called with
+    -- two values: `...` = (the addon's NAME — its directory, as identity says —,
+    -- the addon's PRIVATE TABLE, one table shared by every file of that addon).
+    -- `local addonName, ns = ...` is the idiom; without this the analyzer can only
+    -- read `...` as unknown host values, and a call through `ns` has no callee.
+    chunk_args = { 'package-name', 'package-table' },
+
     -- ── HOOK FORMS: patching a table you did not define ──────────────────────
     -- CART-0618. A monkey-patch is "you modified a table you did not define", and
     -- HOW it is spelled is per-ecosystem. Plain Lua spells it as an assignment

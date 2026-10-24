@@ -2947,3 +2947,30 @@ test('flowtype: a file chunk\'s `...` is its host\'s arguments, not nothing (CAR
     eq('partial', how(1, 'ns.f'), 'a call through the host-passed table is no whole answer')
     eq('partial', how(3, 't[1].g'), 'nor through `{ ... }`: every use is the one port')
 end)
+
+-- (CART-1822: a DECLARED loader — spec/ecosystem/lua-wow.lua's chunk_args — passes each file of an addon its name and
+-- the addon's one private table: a call through `ns` resolves across the addon's files, each position its own value)
+test('flowtype: WoW\'s loader passes every file of an addon its name and one private table (CART-1822)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['Addon/Addon.toc'] = '## Title: Addon\na.lua\nb.lua\n',
+        ['Addon/a.lua'] = 'local name, ns = ...\nns.f = function () return 1 end\n',
+        ['Addon/b.lua'] = 'local name, ns, extra = ...\nlocal x = ns.f()\nlocal y = name.f()\nlocal z = extra.g()\n',
+        ['Other/Other.toc'] = '## Title: Other\nc.lua\n',
+        ['Other/c.lua'] = 'local _, ns = ...\nlocal w = ns.f()\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    vim.fn.delete(root, 'rf')
+    local function callee(file, line, name)
+        for _, c in ipairs(store.data.calls) do
+            if c.file == file and c.line == line and (c.full or c.callee) == name then
+                local fns, how = R.callee_of(c); return (fns and table.concat(fns, ',') or '') .. ' ' .. tostring(how)
+            end
+        end
+    end
+    eq('Addon/a.lua::ns.f@1 whole', callee('Addon/b.lua', 1, 'ns.f'), 'the addon\'s private table, shared by its files')
+    eq(' whole', callee('Other/c.lua', 1, 'ns.f'), 'another addon\'s table is its own')
+    eq(' whole', callee('Addon/b.lua', 3, 'extra.g'), 'past the declared values: nil')
+    eq(' whole', callee('Addon/b.lua', 2, 'name.f'), 'position 1 is the name alone, not the table')
+end)

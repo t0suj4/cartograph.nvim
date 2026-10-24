@@ -876,30 +876,33 @@ local nvim_lua_root = validity.memo { name = 'nvim-lua-root', epoch = 'extract',
 --   manifest_ext             any file of that type   (wow: a variant .toc)
 -- Memoized per (root, segment) on the extract epoch: one scandir per directory at
 -- worst, which matters on a 353-addon / 2.27M-line tree.
-local BOUNDED = (function ()
-    local out = {}
+local BOUNDED, BOUNDN = (function ()
+    local out, names = {}, {}
     local ecomod = require 'cartograph.spec.ecosystem'
     for _, name in ipairs(ecomod.names()) do
         local e = ecomod.load(name)
         if e and e.lang == 'lua' and (e.boundary or {}).per_package
             and e.identity then
             out[#out + 1] = e.identity
+            names[#out] = name
         end
     end
-    return out
+    return out, names
 end)()
 
 local pkg_dir = validity.memo { name = 'package-dir', epoch = 'extract',
     compute = function (_, dir, seg)
+        -- (the answer is the NAME of the ecosystem whose marker matched — truthy, so
+        -- toc_scope reads it as before; package_of hands it on, CART-1822)
         local need_scan = false
-        for _, ident in ipairs(BOUNDED) do
+        for i, ident in ipairs(BOUNDED) do
             if ident.manifest
                 and vim.uv.fs_stat(dir .. '/' .. ident.manifest) ~= nil then
-                return true
+                return BOUNDN[i]
             end
             if ident.manifest_named_after_dir and vim.uv.fs_stat(
                 dir .. '/' .. seg .. ident.manifest_named_after_dir) ~= nil then
-                return true
+                return BOUNDN[i]
             end
             if ident.manifest_ext then need_scan = true end
         end
@@ -910,9 +913,9 @@ local pkg_dir = validity.memo { name = 'package-dir', epoch = 'extract',
             while it do
                 local name = vim.uv.fs_scandir_next(it)
                 if not name then break end
-                for _, ident in ipairs(BOUNDED) do
+                for i, ident in ipairs(BOUNDED) do
                     local ext = ident.manifest_ext
-                    if ext and name:sub(-#ext) == ext then return true end
+                    if ext and name:sub(-#ext) == ext then return BOUNDN[i] end
                 end
             end
         end
@@ -925,6 +928,17 @@ local function toc_scope(file, _, root)
     if not seg or type(root) ~= 'string' then return '' end
     local hit = pkg_dir(root .. '\31' .. seg, root .. '/' .. seg, seg)
     return hit and seg or ''
+end
+
+-- THE PACKAGE A FILE BELONGS TO, and the ecosystem that declared it (CART-1822): toc_scope's
+-- segment plus the ecosystem's name, so a consumer reads what THAT ecosystem says about its
+-- packages — e.g. what its loader passes each file's chunk (`chunk_args`). nil outside one.
+local function package_of(file, root)
+    local seg = type(file) == 'string' and file:match('^([^/]+)/')
+    if not seg or type(root) ~= 'string' then return nil end
+    local eco = pkg_dir(root .. '\31' .. seg, root .. '/' .. seg, seg)
+    if not eco then return nil end
+    return seg, eco
 end
 
 -- LAZY NAMESPACES (CART-1619): a table whose __index requires `<prefix> .. key` IS a module namespace — nvim-dap's
@@ -1095,6 +1109,8 @@ return {
     -- globals — name-matching them would be a guess). A lua tree
     -- with no .toc dirs partitions to ONE scope: behavior unchanged.
     scope = toc_scope,
+    -- (a file's package and the ecosystem that declared it — what its loader passes the chunk, CART-1822)
+    package_of = package_of,
     -- qualified/method names resolve within the addon boundary too:
     -- self:RegisterEvent means THIS addon's vendored AceEvent; a
     -- cross-addon unique-name match is a guess, not a fact

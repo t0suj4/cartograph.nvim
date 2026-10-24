@@ -127,6 +127,7 @@ M.CONTRACTS = {
     ['unknown-code'] = 'a call whose callee holds an ext site hands its arguments to the unknown-code channel (contracts.ext_channel), which calls the functions among them with ext',
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
     ['host-model'] = 'a host function with a Lua model (contracts.host_models: [key, [function ids]]) behaves as its model\'s body — a SUPPLIED premise (CART-1785; stated only when a call used one)',
+    ['loader-args'] = 'a file whose package\'s ecosystem declares its loader (spec/ecosystem chunk_args: WoW\'s addon name and private table) is run once, as a chunk called with exactly those values: init creates them, one private table per package shared by its files, and every other file\'s `...` is tainted (stated only when a file has a declared loader, CART-1822)',
     ['loaded-code'] = 'code loaded at run time from a source the tree does not hold — load / loadstring with a non-literal source, loadfile, dofile — does not read or write the tree\'s globals by name (stated only when the tree has such a call; a literal source is walked as tree code; the sound reading is experiment loaded-globals — CART-1796, the user\'s decision 2026-10-22)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }
@@ -288,6 +289,12 @@ function M.build(rec, X)
             init[#init + 1] = { 'new', V(e.GPORT), e.GOBJ }
             if e.FENVP then init[#init + 1] = { 'new', V(e.FENVP), e.GOBJ } end
         end
+    end
+    -- (what a declared LOADER passes each file's chunk, CART-1822: each position's value, then the chunk's `...` holds it
+    -- — the clause loader-args)
+    for _, c in ipairs(X.CHUNKINIT or {}) do
+        init[#init + 1] = { 'new', V(c[1]), c[2] }
+        init[#init + 1] = { 'copy', V(c[3]), c[1] }
     end
     if X.XA then
         init[#init + 1] = { 'new', V(X.XA), X.EXT }
@@ -823,6 +830,7 @@ function M.build(rec, X)
             for k in pairs(M.CONTRACTS) do
                 if not (k == 'fixed-env' and not X.FIXEDENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
+                    and not (k == 'loader-args' and #(X.CHUNKINIT or {}) == 0)
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end
             end
             table.sort(ks)

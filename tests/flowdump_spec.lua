@@ -1375,3 +1375,35 @@ test('flowdump: gn_exclude names the globals a literal-keyed dynamic _G step rea
     eq({ 'LibStub' }, names, 'LibStub, and nothing else')
     eq(nil, dump('print(use(b))\n').gn_exclude, 'no such step: no field')
 end)
+
+-- (CART-1822: a declared loader's values are created in init — one private table per package, the chunk's `...` a copy
+-- of each position — under the clause loader-args; the name is a key literal, so `_G[addonName]` excludes it from GN)
+test('flowdump: a declared loader\'s chunk values are init\'s, under loader-args, and the addon name is excluded from GN (CART-1822)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['Addon/Addon.toc'] = '## Title: Addon\na.lua\nb.lua\n',
+        ['Addon/a.lua'] = 'local name, ns = ...\nns.f = function () return 1 end\n_G[name] = {}\n',
+        ['Addon/b.lua'] = 'local name, ns = ...\nlocal x = ns.f()\nAddon.y = 1\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local pkg
+    for _, s in ipairs(D.sites) do if s.label == 'tbl:package:Addon' then pkg = s end end
+    ok(pkg and pkg.kind == 'table', 'the private table is a table site')
+    local news = 0
+    for i, F in ipairs(D.functions) do
+        for _, ins in ipairs(F.body) do
+            if ins[1] == 'new' and ins[3] == pkg.id then
+                eq('init', D.names.functions[i], 'created in init'); news = news + 1
+            end
+        end
+    end
+    eq(2, news, 'one new per file\'s position, of the one site')
+    ok(D.contracts.clauses['loader-args'] ~= nil, 'the clause is stated')
+    local ex = {}
+    for _, f in ipairs(D.gn_exclude or {}) do ex[D.names.fields[f + 1]] = true end
+    ok(ex.Addon, 'the addon name is excluded from GN: ' .. vim.inspect(D.gn_exclude))
+    eq(0, #D.gaps, 'no gap')
+end)
