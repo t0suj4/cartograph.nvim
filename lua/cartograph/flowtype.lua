@@ -1954,22 +1954,31 @@ local function build(store, opts)
     -- position its own port, created in the dump's init (G7.CHUNKINIT): one private table per package, shared by its
     -- files; the name a string whose text is the package's (G7.LITV, what CART-1820's key search reads). Any other
     -- file's `...` is unknown host values: tainted in the taint phase (G7.CHUNKVA), as a lost caller's arguments
-    G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS = {}, {}, {}
+    G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS, G7.LOADERP, G7.LOADK = {}, {}, {}, {}, {}
+    G7.LOADERA = {}
+    function G7.loaderargs(file) -- (the declared loader's arguments for this file and its package, or nil; memoized)
+        local m = G7.LOADERA[file]
+        if m == nil then
+            local seg, eco
+            local okL, L = pcall(require, 'cartograph.spec.lua')
+            if okL and L.package_of then seg, eco = L.package_of(file, store.data.root) end
+            local E = eco and require('cartograph.spec.ecosystem').load(eco)
+            m = E and E.chunk_args and { E.chunk_args, seg } or false
+            G7.LOADERA[file] = m
+        end
+        if m then return m[1], m[2] end
+    end
     function G7.chunkva(file)
         local va = port('va:chunk:' .. file)
         if G7.CHUNKVA[file] == va then return va, nil end
         if G7.CHUNKPOS[file] then return va, G7.CHUNKPOS[file] end
-        local seg, eco
-        local okL, L = pcall(require, 'cartograph.spec.lua')
-        if okL and L.package_of then seg, eco = L.package_of(file, store.data.root) end
-        local E = eco and require('cartograph.spec.ecosystem').load(eco)
-        local args = E and E.chunk_args
+        local args, seg = G7.loaderargs(file)
         if not args then G7.CHUNKVA[file] = va; return va, nil end
         local pos = {}
         G7.mu(function ()
             for k, a in ipairs(args) do
                 local pk, o = port('va:chunk:' .. file .. '#' .. k), nil
-                if a == 'package-name' then o = STR; G7.LITV[pk] = seg
+                if a == 'package-name' then o = STR; G7.LITV[pk] = seg; G7.LOADERP[pk] = seg
                 elseif a == 'package-table' then
                     o = G7.PKGTBL[seg]
                     if not o then o = newobj('tbl:package:' .. seg); G7.PKGTBL[seg] = o end
@@ -2163,7 +2172,16 @@ local function build(store, opts)
             if k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c) or '[]' end
             -- (a CONSTANT — a local declared from a string literal and never assigned in its file, or a key parameter of
             -- a value-keyed instance — is that string: `_G[LIBSTUB_MAJOR]` is the global LibStub, CART-1729)
-            if G7.LITKEYS and k:type() == 'identifier' then local p = lookup(txt(k)); local c = p and G7.CONSTK[p]; if c then return c end end
+            -- (and, with litkeys, a local bound to a declared LOADER's name — `local addonName = ...`, never assigned — is
+            -- the package's name: `_G[addonName]` is that global, read or written by name, under loader-args. Not by
+            -- default, CART-1755: w2's Altoholic also keys `_G` by a constant local, `local addonName = "Altoholic"`, so
+            -- the name stays in gn_exclude, its named reads saturate after the solve, and 121 partial answers the
+            -- dynamic cell had given went to none)
+            if G7.LITKEYS and k:type() == 'identifier' then
+                local p = lookup(txt(k))
+                local c = p and (G7.LOADK[p] or G7.CONSTK[p])
+                if c then return c end
+            end
             if isnum(k) then return '#' end
             return '[]'
         end
@@ -2933,6 +2951,10 @@ local function build(store, opts)
                     -- (a chunk whose loader is declared: each its own position, past them nil, CART-1822)
                     if not fnstack[#fnstack] and not G7.HOSTWALK then v, pos = G7.chunkva(file) end
                     for k = i, want do vals[#vals + 1] = pos and (pos[k - i + 1] or new()) or v end
+                elseif x:type() == 'vararg_expression' and not fnstack[#fnstack] and not G7.HOSTWALK
+                    and select(2, G7.chunkva(file)) then -- (`local a = ...`: the first value alone)
+                    local _, pos = G7.chunkva(file)
+                    vals[#vals + 1] = pos[1] or new()
                 else vals[#vals + 1] = expr(x) end
             end
             return vals
@@ -3109,6 +3131,7 @@ local function build(store, opts)
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
+                        if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADK[p] = G7.LOADERP[vals[i]] end
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
                         if ev and ev:type() == 'string' and v:type() == 'identifier' and not G7.REASG[txt(v)] then

@@ -1377,17 +1377,19 @@ test('flowdump: gn_exclude names the globals a literal-keyed dynamic _G step rea
 end)
 
 -- (CART-1822: a declared loader's values are created in init — one private table per package, the chunk's `...` a copy
--- of each position — under the clause loader-args; the name is a key literal, so `_G[addonName]` excludes it from GN)
-test('flowdump: a declared loader\'s chunk values are init\'s, under loader-args, and the addon name is excluded from GN (CART-1822)', function ()
+-- of each position — under the clause loader-args; the name is a key literal, so a DYNAMIC `_G[name]` excludes it from
+-- GN. CART-1755: a local bound to the name and never assigned is a constant key — `_G[addonName]` a named load)
+test('flowdump: a declared loader\'s chunk values are init\'s, under loader-args; the addon name is a named key, or excluded from GN (CART-1822, CART-1755)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
         ['Addon/Addon.toc'] = '## Title: Addon\na.lua\nb.lua\n',
-        ['Addon/a.lua'] = 'local name, ns = ...\nns.f = function () return 1 end\n_G[name] = {}\n',
+        ['Addon/a.lua'] = 'local name, ns = ...\nns.f = function () return 1 end\nname = name\n_G[name] = {}\n',
         ['Addon/b.lua'] = 'local name, ns = ...\nlocal x = ns.f()\nAddon.y = 1\n',
+        ['Addon/c.lua'] = 'local addonName = ...\nlocal t = _G[addonName]\n',
     })
+    local root0 = root
     store.ingest(ts.extract(root))
     local R = flowtype.solve(store, { open = false, dump = true })
-    vim.fn.delete(root, 'rf')
     local D = vim.json.decode(R.dump)
     local pkg
     for _, s in ipairs(D.sites) do if s.label == 'tbl:package:Addon' then pkg = s end end
@@ -1400,10 +1402,29 @@ test('flowdump: a declared loader\'s chunk values are init\'s, under loader-args
             end
         end
     end
-    eq(2, news, 'one new per file\'s position, of the one site')
+    eq(3, news, 'one new per file reading `...`, of the one site')
     ok(D.contracts.clauses['loader-args'] ~= nil, 'the clause is stated')
     local ex = {}
     for _, f in ipairs(D.gn_exclude or {}) do ex[D.names.fields[f + 1]] = true end
-    ok(ex.Addon, 'the addon name is excluded from GN: ' .. vim.inspect(D.gn_exclude))
+    ok(ex.Addon, 'a dynamic key (name is assigned in a.lua): the addon name is excluded from GN: ' .. vim.inspect(D.gn_exclude))
     eq(0, #D.gaps, 'no gap')
+    -- (the named lowering is opts.litkeys', CART-1755: by default c.lua's read stays dynamic)
+    local dyn0 = false
+    for i, F in ipairs(D.functions) do
+        if D.names.functions[i] == 'chunk:Addon/c.lua' then for _, ins in ipairs(F.body) do if ins[1] == 'loadDyn' then dyn0 = true end end end
+    end
+    ok(dyn0, 'default: `_G[addonName]` stays a dynamic read')
+    store.ingest(ts.extract(root0))
+    D = vim.json.decode(flowtype.solve(store, { open = false, dump = true, litkeys = true }).dump)
+    vim.fn.delete(root0, 'rf')
+    local cops, named = {}, false
+    for i, F in ipairs(D.functions) do
+        if D.names.functions[i] == 'chunk:Addon/c.lua' then
+            for _, ins in ipairs(F.body) do
+                cops[ins[1]] = true
+                if ins[1] == 'load' and D.names.fields[ins[4] + 1] == 'Addon' then named = true end
+            end
+        end
+    end
+    ok(named and not cops.loadDyn, 'c.lua: `_G[addonName]` is a named load of Addon: ' .. vim.inspect(cops))
 end)

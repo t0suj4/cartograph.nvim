@@ -2974,3 +2974,26 @@ test('flowtype: WoW\'s loader passes every file of an addon its name and one pri
     eq(' whole', callee('Addon/b.lua', 3, 'extra.g'), 'past the declared values: nil')
     eq(' whole', callee('Addon/b.lua', 2, 'name.f'), 'position 1 is the name alone, not the table')
 end)
+
+-- (CART-1755, opts.litkeys: WoW's `local addon = _G[addonName]` — a local bound to the loader's name and never assigned
+-- is the package's name, so the store and the read are the global Addon by name. Off by default: see keyname)
+test('flowtype litkeys: `_G[addonName]` is the addon\'s global by name, read and written (CART-1755)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['Addon/Addon.toc'] = '## Title: Addon\na.lua\nb.lua\n',
+        ['Addon/a.lua'] = 'local addonName = ...\n_G[addonName] = { g = function () return 1 end }\n',
+        ['Addon/b.lua'] = 'local addonName = ...\nlocal addon = _G[addonName]\nlocal x = addon.g()\nlocal y = Addon.g()\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true, litkeys = true })
+    vim.fn.delete(root, 'rf')
+    local function callee(file, line, name)
+        for _, c in ipairs(store.data.calls) do
+            if c.file == file and c.line == line and (c.full or c.callee) == name then
+                local fns, how = R.callee_of(c); return (fns and table.concat(fns, ',') or '') .. ' ' .. tostring(how)
+            end
+        end
+    end
+    eq('Addon/a.lua::g@1 whole', callee('Addon/b.lua', 2, 'addon.g'), '_G[addonName] read by name')
+    eq('Addon/a.lua::g@1 whole', callee('Addon/b.lua', 3, 'Addon.g'), 'and the global itself: the store was by name')
+end)
