@@ -245,7 +245,7 @@ local function build(store, opts)
     do
         local ex = M.experiments(opts)
         G7.EXP = ex
-        G7.LOCP, G7.CURLOC = ex.loc and {} or nil, nil -- (experiment `loc`: port -> the statement the walk was at)
+        G7.LOCP, G7.CURLOC = (ex.loc or opts.dump) and {} or nil, nil -- (experiment `loc`, and the dump's port names: port -> the statement the walk was at, CART-1824)
         -- (experiment `trace`: PFN port -> function, OFN object -> function, E deliveries, IN fan-in, SAT first saturation)
         G7.TR = ex.trace and { PFN = {}, OFN = {}, E = {}, IN = {}, SAT = {}, NSAT = {}, REPLAY = {}, NODE = {}, seq = 0 } or nil
         G7.CURFN, G7.TSRC, G7.TKIND = nil, nil, nil
@@ -370,7 +370,8 @@ local function build(store, opts)
     local escaped = {}
     -- (opts.explain: the saturated port each object ESCAPED through first, or { carrier object } for a field or
     -- prototype that escaped with it: R.escape_of)
-    local ESCAT = opts.explain and {} or nil
+    local ESCAT = (opts.explain or opts.dump) and {} or nil -- (and the dump's answers: pesc / pescvia, CART-1824)
+    G7.ESCREL = ESCAT and {} or nil -- (an object escmore released: the tainted port whose rule did — not a saturation, CART-1824)
     local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
@@ -3952,6 +3953,44 @@ local function build(store, opts)
         end
     end
     local tainted, twork = {}, {}
+    -- ★ THE DRAIN POPS THE LOWEST PORT (a binary heap), CART-1824: it was a stack, and pushes come out of string-keyed
+    -- walks (field names, copy keys, handler names) whose order varies by process — so which port tainted a port FIRST,
+    -- the dump's taint.from, differed in 0.8 % of links between two identical runs. The taint SET does not depend on the
+    -- order; its first causes now do not either. A port tainted twice within one pop under different reasons keeps the
+    -- smaller (G7.tkey)
+    function G7.tpush(p)
+        local i = #twork + 1
+        twork[i] = p
+        while i > 1 do
+            local j = (i - i % 2) / 2
+            if twork[j] <= p then break end
+            twork[i] = twork[j]; i = j
+        end
+        twork[i] = p
+    end
+    function G7.tpop()
+        local n = #twork
+        local top_, last = twork[1], twork[n]
+        twork[n] = nil; n = n - 1
+        if n > 0 then
+            local i = 1
+            while true do
+                local c = 2 * i
+                if c > n then break end
+                if c < n and twork[c + 1] < twork[c] then c = c + 1 end
+                if twork[c] >= last then break end
+                twork[i] = twork[c]; i = c
+            end
+            twork[i] = last
+        end
+        return top_
+    end
+    function G7.tkey(w)
+        if type(w) == 'number' then return ('p%012d'):format(w) end
+        if type(w) == 'table' then return ('p%012d|%s'):format(w[1] or 0, tostring(w[2])) end
+        return 's' .. tostring(w)
+    end
+    G7.STEP = nil
     -- ★ GN's NAMED SET EXCLUDES WHAT THE TREE'S OWN LITERAL-KEYED DYNAMIC _G STEPS REACH (CART-1820, flowpath FLOW-0040).
     -- The contract strict-global + computed-global (GN) says a dynamic `_G[k]` step never reaches a named global; LibStub's
     -- own `_G[LIBSTUB_MAJOR] = LibStub` (22 copies in WoW w1) and Altoholic's `_G[v]` over a list of frame names say
@@ -3966,10 +4005,19 @@ local function build(store, opts)
         local names = {}
         if #keys > 0 and next(G7.LITV) then names = G7.strlits(keys) end
         G7.GNEXCL = names
+        -- (a top made HERE is the contract's, not CAP's: G7.TOPWHY seeds its taint with its own reason, and what it escapes
+        -- is rooted 'contract-gn' — WoW w1's 8 AceGUI DropDown answers had blamed CAP for _G.LibStub, CART-1824)
+        G7.TOPWHY = {}
+        local function gntop(dst, name)
+            if top[dst] then return end
+            G7.TOPWHY[dst] = name
+            for o in each(dst) do if not escaped[o] and not G7.EROOTC[o] then G7.EROOTC[o] = 'contract-gn' end end
+            settop(dst)
+        end
         for name in sorted(names) do
             for o in pairs(G7.ISG) do
-                for dst in pairs((rd[o] or NOTHING)[name] or NOTHING) do settop(dst) end
-                for dst in pairs((G7.PARK[(rd[o] or NOTHING)[name] or false] or NOTHING)) do settop(dst) end
+                for dst in pairs((rd[o] or NOTHING)[name] or NOTHING) do gntop(dst, name) end
+                for dst in pairs((G7.PARK[(rd[o] or NOTHING)[name] or false] or NOTHING)) do gntop(dst, name) end
             end
         end
     end
@@ -3977,6 +4025,7 @@ local function build(store, opts)
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
     local TFROM = (opts.explain or opts.dump) and {} or nil
+    G7.TSTEP = TFROM and {} or nil -- (port -> the drain pop that first tainted it: G7.tkey's tie rule)
     local TCUR
     -- (refl-scope, CART-1817 stage 2: a REGION taint, seeded at a region top — G7.REG[p], the set of region tops whose
     -- holdings the port may hold. It is its own mark beside the ordinary taint (tainted[p] 'r': region only, reads as
@@ -3995,7 +4044,12 @@ local function build(store, opts)
         end
         if G7.TMODE == true then if t ~= true then tainted[p] = true; push = true end
         elseif not t then tainted[p] = 'r'; push = true end
-        if push then twork[#twork + 1] = p; if TFROM and (not t or t == 'r' and G7.TMODE == true) then TFROM[p] = TCUR end end
+        if push then
+            G7.tpush(p)
+            if TFROM and (not t or t == 'r' and G7.TMODE == true) then TFROM[p] = TCUR; if G7.STEP then G7.TSTEP[p] = G7.STEP end end
+        elseif TFROM and G7.STEP and G7.TSTEP[p] == G7.STEP and TFROM[p] ~= TCUR and G7.tkey(TCUR) < G7.tkey(TFROM[p]) then
+            TFROM[p] = TCUR -- (the same pop reached it twice: the smaller reason, whatever the walk order)
+        end
     end
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
@@ -4128,6 +4182,8 @@ local function build(store, opts)
         local q, i = { o0 }, 1
         escaped[o0] = true
         G7.EROOTC[o0] = 'escmore:' .. (why or '?')
+        -- (the tainted port whose rule released it, for the dump's pescport, CART-1824)
+        if G7.ESCREL then G7.ESCREL[o0] = type(TCUR) == 'number' and TCUR or (type(TCUR) == 'table' and TCUR[1]) or nil end
         -- (what escapes LATE is written by the outside too: the CART-1776 rule, fired here as well, CART-1783 — in OPEN
         -- mode under C1, per object below: its data fields, not the `[]` cell every named load reads)
         if not open and not field_hit['[]'] then
@@ -4141,19 +4197,26 @@ local function build(store, opts)
             esc[#esc + 1] = o
             G7.escreaders(o)
             if G7.DYNHIT then G7.cpsrchit(o) end
+            -- (the hit fields and the parameters are tainted under THEIR rules' reasons — they had taken whatever port or
+            -- seed set off the escape, CART-1824 — with that port as the link's parent, so a chain still walks back to why
+            -- the object escaped: { port, rule })
+            local tc = TCUR
+            local tp = type(tc) == 'number' and tc or type(tc) == 'table' and tc[1] or nil
+            local function why_(r) return tp and { tp, r } or r end
             for fk, fp in pairs(ofield[o] or NOTHING) do
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
-                if field_hit[fk] then taint(fp) end
-                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
+                if field_hit[fk] then TCUR = why_('the outside may write any field of what escaped'); taint(fp) end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; q[#q + 1] = c end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; if ESCAT then ESCAT[c] = ESCAT[c] or { o } end; q[#q + 1] = c end end
             local fpp = fnports[o]
             if fpp then -- (escret, as above: an escaped function's returns escape with it, CART-1753)
                 for _, r in pairs(fpp.rets or { fpp.ret }) do
-                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; q[#q + 1] = x end end
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
                 end
             end
-            if fpp and params_hit then G7.tparams(fpp) end
+            if fpp and params_hit then TCUR = why_('an escaped function may be called with anything: its parameters'); G7.tparams(fpp) end
+            TCUR = tc
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
@@ -4185,8 +4248,14 @@ local function build(store, opts)
     for _, p in ipairs(UNFIN) do taint(p) end
     -- (a guarded flow's chain test ran over prototypes the cut may have left incomplete)
     if OUT then for _, gf in ipairs(gfilters) do taint(gf[2]) end end
+    for p in pairs(top) do
+        if not (G7.RTOP and G7.RTOP[p]) then
+            local gn = G7.TOPWHY and G7.TOPWHY[p]
+            TCUR = gn and ('contract GN: _G.' .. gn .. ' is out of the named set (gn_exclude: a literal-keyed dynamic _G step reaches it)') or 'saturated (past CAP)'
+            taint(p)
+        end
+    end
     TCUR = 'saturated (past CAP)'
-    for p in pairs(top) do if not (G7.RTOP and G7.RTOP[p]) then taint(p) end end
     if G7.RTOP then
         TCUR = 'saturated (past CAP) in the reflection region'
         G7.REG, G7.RCAP, G7.RCAPD, G7.LOSTARG, G7.RESCT, G7.HSKIP = {}, { inspect = 0, mutate = 0, call = 0, handout = 0 }, {}, {}, {}, {}
@@ -4312,7 +4381,8 @@ local function build(store, opts)
     end
     ::drain::
     while #twork > 0 do
-        local p = twork[#twork]; twork[#twork] = nil
+        local p = G7.tpop()
+        if G7.TSTEP then G7.STEP = (G7.STEP or 0) + 1 end
         TCUR = p
         -- (a top whose holdings ESCAPED — G7.RESCT — is covered by the ordinary taint: it is no longer followed)
         G7.TMODE, G7.TREG, G7.HNOCALL = tainted[p], nil, nil
@@ -4462,7 +4532,7 @@ local function build(store, opts)
             if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
             for _, ap in ipairs(cl[1]) do
                 for o in each(ap) do G7.escmore(o, 'lost-call-argument') end
-                if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then twork[#twork + 1] = ap end end
+                if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then G7.tpush(ap) end end
             end
             TCUR = p
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
@@ -4494,6 +4564,9 @@ local function build(store, opts)
             for o in each(x) do if escaped[o] and not TNAME[o] and not fnports[o] and o ~= EXT and not G7.ISG[o] then return true end end
             return false
         end
+        -- (each rule its OWN reason: they had tainted with a stale TCUR — the last drained port or seed — so the first
+        -- cause pointed at an unrelated port, CART-1824)
+        TCUR = 'an access through a base that may hold an escaped table may run its escaped handler and raise (CART-1762/1769)'
         for _, ev in ipairs { { '__index', G7.LDL }, { '__newindex', G7.STL } } do
             if ALLOW[ev[1]] or meta_possible(ev[1]) then
                 for _, a in ipairs(ev[2]) do
@@ -4505,6 +4578,7 @@ local function build(store, opts)
         -- (a dynamic load `t[k]` through a base that may hold an ESCAPED table runs that table's escaped __index handler
         -- with k: k's objects escape, as a lost call's arguments do, CART-1764)
         if ALLOW['__index'] or meta_possible('__index') then
+            TCUR = 'a dynamic load through a base that may hold an escaped table hands its key to the escaped __index (CART-1764)'
             for _, dl in ipairs(G7.DYNL) do
                 local x, kp = dl[1], dl[2]
                 local eb = tainted[x]
@@ -4525,7 +4599,7 @@ local function build(store, opts)
                     if G7.hdispatch(t_, sk[3]) then
                         G7.RESCT[t_] = true; TCUR = sk[1]
                         for o in pairs(G7.RHB[t_]) do G7.escmore(o, 'region-call') end
-                        twork[#twork + 1] = sk[1] -- (its call rules, skipped while no handler could run)
+                        G7.tpush(sk[1]) -- (its call rules, skipped while no handler could run)
                         released = true
                     else keep[#keep + 1] = sk end
                 end
@@ -4535,7 +4609,7 @@ local function build(store, opts)
         for nm, ports in pairs(METAPEND) do
             if not ALLOW[nm] and meta_possible(nm) then
                 ALLOW[nm] = true; released = true
-                for _, q in ipairs(ports) do twork[#twork + 1] = q end
+                for _, q in ipairs(ports) do G7.tpush(q) end
             end
         end
         if released then goto drain end
@@ -4604,7 +4678,7 @@ local function build(store, opts)
     for _, g in ipairs(gorder) do
         local pr = g.pr
         local kind, v
-        partial_hit = false
+        partial_hit = false; G7.PESC = nil
         local anyunk, anyobj = false, false
         for _, r in ipairs(g.recvs) do
             if tainted[r] then partial_hit = partial_hit or r end
@@ -4638,7 +4712,7 @@ local function build(store, opts)
                     if dynfn(o, {}) then sat = true
                     elseif not next(mine) and escaped[o] then
                         -- (it may have gained the member where the solve no longer follows it)
-                        partial_hit = true
+                        partial_hit = partial_hit or true; G7.PESC = G7.PESC or o -- (kept: a tainted port found first is the answer's ptport, CART-1824)
                     end
                     if next(mine) then
                         other = true
@@ -4686,6 +4760,18 @@ local function build(store, opts)
         if v and partial_hit then
             v.partial = true; stats.partial = stats.partial + 1
             if TFROM and type(partial_hit) == 'number' then v.ptport = partial_hit end -- (the tainted port it read)
+            -- (or the ESCAPED receiver object that lacked the member, how it escaped — the carriers, then the port its
+            -- escape began at: ESCAT, CART-1824)
+            if TFROM and G7.PESC then
+                v.pesc = G7.PESC
+                local o, seen, via = G7.PESC, {}, {}
+                while ESCAT and o and not seen[o] do
+                    seen[o] = true
+                    local w = ESCAT[o]
+                    if type(w) == 'table' then via[#via + 1] = w[1]; o = w[1] else v.pescport = w or G7.ESCREL[o]; break end
+                end
+                v.pescvia = via
+            end
         end
         if v then verdicts[pr.c] = v end
     end
@@ -5227,6 +5313,7 @@ local function build(store, opts)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
             LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
+            LOCP = G7.LOCP, named = named, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)

@@ -666,6 +666,56 @@ function M.build(rec, X)
             if type(w) == 'string' then sdj[#sdj + 1] = ('[%d,%s]'):format(p, jstr(w)) end
         end
     end
+    -- ★ THE FIRST-CAUSE LINKS (CART-1824, flowpath FLOW-0097): every TFROM entry in dump terms, [node, parent | null,
+    -- reason | null]. A node is a variable id; ["h", site, field] / ["d", site] / ["k", site] a cell; ["err", fn] /
+    -- ["ret", fn, i] a function port; else ["p", port, {kind, loc, …}] — an internal port the dump has no variable for,
+    -- named by what made it: a function's parameter / vararg, a named port's key, and the statement the walk was at
+    local WNODE
+    local wfj = {}
+    if X.tfrom then
+        local fieldOf, errOf, retOf, parOf, keyOf = {}, {}, {}, {}, {}
+        for o, m in pairs(X.ofield) do if type(o) == 'number' then for f, fp in pairs(m) do local c = fieldOf[fp]; if not c or o < c[1] then fieldOf[fp] = { o, f } end end end end
+        for _, name in ipairs(keys) do
+            local fp = byname[name]
+            if fp then
+                if fp.err then errOf[fp.err] = FN(name) end
+                for i, r in ipairs(fp.rets or { fp.ret }) do retOf[r] = { FN(name), i - 1 } end
+                for i, pp in ipairs(fp.params or {}) do parOf[pp] = parOf[pp] or { FN(name), i - 1 } end
+                if fp.vararg then parOf[fp.vararg] = parOf[fp.vararg] or { FN(name), '...' } end
+            end
+        end
+        for k, q in pairs(X.named or {}) do if type(q) == 'number' and (not keyOf[q] or k < keyOf[q]) then keyOf[q] = k end end
+        WNODE = function (q)
+            if used[q] then return tostring(q) end
+            local fo = fieldOf[q]
+            if fo then
+                if fo[2] == '{k}' then return ('["k",%d]'):format(fo[1]) end
+                if fo[2] == '[]' then return ('["d",%d]'):format(fo[1]) end
+                return ('["h",%d,%d]'):format(fo[1], F(fo[2]))
+            end
+            if errOf[q] then return ('["err",%d]'):format(errOf[q]) end
+            if q == X.GERR then return '["err","chunk"]' end
+            if retOf[q] then return ('["ret",%d,%d]'):format(retOf[q][1], retOf[q][2]) end
+            local loc = X.LOCP and X.LOCP[q]
+            local d = { ('"loc":%s'):format(loc and jstr(loc) or 'null') }
+            local pa = parOf[q]
+            if pa then d[#d + 1] = ('"kind":"param","fn":%d,"i":%s'):format(pa[1], pa[2] == '...' and '"..."' or tostring(pa[2]))
+            elseif keyOf[q] then d[#d + 1] = '"kind":"named","key":' .. jstr(keyOf[q])
+            else d[#d + 1] = '"kind":"temp"' end
+            return ('["p",%d,{%s}]'):format(q, table.concat(d, ','))
+        end
+        local ps = {}
+        for q in pairs(X.tfrom) do if type(q) == 'number' then ps[#ps + 1] = q end end
+        table.sort(ps)
+        for _, q in ipairs(ps) do
+            local w = X.tfrom[q]
+            if type(w) == 'string' then wfj[#wfj + 1] = ('[%s,null,%s]'):format(WNODE(q), jstr(w))
+            elseif type(w) == 'number' then wfj[#wfj + 1] = ('[%s,%s,null]'):format(WNODE(q), WNODE(w))
+            elseif type(w) == 'table' then wfj[#wfj + 1] = ('[%s,%s,%s]'):format(WNODE(q), w[1] and WNODE(w[1]) or 'null', jstr(tostring(w[2])))
+            else wfj[#wfj + 1] = ('[%s,null,null]'):format(WNODE(q)) end
+        end
+        table.sort(wfj) -- (by the encoded node: a field port's number follows its creation, string-key order among it)
+    end
     -- answers
     local aj = {}
     for _, c in ipairs(X.calls) do
@@ -680,7 +730,11 @@ function M.build(rec, X)
             aj[#aj + 1] = { ('{"call":[%s,%d,%d],"kind":%s,"targets":%s,"partial":%s,"contracts":'):format(jstr(tostring(X.callrec.file(c))),
                 X.callrec.line(c) or 0, c.at and X.at.sc(c.at) or 0, jstr(v.kind), jarr(tg), v.partial and 'true' or 'false'),
                 v.contracts or {}, ci and FN(ia[1]), ci,
-                (',"ins":%s}'):format(ci and ('[%d,%d]'):format(FN(ia[1]), ci) or 'null') }
+                (',"ins":%s%s}'):format(ci and ('[%d,%d]'):format(FN(ia[1]), ci) or 'null',
+                    -- (why it is partial, CART-1824: the tainted port it read, or the escaped receiver that lacked the member,
+                    -- its carriers and the port its escape began at)
+                    ((WNODE and v.ptport) and (',"ptport":' .. WNODE(v.ptport)) or '')
+                    .. (v.pesc and (',"pesc":' .. tostring(v.pesc) .. ',"pescvia":' .. jarr(v.pescvia or {}) .. ((WNODE and v.pescport) and (',"pescport":' .. WNODE(v.pescport)) or '')) or '')) }
         end
     end
     -- gaps
@@ -805,7 +859,7 @@ function M.build(rec, X)
         .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
         .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
         .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
-        .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
+        .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']' .. (WNODE and (',"from":[' .. table.concat(wfj, ',') .. ']') or '')
         .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
         .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}'
         .. ((#rtopj > 0 or #rcj > 0 or #rtopkj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rtopk":' .. jarr(rtopkj) .. ',"rcells":[' .. table.concat(rcj, ',') .. ']'

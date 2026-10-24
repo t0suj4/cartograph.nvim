@@ -1428,3 +1428,22 @@ test('flowdump: a declared loader\'s chunk values are init\'s, under loader-args
     end
     ok(named and not cops.loadDyn, 'c.lua: `_G[addonName]` is a named load of Addon: ' .. vim.inspect(cops))
 end)
+
+-- (CART-1824, flowpath FLOW-0097: the taint's first-cause links are dumped — taint.from, [node, parent | null, reason |
+-- null] — a top the GN exclusion made carries its own reason, not CAP's, and two runs dump the same links)
+test('flowdump: taint.from links, the GN-exclusion top\'s reason, and a stable order (CART-1824)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local src = 'local MAJOR = "LibStub"\n_G[MAJOR] = function (n) return a end\nlocal L = LibStub("x")\nprint(use(L))\n'
+    local D = dump(src)
+    local from = D.solution.taint.from
+    ok(from and #from > 0, 'the links are dumped')
+    local gn, cap = false, false
+    for _, l in ipairs(from) do
+        if type(l[3]) == 'string' and l[3]:find('contract GN: _G.LibStub', 1, true) then gn = true end
+    end
+    ok(gn, 'the GN-exclusion top is seeded under the contract, not CAP: ' .. vim.inspect(from):sub(1, 400))
+    local partial
+    for _, a in ipairs(D.answers) do if a.partial then partial = a end end
+    ok(partial and partial.ptport ~= nil, 'a partial answer names the tainted port it read')
+    eq(vim.json.encode(from), vim.json.encode(dump(src).solution.taint.from), 'the same links on a second run')
+end)
