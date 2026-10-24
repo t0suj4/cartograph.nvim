@@ -2775,3 +2775,78 @@ test('flowtype: package.loaded with a literal module name is that module (CART-1
     for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
     ok(v and vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1'), 'the write through package.loaded["my.mod"] is the module\'s: ' .. vim.inspect(v))
 end)
+
+-- (CART-1817, scoped saturation: a region top escapes nothing — until the region USES what it found. A call through a
+-- region port reaches the module functions it reflected; their parameters must hold its arguments. The capability gate
+-- escapes what the region held, or `M.f`'s `p:m()` read a whole {B.m} while the loop handed it `a`)
+test('flowtype: refl-scope — a call through the reflection region escapes what it reached (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'require("ma").f(b)',
+        'for _, mod in pairs(package.loaded) do if type(mod) == "table" and mod.f then mod.f(a) end end' }, '\n') .. '\n'
+    local function v_of(exp, explain)
+        local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nfunction M.f(p) return p:m() end\nreturn M\n',
+            ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+        store.ingest(ts.extract(root))
+        local cap = flowtype.CAP
+        flowtype.CAP = 2
+        local ok_, R = pcall(flowtype.solve, store, { open = false, exp = exp, explain = explain })
+        flowtype.CAP = cap
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c), R.stats.rcap end end
+    end
+    local function sound(v) return v and (v.partial or vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1')) end
+    local v0 = v_of('pkg-modules')
+    ok(sound(v0), 'without the scope the saturated region escapes: partial or {A.m, B.m}: ' .. vim.inspect(v0))
+    -- (both with opts.explain and without: explain turns off the collapse of saturated ports into one ⊤ (CART-1742),
+    -- which had escaped what a region top held — the scope held, and this answer was a WHOLE {B.m}, only under explain)
+    for _, explain in ipairs({ false, true }) do
+        local v1, rcap = v_of('pkg-modules,refl-scope', explain)
+        ok(sound(v1), 'explain=' .. tostring(explain) .. ': the call through the region escapes what it reached: ' .. vim.inspect(v1))
+        ok(rcap and rcap.call >= 1, 'explain=' .. tostring(explain) .. ': the call is a capability the region used: ' .. vim.inspect(rcap))
+    end
+    -- (and a region that only INSPECTS what it found escapes nothing: M.f is no escaped function, its p whole {B.m})
+    SRC = SRC:gsub('if type%(mod%) == "table" and mod.f then mod.f%(a%) end', 'print(type(mod))')
+    local w0 = v_of('pkg-modules')
+    ok(w0 and w0.partial, 'without the scope the saturated region escapes M.f: partial: ' .. vim.inspect(w0))
+    for _, explain in ipairs({ false, true }) do
+        local w1, rcap = v_of('pkg-modules,refl-scope', explain)
+        ok(w1 and not w1.partial and #w1.targets == 1, 'explain=' .. tostring(explain) .. ': an inspecting region escapes nothing: whole {B.m}: ' .. vim.inspect(w1))
+        ok(rcap and rcap.call == 0 and rcap.mutate == 0 and rcap.handout == 0, 'explain=' .. tostring(explain) .. ': no capability: ' .. vim.inspect(rcap))
+    end
+end)
+
+-- (the region bit is its OWN bit: a store base that holds a region value AND an ordinary taint writes the reflected
+-- modules too. Read as the ordinary taint alone — an escaped function's parameter, tainted when the phase is seeded,
+-- then handed a module by the loop — the store hit the escaped universe's `.k`, where the module is not, and
+-- `require("ma").k` stayed whole {B.m})
+test('flowtype: refl-scope — a store through a port both region and tainted writes the region (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        -- (g escapes — h saturates at CAP 2 — so its parameter is tainted while the taint phase is seeded, before the
+        -- region's taint reaches it through the loop's call)
+        'local function g(x) x.k = a end', 'local function g2(x) end', 'local function g3(x) end',
+        'local h = g; if math.random() > 0.3 then h = g2 elseif math.random() > 0.5 then h = g3 end; h(1)',
+        'for _, mod in pairs(package.loaded) do g(mod) end',
+        'require("ma").k = b', 'local s = require("ma").k', 'print(s:m())' }, '\n') .. '\n'
+    for _, explain in ipairs({ false, true }) do
+        local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nreturn M\n',
+            ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+        store.ingest(ts.extract(root))
+        local cap = flowtype.CAP
+        flowtype.CAP = 2
+        local ok_, R = pcall(flowtype.solve, store, { open = false, exp = 'pkg-modules,refl-scope', explain = explain })
+        flowtype.CAP = cap
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        local callrec = require 'cartograph.callrec'
+        local v
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 's:m' then v = R.verdict(c) end end
+        ok(v and (v.partial or vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1')), 'explain=' .. tostring(explain) .. ': the loop may have written a into ma.k: ' .. vim.inspect(v))
+        ok(R.stats.rcap and R.stats.rcap.mutate >= 1, 'the store is a capability the region used: ' .. vim.inspect(R.stats.rcap))
+    end
+end)

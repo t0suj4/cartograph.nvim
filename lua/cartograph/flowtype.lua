@@ -57,7 +57,7 @@ M.EXPERIMENTS = {
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
     litkeys = 'opts.litkeys: constant-local keys and value-keyed instances (CART-1729)',
     ['loaded-globals'] = 'code a non-literal load returns reads and writes every global by name: the globals are tainted and their values escape — the sound reading; by default the dump states the contract `loaded-code` instead (CART-1796, the user\'s decision: vimruntime partial 384 -> 468, WoW w2 212 -> 513)',
-    ['refl-scope'] = 'MEASUREMENT, stage 1 of scoped saturation (CART-1817, flowpath FLOW-0093): a port of the REFLECTION REGION — seeded at the computed-key / pairs / keys reads of package.loaded, flagged along copies, arguments, returns, cells and reads through a non-library base (the CART-1816 label\'s channels) — that passes CAP becomes a region top (G7.RTOP): it saturates as today, but its contents are not added to the escaped universe',
+    ['refl-scope'] = 'MEASUREMENT, stage 1 of scoped saturation (CART-1817, flowpath FLOW-0093): a port of the REFLECTION REGION — seeded at the computed-key / pairs / keys reads of package.loaded, flagged along copies, arguments, returns, cells and reads through a non-library base (the CART-1816 label\'s channels) — that passes CAP becomes a region top (G7.RTOP): it saturates as today, but its contents are not added to the escaped universe. Stage 2: the taint phase carries a per-top REGION mark (G7.REG) beside the ordinary taint, and a region port that is written through, called through or handed to a lost call escapes what its tops held (R.stats.rcap). Measured 2026-10-24, self tree with pkg-modules, CAP 64: 18 tops, 14 used, 459 of 465 module tables escaped as without it - keys read from a reflected module carry its mark (`m .. "." .. k` is a __concat call)',
     ['refl-nocap'] = 'MEASUREMENT: the reflection region\'s ports — every port the walk made in a file that uses package.loaded reflectively (a computed key, pairs, handed on as a value) — are exempt from CAP, so saturation inside the region does not escape every module (flowpath on CART-1816). Measured 2026-10-24 on cartograph\'s own tree with pkg-modules, CAP 64: 81 s / 2.5 GB -> 267 s / 10.9 GB and no dump — the file-wide region uncaps mixalg\'s algebra walkers too; scoped saturation is flowpath\'s FLOW-0093',
     ['pkg-modules'] = 'package.loaded also lists the tree\'s modules by name (sound: without it `package.loaded.m.x = a` is lost) — measured: a computed-key read of package.loaded (hot-spots, mixalg, packmap, self_oracle) merges every module into one port, it saturates, and saturation escapes every module (repo 938 rows partial, oracle exact RIGHT 32 -> 2), CART-1797',
     ['libs-escape'] = 'the library tables (each library, the string library, package, package.loaded) follow the escape closure as ordinary objects — the reading without the clause libraries-never-escape: runtime oracle with ctx, string RIGHT 92 -> 52, typed 124 -> 43 (CART-1797)',
@@ -380,7 +380,7 @@ local function build(store, opts)
             elseif s and s.bs then for o in bs_iter(s) do ESCAT[o] = ESCAT[o] or p end
             elseif s then for o in pairs(s) do ESCAT[o] = ESCAT[o] or p end end
         end
-        if G7.RG and G7.RG[p] then G7.RTOP[p] = true -- (refl-scope: a region top escapes nothing, CART-1817)
+        if G7.RG and G7.RG[p] then G7.RTOP[p] = true; G7.rheld(s, p) -- (refl-scope: a region top escapes nothing, CART-1817)
         elseif type(s) == 'number' then escaped[s] = true
         elseif s and s.bs then for o in bs_iter(s) do escaped[o] = true end
         elseif s then for o in pairs(s) do escaped[o] = true end end
@@ -434,7 +434,7 @@ local function build(store, opts)
         return b
     end
     local function addobj(p, o)
-        if top[p] then if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end end; return end
+        if top[p] then if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end else G7.rheld(o, p) end; return end
         local s = pts[p]
         if s == nil then pts[p] = o; cnt[p] = 1
         elseif type(s) == 'number' then
@@ -465,7 +465,7 @@ local function build(store, opts)
     end
     -- the bitset d into q: word by word, what was new becomes q's delta
     local function addbits(q, d)
-        if top[q] then if not (G7.RTOP and G7.RTOP[q]) then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end end return end
+        if top[q] then if not (G7.RTOP and G7.RTOP[q]) then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end else G7.rheld(d, q) end return end
         local t = tobits(q)
         if t.nw < d.nw then bs_grow(t, d.nw) end
         local tb, db = t.bs, d.bs
@@ -501,12 +501,26 @@ local function build(store, opts)
     if opts.top1 ~= false and os.getenv('CARTOGRAPH_TOP1') ~= '0' and not ESCAT then
         G7.TOPL, G7.TOPS = -1, -2; top[-1] = true; top[-2] = true -- (no port number: the walk's numbering is unchanged)
     end
+    -- (refl-scope, CART-1817: a REGION TOP stays its own port — collapsed into ⊤ it escaped what it held, and the scope
+    -- held only under opts.explain, which turns the collapse off: stage 1's 459 -> 72 escaped modules were measured so,
+    -- the oracle without it. What each region top holds is recorded, G7.RHB[top], for the capability gate to escape —
+    -- its TABLES and FUNCTIONS: a top that held only values of a type, the module NAMES a walk over package.loaded's
+    -- keys collects, reflects nothing a store, a call or a hand-out could reach)
+    function G7.isrtop(q) return G7.RTOP ~= nil and G7.RTOP[q] == true end
+    G7.RHB = {}
+    function G7.rheld(s, p)
+        local h = G7.RHB[p]
+        local function one(o) if not TNAME[o] then if not h then h = {}; G7.RHB[p] = h end; h[o] = true end end
+        if type(s) == 'number' then one(s)
+        elseif s and s.bs then for o in bs_iter(s) do one(o) end
+        elseif s then for o in pairs(s) do one(o) end end
+    end
     function G7.resucc(p) -- p's saturated successors replaced by ⊤
         local s, T = succ[p], G7.TOPL
-        if type(s) == 'number' then if top[s] and s ~= T then succ[p] = T end; return end
+        if type(s) == 'number' then if top[s] and s ~= T and not G7.isrtop(s) then succ[p] = T end; return end
         if s == nil then return end
         local dead
-        for q in pairs(s) do if top[q] and q ~= T then dead = dead or {}; dead[#dead + 1] = q end end
+        for q in pairs(s) do if top[q] and q ~= T and not G7.isrtop(q) then dead = dead or {}; dead[#dead + 1] = q end end
         if dead then for i = 1, #dead do s[dead[i]] = nil end; s[T] = true end
     end
     -- a reader list's saturated readers are PARKED (G7.PARK[l]: a load's result port carries its own metadata — the
@@ -515,7 +529,7 @@ local function build(store, opts)
     G7.PARK, G7.FEDTOP = {}, {}
     function G7.rereaders(l)
         local dead
-        for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS then dead = dead or {}; dead[#dead + 1] = dst end end
+        for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS and not G7.isrtop(dst) then dead = dead or {}; dead[#dead + 1] = dst end end
         if dead then
             local pk = G7.PARK[l]
             if not pk then pk = {}; G7.PARK[l] = pk end
@@ -535,7 +549,7 @@ local function build(store, opts)
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
         if G7.RG and G7.RG[a] and not G7.RG[b] then G7.rgflag(b) end
-        if G7.TOPL and top[b] then b = G7.TOPL; if a == b then return end end -- CART-1742
+        if G7.TOPL and top[b] and not G7.isrtop(b) then b = G7.TOPL; if a == b then return end end -- CART-1742
         -- (a port's successors as its objects are: ONE is the port number itself, more a set — a set per source port was
         -- the census's second site, 0.64 M per run. The set is grown key by key, as before: its pairs ORDER is the
         -- propagation order, and a constructor would lay the hash out differently)
@@ -696,7 +710,7 @@ local function build(store, opts)
                 if top[q] then if spread then settop(dst) end return end
                 -- CART-1742: into ⊤, a field's objects are marked escaped ONCE: the first saturated reader stays
                 -- registered on it (parked) and the list's ⊤ marker takes what it gains later
-                if G7.TOPL and top[dst] then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
+                if G7.TOPL and top[dst] and not G7.isrtop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
                 local sq = pts[q]
                 local ts, tk = G7.TSRC, G7.TKIND
                 if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
@@ -3769,8 +3783,24 @@ local function build(store, opts)
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
     local TFROM = (opts.explain or opts.dump) and {} or nil
     local TCUR
+    -- (refl-scope, CART-1817 stage 2: a REGION taint, seeded at a region top — G7.REG[p], the set of region tops whose
+    -- holdings the port may hold. It is its own mark beside the ordinary taint (tainted[p] 'r': region only, reads as
+    -- partial; true: any escaped object too — the two universes are not nested, so an ordinary taint does not cover the
+    -- region). It propagates as taint does and fires none of the rules into the escaped universe; the capability gate in
+    -- the drain escapes what THOSE tops held once a region port would mutate, call or hand out what it holds. Per top:
+    -- a top of graph tables a walker over package.loaded's names was also handed — the self tree's — escaped every
+    -- module the other tops held, at the first write through the graph)
+    G7.TMODE, G7.TREG = true, nil
     local function taint(p)
-        if p and not tainted[p] then tainted[p] = true; twork[#twork + 1] = p; if TFROM then TFROM[p] = TCUR end end
+        if not p then return end
+        local t, push = tainted[p], false
+        if G7.TREG then
+            local r = G7.REG[p]
+            for top_ in pairs(G7.TREG) do if not (r and r[top_]) then if not r then r = {}; G7.REG[p] = r end; r[top_] = true; push = true end end
+        end
+        if G7.TMODE == true then if t ~= true then tainted[p] = true; push = true end
+        elseif not t then tainted[p] = 'r'; push = true end
+        if push then twork[#twork + 1] = p; if TFROM and (not t or t == 'r' and G7.TMODE == true) then TFROM[p] = TCUR end end
     end
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
@@ -3961,7 +3991,16 @@ local function build(store, opts)
     -- (a guarded flow's chain test ran over prototypes the cut may have left incomplete)
     if OUT then for _, gf in ipairs(gfilters) do taint(gf[2]) end end
     TCUR = 'saturated (past CAP)'
-    for p in pairs(top) do taint(p) end
+    for p in pairs(top) do if not (G7.RTOP and G7.RTOP[p]) then taint(p) end end
+    if G7.RTOP then
+        TCUR = 'saturated (past CAP) in the reflection region'
+        G7.REG, G7.RCAP, G7.RCAPD, G7.LOSTARG, G7.RESCT = {}, { inspect = 0, mutate = 0, call = 0, handout = 0 }, {}, {}, {}
+        -- (the region BIT only from a top that held a table or a function: past a top of names alone, a store, a call
+        -- or a hand-out meets no reflected object, and the ordinary rules cover what the port is — its taint stays 'r')
+        G7.TMODE = 'r'
+        for p in sorted(G7.RTOP) do G7.TREG = G7.RHB[p] and { [p] = true } or nil; taint(p) end
+        G7.TMODE, G7.TREG = true, nil
+    end
     -- (an ESCAPED function may be called with anything by whatever reached it — the E-reading's closure: its parameters
     -- are tainted from the start, not only once a call through a lost callee is seen. Every real corpus has one, so
     -- params_hit fired anyway; a program without one left an escaped method's parameter whole, CART-1768)
@@ -4046,6 +4085,9 @@ local function build(store, opts)
     while #twork > 0 do
         local p = twork[#twork]; twork[#twork] = nil
         TCUR = p
+        -- (a top whose holdings ESCAPED — G7.RESCT — is covered by the ordinary taint: it is no longer followed)
+        G7.TMODE, G7.TREG = tainted[p], nil
+        if G7.REG and G7.REG[p] then for top_ in pairs(G7.REG[p]) do if not G7.RESCT[top_] then G7.TREG = G7.TREG or {}; G7.TREG[top_] = true end end end
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
         for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
@@ -4055,6 +4097,31 @@ local function build(store, opts)
             if not l then l = {}; METAPEND[mm] = l end
             l[#l + 1] = p
             goto parked
+        end
+        if G7.TREG then
+            -- (the capability gate: a region port that a store or keyed copy writes through, a call is made through, or a
+            -- lost call is handed falls back to an escaping saturation — its region bound does not cover what that does.
+            -- After the park: a handler no metatable can hold yet — `__eq` of a comparison — is no call made, until its
+            -- name is released. The self tree's one region call was `idx ~= val` in self_oracle's value walker)
+            local cap = (stores[p] or G7.COPY[p]) and 'mutate' or calls[p] and 'call' or G7.LOSTARG[p] and 'handout'
+            if not cap then
+                if not G7.RCAPD[p] then G7.RCAPD[p] = true; G7.RCAP.inspect = G7.RCAP.inspect + 1 end
+            else
+                if G7.RCAPD[p] ~= cap then
+                    if G7.RCAPD[p] == true then G7.RCAP.inspect = G7.RCAP.inspect - 1 end
+                    G7.RCAPD[p] = cap; G7.RCAP[cap] = G7.RCAP[cap] + 1
+                end
+                if G7.TMODE == 'r' then
+                    tainted[p] = true; G7.TMODE = true
+                    if TFROM then TFROM[p] = 'a region port ' .. (cap == 'mutate' and 'written through' or cap == 'call' and 'called through' or 'handed to a lost call') .. ': what the region held escapes' end
+                end
+                -- (what the tops it carries held: this port may hold any of them)
+                for top_ in pairs(G7.TREG) do
+                    G7.RESCT[top_] = true
+                    for o in pairs(G7.RHB[top_]) do G7.escmore(o, 'region-' .. cap) end
+                end
+                TCUR = p
+            end
         end
         for _, st in ipairs(stores[p] or NOTHING) do
             local f = st[1]
@@ -4138,7 +4205,10 @@ local function build(store, opts)
             -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
             -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
             if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
-            for _, ap in ipairs(cl[1]) do for o in each(ap) do G7.escmore(o, 'lost-call-argument') end end
+            for _, ap in ipairs(cl[1]) do
+                for o in each(ap) do G7.escmore(o, 'lost-call-argument') end
+                if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then twork[#twork + 1] = ap end end
+            end
             TCUR = p
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
@@ -4157,6 +4227,7 @@ local function build(store, opts)
         end
         ::parked::
     end
+    G7.TMODE, G7.TREG = true, nil
     do -- (release the handler names that became possible, and drain again)
         local released = false
         -- (a load or store whose base may hold an ESCAPED table — the base tainted, or listing an escaped non-host table —
@@ -4204,6 +4275,14 @@ local function build(store, opts)
     local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
         files = #files, ports = N, objects = NO }
     stats.vinstances = G7.VINSTN
+    -- (refl-scope: what the region taint inspected, and the capabilities that fell back — DIAGNOSTIC counts: which port a
+    -- capability is first seen at depends on the drain order, string-keyed walks among it; which tops escape does not)
+    stats.rcap = G7.RCAP
+    if G7.RCAP then -- (and the region tops: all, those that held a table or a function, those whose holdings escaped)
+        local n, h, e = 0, 0, 0
+        for p in pairs(G7.RTOP) do n = n + 1; if G7.RHB[p] then h = h + 1 end; if G7.RESCT[p] then e = e + 1 end end
+        G7.RCAP.tops, G7.RCAP.tops_held, G7.RCAP.tops_escaped = n, h, e
+    end
     local function targets(o, m, out, seen)
         if seen[o] then return false end
         seen[o] = true
