@@ -2905,3 +2905,24 @@ test('flowtype: a global a literal-keyed dynamic _G step reaches is read as unkn
     local v3 = v_of('local k = ...\n_G[k] = a\nprint(use(Other))')
     ok(v3 and not v3.partial, 'a computed key reaches no named global under the contract (FLOW-0108): ' .. vim.inspect(v3))
 end)
+
+-- (CART-1818: escape_of answers how an object escaped — a saturated port, or LATE by a named rule (a lost call's argument)
+-- — or that it did not: both of the last had read '<- reached ?', and a census of escaped modules took one for the other)
+test('flowtype: escape_of names a late escape and a non-escape (CART-1818)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (h saturates at CAP 2: `h(t)` is a lost call, and t escapes LATE, in the taint phase)
+    local root = tree({ ['m.lua'] = 'local function g1(x) end\nlocal function g2(x) end\nlocal function g3(x) end\n'
+        .. 'local h = g1; if math.random() > 0.3 then h = g2 elseif math.random() > 0.5 then h = g3 end\n'
+        .. 'local t = {}\nh(t)\nlocal u = {}\nprint(u)\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, R = pcall(flowtype.of, store, { open = false, explain = true })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    local lt = R.escape_of(R.object('tbl:m.lua:4:10'))
+    ok(lt[#lt]:find('escaped late (escmore:lost-call-argument)', 1, true), 'handed to a lost call: ' .. table.concat(lt, ' | '))
+    local nu = R.escape_of(R.object('tbl:m.lua:6:10'))
+    eq('<- not escaped', nu[#nu], 'u never escaped')
+end)

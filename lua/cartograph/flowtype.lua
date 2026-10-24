@@ -4744,7 +4744,11 @@ local function build(store, opts)
                 out[#out + 1] = tostring(obinfo[o] or o)
                 local w = ESCAT and ESCAT[o]
                 if type(w) == 'table' then out[#out + 1] = '<- a field / prototype of'; o = w[1]
-                else out[#out + 1] = '<- reached ' .. (w and label(w) or '?') .. (w and top[w] and ' [saturated]' or ''); R._escport = w; break end
+                elseif w then out[#out + 1] = '<- reached ' .. label(w) .. (top[w] and ' [saturated]' or ''); R._escport = w; break
+                -- (no saturated port: escaped LATE — a lost call's argument, a store through a lost base: G7.EROOTC names
+                -- the rule — or not escaped at all. Both had read '<- reached ?', and a census took one for the other,
+                -- CART-1818)
+                else out[#out + 1] = escaped[o] and ('<- escaped late (' .. tostring(G7.EROOTC[o] or '?') .. ')') or '<- not escaped'; R._escport = nil; break end
             end
             return out
         end
