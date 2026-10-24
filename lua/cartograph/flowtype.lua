@@ -680,6 +680,12 @@ local function build(store, opts)
             if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
+            -- (a host RECORD's declared field, CART-1827: `debug.getinfo(1, 'S').source` is a string — the profile's
+            -- class_fields. Only a PRIMITIVE type is believed: debuginfo's `func: function` is the function asked about,
+            -- often the tree's own closure, and a fixed host site there would bind no call — the field side of
+            -- CART-1790's rule that a declared result is a host site only when it cannot be what the code handed in)
+            local ft = f ~= '#' and f ~= '[]' and G7.HFIELDS[tn] and G7.HFIELDS[tn][f]
+            if ft then ft = ft:gsub('%?$', ''); if SCALAR[ft] and ft ~= 'nil' then addobj(dst, typeobj(ft)) end end
             -- (an OPEN host type is an ordinary object too: what code stored on it is read back, CART-1761)
             if G7.hostkind(tn) ~= 'open' then return end
         end
@@ -1315,7 +1321,7 @@ local function build(store, opts)
     -- measured on vimruntime, open mode, unknown probes 303 -> 487 and solve 32 -> 49 s — fresh tables escape and the
     -- E-reading writes EXT into them; with a bare `table` as ONE shared object, 134 s. A named class (`lsp.Range`) is
     -- a table too, but its name does not say so
-    G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC = {}, {}, {}, {}
+    G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC, G7.HFIELDS = {}, {}, {}, {}, {}
     G7.HOSTMODS, G7.HOSTUSED = {}, {} -- (the host models' module ports; the keys a call bound to a model, CART-1785)
     G7.FNSIZE, G7.WALKBYTES = {}, 0 -- (a walked function's id -> its byte length; the tree's walked bytes)
     do
@@ -1327,6 +1333,7 @@ local function build(store, opts)
             for t, k in pairs(pr and pr.kinds or NOTHING) do if HKINDS[t] == nil then HKINDS[t] = k end end
             for t, v in pairs(pr and pr.types or NOTHING) do if type(v) == 'table' and v.kind and HKINDS[t] == nil then HKINDS[t] = v.kind end end
             for sk, c in pairs(pr and pr.creates or NOTHING) do if G7.CREATES[sk] == nil then G7.CREATES[sk] = c end end
+            for t, m in pairs(pr and pr.class_fields or NOTHING) do if G7.HFIELDS[t] == nil then G7.HFIELDS[t] = m end end
         end
         for t, k in pairs(opts.host_kinds or NOTHING) do HKINDS[t] = k end
         for sk, c in pairs(opts.creates or NOTHING) do G7.CREATES[sk] = c end

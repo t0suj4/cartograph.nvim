@@ -3024,3 +3024,36 @@ test('flowtype: a dynamic _G read sees the named global its literal key names (C
     eq('m.lua::g@0 whole', callee(3), 'the literal through a local: Foo alone')
     eq('m.lua::g@1 whole', callee(5), 'through a parameter: only the literal its caller passed')
 end)
+
+-- ★ A HOST RECORD'S FIELDS (CART-1827): `debug.getinfo(1, 'S').source` is a string — LuaLS's `---@class debuginfo` /
+-- `---@field source string`, distilled into the luajit profile's class_fields. Its receiver had been EMPTY, so `:sub`
+-- was the string method hedged (41 such on cartograph's own tree). Only a PRIMITIVE field is believed: `func` is the
+-- function asked about — this tree's own g — and a fixed host function there would bind `f()` to nothing, unhedged
+local function getinfo_case(src, line, dump)
+    local root = tree({
+        ['a.lua'] = 'local A = {}\nfunction A.sub(self) return 1 end\nreturn A\n',
+        ['b.lua'] = 'local B = {}\nfunction B.sub(self) return 2 end\nreturn B\n',
+        ['main.lua'] = src,
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = dump })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'main.lua' and c.at and atr.sl(c.at) == line then v = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    return v, dump and vim.json.decode(R.dump)
+end
+test('flowtype: a host record\'s primitive field has its declared type; debuginfo.func stays untyped (CART-1827)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (through a return: the extractor's own record rule, spec/lua.lua RECORD_FIELDS, follows a local, not a call)
+    local v = getinfo_case('local function src(i) return debug.getinfo(i, "S").source end\nlocal s = src(1)\nreturn s:sub(2)\n', 2)
+    eq('string', v and v.kind, 'source is a string: ' .. vim.inspect(v))
+    eq(false, v and v.partial or false, 'a flow, not the empty-receiver hedge: ' .. vim.inspect(v))
+    -- (the solve made no fixed host function for `.func`: `f()` may call g)
+    local _, D = getinfo_case('local function g() return 1 end\nlocal f = debug.getinfo(g, "f").func\nreturn f()\n', 2, true)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[#labels + 1] = x.label end
+    ok(not vim.tbl_contains(labels, 'type:function'), 'no host function site: ' .. table.concat(labels, ' '))
+end)

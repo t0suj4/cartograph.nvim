@@ -138,6 +138,8 @@ local meta_names = {}       -- owner -> member -> true, as DECLARED
 -- the block reader, the multi-line type refusal and the signature shape live in cartograph.metaread (shared with
 -- tools/nvimdistill.lua since 2026-09-27, so both distillers read an annotation block the same way)
 local R = require('cartograph.metaread').new()
+local annot = require('cartograph.annot')
+local class_fields, n_cfield = {}, 0
 
 local meta_files = {}
 if META ~= '' and vim.fn.isdirectory(META) == 1 then
@@ -196,6 +198,25 @@ for _, path in ipairs(meta_files) do
     if disabled then
         n_disabled = n_disabled + 1
         disabled_files[#disabled_files + 1] = rel
+    else
+        -- A CLASS'S FIELDS (CART-1827): `---@class debuginfo` and the `---@field source string` lines under it, as
+        -- declared — the claim in full; a consumer decides which it may believe (flowtype takes the primitive ones)
+        local cls
+        for _, l in ipairs(lines) do
+            local tag, body = l:match('^%-%-%-%s*@(%a+)%s*(.*)$')
+            if not l:match('^%-%-%-') or not live(nil, l) then cls = nil
+            elseif tag == 'class' then
+                local r = annot.parse_body('class', body)
+                cls = r and r.name
+            elseif tag == 'field' and cls then
+                local r = annot.parse_body('field', body)
+                if r and r.name and r.type then
+                    class_fields[cls] = class_fields[cls] or {}
+                    class_fields[cls][r.name] = r.type .. (r.opt and '?' or '')
+                    n_cfield = n_cfield + 1
+                end
+            end
+        end
     end
 end
 
@@ -327,6 +348,8 @@ local prof = {
     -- floor, so "5.4 has this and we do not" stays answerable (it is the raw material
     -- of a version diff) without ever being served as this runtime's signature.
     sigs_absent = next(absent) and absent or nil,
+    -- the fields a declared CLASS carries, by type (CART-1827): a host value of that type read by field name
+    class_fields = next(class_fields) and class_fields or nil,
     sig_root = (n_sig > 0) and META or nil,
     sig_kind = (n_sig > 0) and 'annotation' or nil,
     -- WHETHER A SOURCE WAS PRESENT AT ALL — so "this member has no signature" and
@@ -342,6 +365,7 @@ for _ in pairs(nsset) do nns = nns + 1 end
 for _ in pairs(vocab) do nvocab = nvocab + 1 end
 
 print(('luadistill — %s'):format(version))
+print(('  class fields     %d'):format(n_cfield))
 print(('  free functions   %d'):format(nfree))
 print(('  namespaces       %d  (%s)'):format(nns,
     table.concat((function ()
