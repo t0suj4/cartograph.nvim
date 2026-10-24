@@ -21,12 +21,18 @@
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ] } ... ],
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
 --                  ctx = nil, live = nil,
---                  taint = { ports, seeds } },
+--                  taint = { ports, seeds, from } },
+--       from (CART-1824): every first-cause link, [node, parent | null, reason | null], sorted by node — a node is a var,
+--       ["h", site, field] / ["d", site] / ["k", site] a cell, ["err", fn] / ["ret", fn, i] a function port, ["p", port,
+--       { kind, loc }] an internal port (its walk statement); a { trigger, rule } link names the rule and the port that
+--       set it off (escmore's fields / parameters); deterministic (the drain pops the lowest port),
 --     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
 --       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
 --     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,
 --       ins = [fn, index] | null — the CALL instruction the answer is about: index is 0-based in that function's dumped
---       body; null when the walk emitted none (CART-1725, flowpath C.4) } ... ] }
+--       body; null when the walk emitted none (CART-1725, flowpath C.4); a partial one's ptport (the tainted node it read)
+--       and pesc / pescvia / pescport (an escaped receiver lacking the member, its carriers, its escape's port), CART-1824
+--       } ... ] }
 -- * FIELD IDS are the Lua instance's where it names them: 100 the metatable slot (flowtype's hidden `\1mt`), 101
 --   `__index`, 102 `__newindex`, 103 `__call`, 105 `__gc`, 106 `__mode`; 104 and 107..109 are never emitted (evStoreLook
 --   and the ghosts). Every other field name is interned at 0..99, then 110 on; names.fields[id + 1] is its name (JSON
