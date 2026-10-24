@@ -1602,6 +1602,7 @@ local function build(store, opts)
             for _, o in dit_(d) do if not (G7.ISG[o] or G7.LIBSITES[o] or G7.PKGL[o]) then G7.rgflag(dst); return end end
         end
     else G7.RG, G7.RTOP = nil, nil end
+    G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.LIBSITES, G7.PKGL = {}, {}
@@ -2915,7 +2916,16 @@ local function build(store, opts)
                 end
                 return p
             end
-            if t == 'vararg_expression' then local f = fnstack[#fnstack]; return f and f.vararg or new() end
+            -- (a file CHUNK's `...` is what its host passes, CART-1822: one port per file, tainted below as a lost
+            -- caller's arguments are — it was a fresh empty port per use, so `local _, ns = ...; ns.f()` read whole)
+            if t == 'vararg_expression' then
+                local f = fnstack[#fnstack]
+                if f then return f.vararg end
+                if G7.HOSTWALK then return new() end
+                local p = port('va:chunk:' .. file)
+                G7.CHUNKVA[file] = p
+                return p
+            end
             if t == 'dot_index_expression' then
                 -- (refl-nocap: `package.loaded` used as a VALUE — not under a literal key or a field name — makes this file a
                 -- reflecting one)
@@ -4112,6 +4122,8 @@ local function build(store, opts)
         params_hit = true
         for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end
     end
+    TCUR = 'a file chunk\'s `...`: what its host passes (CART-1822)'
+    for _, p in pairs(G7.CHUNKVA) do taint(p) end
     TCUR = 'sinf'
     for r in pairs(sinf) do taint(r) end
     TCUR = 'self seeded from its method declaration: the host may call it with another object'

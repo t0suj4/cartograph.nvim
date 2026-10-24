@@ -2926,3 +2926,24 @@ test('flowtype: escape_of names a late escape and a non-escape (CART-1818)', fun
     local nu = R.escape_of(R.object('tbl:m.lua:6:10'))
     eq('<- not escaped', nu[#nu], 'u never escaped')
 end)
+
+-- (CART-1822: a file chunk's `...` is what its HOST passes — one port per file, read as a lost caller's arguments. It was
+-- a fresh empty port per use: WoW's `local _, ns = ...` read nothing, so a call through the addon's private table was
+-- whole with no callee)
+test('flowtype: a file chunk\'s `...` is its host\'s arguments, not nothing (CART-1822)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local name, ns = ...\nns.f = function () return 1 end\n',
+        ['b.lua'] = 'local name, ns = ...\nlocal x = ns.f()\nlocal t = { ... }\nlocal y = t[1].g()\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, allcallees = true })
+    vim.fn.delete(root, 'rf')
+    local function how(line, name)
+        for _, c in ipairs(store.data.calls) do
+            if c.line == line and (c.full or c.callee) == name then local _, h = R.callee_of(c); return h end
+        end
+    end
+    eq('partial', how(1, 'ns.f'), 'a call through the host-passed table is no whole answer')
+    eq('partial', how(3, 't[1].g'), 'nor through `{ ... }`: every use is the one port')
+end)
