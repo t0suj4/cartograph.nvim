@@ -1279,3 +1279,20 @@ test('flowdump: refl-scope — a key set the region writes is in rkeys (CART-181
     ok(t, 'the table t: ' .. vim.inspect(vim.tbl_map(function (x) return x.label end, D.sites)))
     ok(D.solution.rkeys and vim.tbl_contains(D.solution.rkeys, t), 'its key set is the region\'s: ' .. vim.inspect(D.solution.rkeys))
 end)
+
+-- (CART-1810: `ver` is the analysed code's Lua version — its profile's lua_version, 51 when none is declared: flowpath's
+-- core keys comparison semantics on it. It had been written 51 for Factorio's 5.2 too)
+test('flowdump: ver is the profile\'s Lua version (CART-1810)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function ver_of(profile)
+        local root = tree({ ['m.lua'] = CLASSES })
+        store.ingest(ts.extract(root))
+        if profile then store.data.profile = profile end
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        return vim.json.decode(R.dump).ver
+    end
+    eq(51, ver_of(nil), 'no profile: Lua 5.1')
+    eq(51, ver_of('nvim'), 'nvim declares none: 5.1 (LuaJIT)')
+    eq(52, ver_of('lua-factorio'), 'Factorio: 5.2')
+end)

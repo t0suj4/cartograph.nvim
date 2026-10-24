@@ -13,7 +13,7 @@
 -- layer is FLOW C.3. The answers in the dump are that run's.
 --
 -- FORMAT 1 (CORE.md §5, with these decisions — revisable with the reader):
---   { format = 1, lang = 'lua', ver = 51, cartograph = <sha|nil>, corpus = { root, sha }, mode = 'closed', instances = false,
+--   { format = 1, lang = 'lua', ver = 51 (the profile's lua_version: 52 for Factorio's 5.2), cartograph = <sha|nil>, corpus = { root, sha }, mode = 'closed', instances = false,
 --   (cartograph: the PRODUCER's commit — the repo flowtype.lua is in; corpus.sha: the analysed tree's own commit, null
 --   when its root is not a repository's top level)
 --     names = { fields = [...], functions = [...] },
@@ -732,7 +732,10 @@ function M.build(rec, X)
     local fns = {}
     for i, n in ipairs(fnlist) do fns[i] = jstr(n) end
     -- (the solve's real mode — open or closed: it had been written "closed" whatever the solve was, CART-1777)
-    put(('{"format":1,"lang":"lua","ver":51,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
+    -- (`ver`: the analysed code's Lua version, its profile's lua_version — 51 when it declares none; flowpath's
+    -- core keys comparison semantics on it, and certifies 51 only, CART-1810)
+    put(('{"format":1,"lang":"lua","ver":%d,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
+        X.LUAVER or 51,
         X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
         jstr(X.MODE or 'closed')))
     put('"names":{"fields":[' .. table.concat(fields, ',') .. '],"functions":[' .. table.concat(fns, ',') .. ']},')
