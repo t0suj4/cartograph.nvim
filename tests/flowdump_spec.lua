@@ -1259,3 +1259,23 @@ test('flowdump: refl-scope — a tainted port the region reaches is in rtop (CAR
     ok(x and vim.tbl_contains(D.solution.taint.ports, x), 'g escaped: its parameter is tainted: ' .. tostring(x))
     ok(vim.tbl_contains(D.solution.rtop, x), 'and the region reaches it: rtop ' .. vim.inspect(D.solution.rtop))
 end)
+
+-- (a region value stored as a KEY — `t[m] = 1` over package.loaded's modules — makes t's key set the region's: rkeys,
+-- where flowpath adds UR to the key set; without it the store was refused, the self tree's resolve_requires, CART-1817)
+test('flowdump: refl-scope — a key set the region writes is in rkeys (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES .. 'local t = {}\nfor _, m in pairs(package.loaded) do t[m] = 1 end\nreturn t\n',
+        ['lua/ma.lua'] = 'return { f = 1 }\n', ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = 'pkg-modules,refl-scope' })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    local D = vim.json.decode(R.dump)
+    local t
+    for _, st in ipairs(D.sites) do if st.label == 'tbl:m.lua:6:10' then t = st.id end end
+    ok(t, 'the table t: ' .. vim.inspect(vim.tbl_map(function (x) return x.label end, D.sites)))
+    ok(D.solution.rkeys and vim.tbl_contains(D.solution.rkeys, t), 'its key set is the region\'s: ' .. vim.inspect(D.solution.rkeys))
+end)

@@ -431,12 +431,25 @@ function M.build(rec, X)
     -- (and a port the ordinary taint reached that ALSO carries a live top's mark: it may hold that top's holdings too —
     -- the self tree's `local m = package.loaded[k]` copied from the region into such a port, refused. A live top's mark
     -- is followed to its whole closure, so which ports carry it is no matter of the drain order)
-    local function rlive(p)
+    local function rseed(p)
         if X.RTOP == nil or p == nil then return false end
         if (X.RTOP[p] and not X.RESCT[p]) or X.tainted[p] == 'r' then return true end
         for t in pairs(X.REG and X.REG[p] or {}) do if not X.RESCT[t] then return true end end
         return false
     end
+    -- (the region's CELLS and KEY SETS: a field port, or a `{k}` key set, the region reached — a region value stored as
+    -- a key, `mod2key[modname] = key`, is in rkeys: flowpath adds UR to that key set, CART-1817)
+    local RV, RC, RK = {}, {}, {}
+    if X.RTOP then
+        for p in pairs(X.RTOP) do if rseed(p) then RV[p] = true end end
+        for p in pairs(X.tainted) do if rseed(p) then RV[p] = true end end
+        for o, m in pairs(X.ofield) do
+            for f, fp in pairs(m) do
+                if rseed(fp) then if f == '{k}' then RK[o] = true else RC[o] = RC[o] or {}; RC[o][f] = true end end
+            end
+        end
+    end
+    local function rlive(p) return p ~= nil and RV[p] == true end
     local vj, topj, rtopj, rcj = {}, {}, {}, {}
     local vlist = {}
     for p in pairs(used) do vlist[#vlist + 1] = p end
@@ -545,9 +558,10 @@ function M.build(rec, X)
                     goto nextf
                 end
                 if X.tainted[fp] then hxj[#hxj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
-                if rlive(fp) then rcj[#rcj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
+                local rcell = RC[o] ~= nil and RC[o][f] == true
+                if rcell then rcj[#rcj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
                 if X.top[fp] then
-                    if f ~= '[]' and not rlive(fp) then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)) end
+                    if f ~= '[]' and not rcell then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)) end
                 else
                     for b in X.each(fp) do ss[#ss + 1] = b end
                     if #ss > 0 then
@@ -732,7 +746,9 @@ function M.build(rec, X)
         .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']'
         .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
         .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}'
-        .. ((#rtopj > 0 or #rcj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rcells":[' .. table.concat(rcj, ',') .. '],"rroots":' .. jarr((function ()
+        .. ((#rtopj > 0 or #rcj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rcells":[' .. table.concat(rcj, ',') .. ']'
+            .. ',"rkeys":' .. jarr((function () local l = {}; for o in pairs(RK) do l[#l + 1] = o end; table.sort(l); return l end)())
+            .. ',"rroots":' .. jarr((function ()
             local set, l = {}, {}
             for p, h in pairs(X.RHB or {}) do if not X.RESCT[p] then for o in pairs(h) do set[o] = true end end end
             for pl in pairs(X.PKGL or {}) do for _, fp in pairs(X.ofield[pl] or {}) do for o in X.each(fp) do set[o] = true end end end
