@@ -582,6 +582,23 @@ test('flowdump: getmetatable is getmeta and a keyed copy copyKeyed, not gaps', f
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
 
+-- (CART-1772: newproxy(true)'s fresh metatable is setmetatable's — `setmeta` in the IR, no proto / hidden-store gap)
+test('flowdump: newproxy(true) is setmeta, not gaps', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(table.concat({ '',
+        'local u = newproxy(true)', 'local mt = getmetatable(u)', 'mt.__index = { x = a }', 'mt.__gc = function () end',
+        'return u.x' }, '\n') .. '\n')
+    local ops = {}
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do ops[i[1]] = true end end
+    eq(0, #D.gaps, 'no gap: ' .. vim.inspect(D.gaps))
+    ok(ops.setmeta, 'setmeta is emitted')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+    local kinds = {}
+    for _, s in ipairs(D.sites) do kinds[s.label:match('^(proxy%w*):') or ''] = s.kind end
+    eq('proxy', kinds.proxy, 'the userdata is a proxy site')
+    eq('table', kinds.proxymt, 'its metatable is a table site')
+end)
+
 -- (CART-1775, fixed environments: a tree that never calls setfenv has every environment _G — getfenv leaves no gap and
 -- the dump states `fixed-env`; one that does keeps the gap and claims nothing)
 test('flowdump: getfenv is no gap under fixed environments, and stays one when a setfenv may target a tree function (CART-1775, CART-1813)', function ()

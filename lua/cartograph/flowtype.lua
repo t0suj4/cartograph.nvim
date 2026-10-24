@@ -2521,10 +2521,15 @@ local function build(store, opts)
                 if argn[1] and txt(argn[1]) == 'true' then
                     local mp = new()
                     addobj(mp, newobj('proxymt:' .. key_of(n)))
-                    storec(up, '\1mt', mp)
-                    MTSTORES[#MTSTORES + 1] = { up, mp }
-                    proto(up, field(mp, '__index'), true)
-                    G7.GCPEND[#G7.GCPEND + 1] = { up, gerr() }
+                    -- (in the IR, setmetatable's: `setmeta up mp` — the slot store and the prototype are what setmeta
+                    -- does in the core, no gap of their own, CART-1772)
+                    G7.mu(function ()
+                        G7.ins({ 'setmeta', up, mp })
+                        storec(up, '\1mt', mp)
+                        MTSTORES[#MTSTORES + 1] = { up, mp }
+                        proto(up, field(mp, '__index'), true)
+                        G7.GCPEND[#G7.GCPEND + 1] = { up, gerr() }
+                    end)
                 end
                 return up
             end
