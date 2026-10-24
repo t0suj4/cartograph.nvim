@@ -1954,7 +1954,7 @@ local function build(store, opts)
     -- position its own port, created in the dump's init (G7.CHUNKINIT): one private table per package, shared by its
     -- files; the name a string whose text is the package's (G7.LITV, what CART-1820's key search reads). Any other
     -- file's `...` is unknown host values: tainted in the taint phase (G7.CHUNKVA), as a lost caller's arguments
-    G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS, G7.LOADERP, G7.LOADK = {}, {}, {}, {}, {}
+    G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS, G7.LOADERP, G7.LOADNAME = {}, {}, {}, {}, {} -- (LOADNAME: local port -> the loader's name; G7.LOADK is a dynamic load's key port)
     G7.LOADERA = {}
     function G7.loaderargs(file) -- (the declared loader's arguments for this file and its package, or nil; memoized)
         local m = G7.LOADERA[file]
@@ -2179,7 +2179,7 @@ local function build(store, opts)
             -- dynamic cell had given went to none)
             if G7.LITKEYS and k:type() == 'identifier' then
                 local p = lookup(txt(k))
-                local c = p and (G7.LOADK[p] or G7.CONSTK[p])
+                local c = p and (G7.LOADNAME[p] or G7.CONSTK[p])
                 if c then return c end
             end
             if isnum(k) then return '#' end
@@ -3131,7 +3131,7 @@ local function build(store, opts)
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
-                        if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADK[p] = G7.LOADERP[vals[i]] end
+                        if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADNAME[p] = G7.LOADERP[vals[i]] end
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
                         if ev and ev:type() == 'string' and v:type() == 'identifier' and not G7.REASG[txt(v)] then
