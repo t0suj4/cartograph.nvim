@@ -1660,7 +1660,7 @@ local function build(store, opts)
         addobj(ofp(lp, 'loaded'), pl)
         G7.PKGL[pl] = true
         addobj(ofp(pl, '_G'), e.GOBJ)
-        for lib, lo in pairs(e.LIBS) do if lib ~= 'package' and G7.NSSET[lib] then addobj(ofp(pl, lib), lo); G7.libsite(lo) end end
+        for lib, lo in sorted(e.LIBS) do if lib ~= 'package' and G7.NSSET[lib] then addobj(ofp(pl, lib), lo); G7.libsite(lo) end end
         addobj(ofp(pl, 'package'), lp)
         if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
         G7.libsite(lp); G7.libsite(pl)
@@ -1679,7 +1679,7 @@ local function build(store, opts)
         G7.PKGNAMED[nm] = f
     end
     function G7.pkgnamed_apply()
-        for nm, f in pairs(G7.PKGNAMED or NOTHING) do
+        for nm, f in sorted(G7.PKGNAMED or NOTHING) do
             for _, e in ipairs(G7.ENVL or NOTHING) do if e.PKGLOADED then edge(port('mod:' .. f), ofp(e.PKGLOADED, nm)) end end
         end
     end
@@ -3392,7 +3392,9 @@ local function build(store, opts)
     end
     -- (the tree's modules in every environment's package.loaded, by module name: what require returns, CART-1797)
     function G7.pkgmodules(e)
-        for nm, f in pairs(G7.MODFILE or NOTHING) do if e.PKGLOADED then edge(port('mod:' .. f), ofp(e.PKGLOADED, nm)) end end
+        -- (in ONE order: the names are strings, LuaJIT's pairs over them differs per run, and the self tree's solve with
+        -- pkg-modules read partial 2493 / 2507 in two runs, its port count 1,164,180 / 1,161,868)
+        for nm, f in sorted(G7.MODFILE or NOTHING) do if e.PKGLOADED then edge(port('mod:' .. f), ofp(e.PKGLOADED, nm)) end end
     end
     if G7.EXP['pkg-modules'] then for _, e in ipairs(G7.ENVL) do G7.pkgmodules(e) end end
     -- (opts.hostsummary: the store's profile's runtime Lua SUMMARIZED — cartograph.hostsummary — and applied at its calls
