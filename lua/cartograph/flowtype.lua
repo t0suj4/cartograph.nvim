@@ -2604,16 +2604,26 @@ local function build(store, opts)
             if fname == 'table.insert' and argn[1] then
                 local tp = expr(argn[1])
                 acc('array', argn[1], nil, tp)
+                local ia = { tp }
                 -- (Lua 5.3+'s table.insert is lua_seti: it runs __newindex; 5.1's is raw — taken as the 5.3 one, CART-1769)
                 for j = 2, #argn do
                     local v = expr(argn[j])
+                    ia[#ia + 1] = v
                     if j == #argn then
                         storec(tp, '#', v)
                         local kp = new(); addobj(kp, typeobj('number'))
                         metastore(tp, '#', kp, v, curerr())
                     end
                 end
-                return new()
+                -- (and, in the DUMP, the call itself — to the native, which has no code: a no-op beside the model. A
+                -- positional insert SHIFTS t's own elements, a write the model's store does not show; flowpath's in-tree
+                -- check counts a call to a writing builtin as the caller's write into its arguments, CART-1814 (d))
+                local r = new()
+                if G7.REC and G7.NATOBJ['table#insert'] then
+                    local cp = new(); addobj(cp, G7.NATOBJ['table#insert'])
+                    G7.ins({ 'call', { r }, cp, ia })
+                end
+                return r
             end
             local recvp, callee
             -- (the roster: a dotted callee `M.show(a)` READS the field show — a resolved call never evaluates it)

@@ -1178,3 +1178,26 @@ test('flowdump: a reflective read over package.loaded labels what flows from it,
     for _, x in ipairs(D0.answers) do if x.call[3] == 29 then a0 = x end end
     ok(a0 and not vim.tbl_contains(a0.contracts, 'reflection:package.loaded'), 'a plain answer does not')
 end)
+
+-- (CART-1814 (d), flowpath: a by-name table.insert keeps a call to the native beside its inlined model — a no-op in the
+-- denoted program; the in-tree check reads it as the caller's write into its arguments, the positional shift included)
+test('flowdump: table.insert by name keeps a call to the native beside its model (CART-1814)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local t = { b }\ntable.insert(t, 1, a)\n')
+    local nat
+    for _, x in ipairs(D.sites) do if x.label == 'native:table.insert' then nat = x.id end end
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local calls, stores = 0, 0
+    for _, F in ipairs(D.functions) do
+        if D.names.functions[F.id + 1] == 'chunk:m.lua' then
+            for _, ins in ipairs(F.body) do
+                if ins[1] == 'call' and nat and vim.tbl_contains(V[ins[3]] or {}, nat) then calls = calls + 1 end
+                if ins[1] == 'store' and D.names.fields[ins[3] + 1] == '#' then stores = stores + 1 end
+            end
+        end
+    end
+    eq(1, calls, 'one call whose callee holds native table.insert')
+    ok(stores >= 1, 'beside the model\'s store')
+    eq(0, flowcheck.check(D).failed, 'closed')
+end)
