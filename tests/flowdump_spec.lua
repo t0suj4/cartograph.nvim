@@ -1347,3 +1347,14 @@ test('flowdump: refl-scope — a key read from the region is rtopk, and its copy
     ok(copied and vim.tbl_contains(S.rtopk, copied), 'and the loop variable it is copied into')
     ok(not vim.tbl_contains(S.rtop, keysdst) and not vim.tbl_contains(S.rtop, copied), 'neither is rtop: ' .. vim.inspect(S.rtop))
 end)
+
+-- (CART-1820: the dump states the names a literal-keyed dynamic _G step reaches, gn_exclude — flowpath's GN takes them
+-- out of its named set)
+test('flowdump: gn_exclude names the globals a literal-keyed dynamic _G step reaches (CART-1820)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump('local MAJOR = "LibStub"\n_G[MAJOR] = function (n) return a end\nprint(LibStub("x"))\n')
+    local names = {}
+    for _, id in ipairs(D.gn_exclude or {}) do names[#names + 1] = D.names.fields[id + 1] end
+    eq({ 'LibStub' }, names, 'LibStub, and nothing else')
+    eq(nil, dump('print(use(b))\n').gn_exclude, 'no such step: no field')
+end)

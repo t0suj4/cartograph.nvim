@@ -2880,3 +2880,28 @@ test('flowtype: refl-scope — an operator over region values is no call where n
     local w = run('local H = setmetatable({}, { __concat = function (x, y) return x end })\nreturn { h = H }\n')
     ok(w and w.partial, 'a reflected object with __concat: the call may run it, M.f escapes: ' .. vim.inspect(w))
 end)
+
+-- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
+-- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
+-- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
+test('flowtype: a global a literal-keyed dynamic _G step reaches is read as unknown (CART-1820)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HDR = { 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+        'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+        'local function use(p) return p:m() end', 'use(b)' }
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat(HDR, '\n') .. '\n' .. src .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local function sound(v) return v and (v.partial or vim.tbl_contains(v.targets or {}, 'm.lua::A.m@1')) end
+    local v1 = v_of('local MAJOR = "LibStub"\n_G[MAJOR] = function (n) return a end\nprint(use(LibStub("x")))')
+    ok(sound(v1), 'a constant local as the key: LibStub may be what was stored: ' .. vim.inspect(v1))
+    local v2 = v_of('local frames = { "FrameA", "FrameB" }\nfor _, n in pairs(frames) do _G[n] = a end\nprint(use(FrameB))')
+    ok(sound(v2), 'a literal through a table: FrameB may be a: ' .. vim.inspect(v2))
+    local v3 = v_of('local k = ...\n_G[k] = a\nprint(use(Other))')
+    ok(v3 and not v3.partial, 'a computed key reaches no named global under the contract (FLOW-0108): ' .. vim.inspect(v3))
+end)

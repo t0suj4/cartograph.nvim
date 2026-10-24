@@ -782,6 +782,7 @@ local function build(store, opts)
         return dst
     end
     local function storec(x, f, v)
+        if f == '[]' and G7.NEXTK then G7.DYNS[#G7.DYNS + 1] = { x, G7.NEXTK } end -- (a dynamic store's key port: CART-1820)
         local l = stores[x]
         if not l then l = {}; stores[x] = l end
         l[#l + 1] = { f, v }
@@ -845,7 +846,7 @@ local function build(store, opts)
     end
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
-    G7.LOADK, G7.DYNL, G7.LDL, G7.STL = {}, {}, {}, {}
+    G7.LOADK, G7.DYNL, G7.LDL, G7.STL, G7.DYNS, G7.LITV = {}, {}, {}, {}, {}, {}
     local function bindcall(o, args, res, site, cerr)
         if site and clone_at then
             local inst = clone_at(site, o)
@@ -2944,7 +2945,7 @@ local function build(store, opts)
                 return field(base, kname)
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
-            if t == 'string' then local p = new(); addobj(p, STR); return p end
+            if t == 'string' then local p = new(); addobj(p, STR); local c = n:field('content')[1]; G7.LITV[p] = c and txt(c) or ''; return p end -- (its text: CART-1820)
             if t == 'function_call' then return callv(n) end
             if t == 'function_definition' then return func(n) end
             if t == 'table_constructor' then
@@ -3370,6 +3371,7 @@ local function build(store, opts)
             return dst
         end
         storec = function (x, f, v)
+            if f == '[]' and G7.NEXTK then G7.DYNS[#G7.DYNS + 1] = { x, G7.NEXTK } end -- (as r_storec's: it clears the key below)
             if on() and f ~= '{k}' then if f:byte(1) == 1 then G7.gap('hidden-store', { x, v }) else G7.ins({ G7.RAWSTORE and 'storeRaw' or 'store', x, f, v, f == '[]' and G7.NEXTK or nil }) end end
             G7.NEXTK = nil
             enter(); r_storec(x, f, v); leave()
@@ -3780,6 +3782,54 @@ local function build(store, opts)
         end
     end
     local tainted, twork = {}, {}
+    -- ★ GN's NAMED SET EXCLUDES WHAT THE TREE'S OWN LITERAL-KEYED DYNAMIC _G STEPS REACH (CART-1820, flowpath FLOW-0040).
+    -- The contract strict-global + computed-global (GN) says a dynamic `_G[k]` step never reaches a named global; LibStub's
+    -- own `_G[LIBSTUB_MAJOR] = LibStub` (22 copies in WoW w1) and Altoholic's `_G[v]` over a list of frame names say
+    -- otherwise, so every run that loads them was outside GE's certificate, and `LibStub(...)` called no function. The
+    -- string literals whose values may reach the KEY of a dynamic access on a globals table — a backward search over the
+    -- solved value flow (copies, cells and their readers; a saturated port is unknown text, FLOW-0108's) — leave GN's set:
+    -- every named read of them off a globals table is saturated (GE reads _G's dynamic cell as the escaped universe), and
+    -- the dump states them as gn_exclude. After the solve: what those reads already listed stays, a superset
+    do
+        local keys = {}
+        local function isg_base(x) for o in each(x) do if G7.ISG[o] then return true end end return false end
+        for _, l in ipairs({ G7.DYNL, G7.DYNS }) do for _, a in ipairs(l) do if not top[a[1]] and isg_base(a[1]) and not top[a[2]] then keys[#keys + 1] = a[2] end end end
+        local names = {}
+        if #keys > 0 and next(G7.LITV) then
+            -- (the reverse value flow among STRING-holding ports: copies, and a cell's readers back to the cell)
+            local rev, revr = {}, {}
+            for a, sa in pairs(succ) do
+                if has(a, STR) then for b in sit(sa) do if has(b, STR) then local l = rev[b]; if not l then l = {}; rev[b] = l end; l[#l + 1] = a end end end
+            end
+            for o, r in pairs(rd) do
+                for g, l in pairs(r) do
+                    if g ~= NS then for dst in pairs(l) do if has(dst, STR) then local m = revr[dst]; if not m then m = {}; revr[dst] = m end; m[#m + 1] = { o, g } end end end
+                end
+            end
+            local seen, q, i = {}, {}, 1
+            for _, k in ipairs(keys) do if not seen[k] then seen[k] = true; q[#q + 1] = k end end
+            local function visit(p) if p and not seen[p] and not top[p] and has(p, STR) then seen[p] = true; q[#q + 1] = p end end
+            while i <= #q do
+                local p = q[i]; i = i + 1
+                local s_ = G7.LITV[p]
+                if s_ then names[s_] = true end
+                for _, a in ipairs(rev[p] or NOTHING) do visit(a) end
+                for _, og in ipairs(revr[p] or NOTHING) do
+                    local m = ofield[og[1]] or NOTHING
+                    -- (a dynamic read reads every value cell; a named or key read its cell, and the dynamic cell)
+                    if og[2] == '[]' then for f, fp in pairs(m) do if f ~= '{k}' then visit(fp) end end
+                    else visit(m[og[2]]); visit(m['[]']) end
+                end
+            end
+        end
+        G7.GNEXCL = names
+        for name in pairs(names) do
+            for o in pairs(G7.ISG) do
+                for dst in pairs((rd[o] or NOTHING)[name] or NOTHING) do settop(dst) end
+                for dst in pairs((G7.PARK[(rd[o] or NOTHING)[name] or false] or NOTHING)) do settop(dst) end
+            end
+        end
+    end
     local PINC = {} -- (object -> the tainted __index source port that leaves its prototypes incomplete, CART-1709)
     -- (opts.explain: what tainted each port — the port it flowed from, `{ port, why }` for a rule that jumps, or a
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
@@ -3798,7 +3848,7 @@ local function build(store, opts)
         local t, push = tainted[p], false
         if G7.TREG then
             local r = G7.REG[p]
-            for top_ in pairs(G7.TREG) do if not (r and r[top_]) then if not r then r = {}; G7.REG[p] = r end; r[top_] = true; push = true end end
+            for top_ in pairs(G7.TREG) do if not (r and r[top_]) then if not r then r = {}; G7.REG[p] = r end; r[top_] = true; push = true; if os.getenv('RGDBG') then G7.RF = G7.RF or {}; G7.RF[p] = G7.RF[p] or {}; G7.RF[p][top_] = TCUR end end end
         end
         if G7.TMODE == true then if t ~= true then tainted[p] = true; push = true end
         elseif not t then tainted[p] = 'r'; push = true end
@@ -4159,6 +4209,16 @@ local function build(store, opts)
                         G7.HSKIP[#G7.HSKIP + 1] = { p, top_, METAH[p] }
                     else
                         esc_ = true
+                        if os.getenv('RGDBG') and G7.LOCP and tostring(G7.LOCP[p]):find('agent.lua') and tostring(G7.LOCP[top_]):find('mixalg.lua:63') then
+                            local q, n = p, 0
+                            local f = io.open(os.getenv('RGDBG'), 'w')
+                            while q and n < 80 do n = n + 1
+                                local w = G7.RF and G7.RF[q] and G7.RF[q][top_]
+                                f:write(tostring(q), '\t', tostring(type(q) == 'number' and G7.LOCP[q]), '\t', type(w) == 'table' and ('{' .. tostring(w[1]) .. ' ' .. tostring(w[2]) .. '}') or tostring(w), '\n')
+                                if type(w) == 'table' then q = w[1] elseif type(w) == 'number' then q = w else q = nil end
+                            end
+                            f:close()
+                        end
                         G7.RESCT[top_] = true
                         for o in pairs(G7.RHB[top_]) do G7.escmore(o, 'region-' .. cap) end
                     end
@@ -5015,7 +5075,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot

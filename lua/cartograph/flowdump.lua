@@ -22,6 +22,8 @@
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
 --                  ctx = nil, live = nil,
 --                  taint = { ports, seeds } },
+--     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
+--       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
 --     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,
 --       ins = [fn, index] | null — the CALL instruction the answer is about: index is 0-based in that function's dumped
 --       body; null when the walk emitted none (CART-1725, flowpath C.4) } ... ] }
@@ -765,6 +767,11 @@ function M.build(rec, X)
     table.sort(owl)
     -- names (last: everything above interned)
     local fields = {}
+    -- (gn_exclude, CART-1820: the names the tree's own literal-keyed dynamic _G steps reach — out of GN's named set,
+    -- their reads saturated in the solve; interned here, before the field names are written)
+    local gnx = {}
+    for nm in pairs(X.GNEXCL or {}) do gnx[#gnx + 1] = F(nm) end
+    table.sort(gnx)
     local maxf = 0
     for id in pairs(fnames) do if id > maxf then maxf = id end end
     for id = 0, maxf do fields[id + 1] = fnames[id] and jstr(fnames[id]) or 'null' end
@@ -799,6 +806,7 @@ function M.build(rec, X)
             return l
         end)())) or '') .. '},')
     put('"gaps":[' .. table.concat(gj, ',') .. '],')
+    if #gnx > 0 then put('"gn_exclude":' .. jarr(gnx) .. ',') end
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null') .. ',"host_models":[' .. table.concat(hmj, ',') .. ']'
