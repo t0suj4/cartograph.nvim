@@ -1296,3 +1296,25 @@ test('flowdump: ver is the profile\'s Lua version (CART-1810)', function ()
     eq(51, ver_of('nvim'), 'nvim declares none: 5.1 (LuaJIT)')
     eq(52, ver_of('lua-factorio'), 'Factorio: 5.2')
 end)
+
+-- (a region top whose holdings ESCAPE at a capability taints them as the ordinary taint does: an escaped module's cells
+-- are ⊤, never stated as region — run with the region's mark, `ma`'s `[]` cell and the callee of `require("ma").f`
+-- came out rcells / rtop and the checker refused the call fixture at 6 instructions, CART-1817)
+test('flowdump: refl-scope — what a capability escapes is not stated as region (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = CLASSES .. 'require("ma").f(b)\nfor _, mod in pairs(package.loaded) do if type(mod) == "table" and mod.f then mod.f(a) end end\n'
+    local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nfunction M.f(p) return p:m() end\nreturn M\n',
+        ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = 'pkg-modules,refl-scope' })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(ok_, R)
+    local D = vim.json.decode(R.dump)
+    local ma
+    for _, st in ipairs(D.sites) do if st.label:sub(1, 14) == 'tbl:lua/ma.lua' then ma = st.id end end
+    ok(ma and vim.tbl_contains(D.solution.taint.escaped, ma), 'the call through the region escaped ma')
+    for _, c in ipairs(D.solution.rcells or {}) do ok(c[1] ~= ma, 'an escaped module\'s cell is not region: ' .. vim.inspect(c)) end
+end)

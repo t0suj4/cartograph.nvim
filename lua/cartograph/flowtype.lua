@@ -3996,7 +3996,39 @@ local function build(store, opts)
     for p in pairs(top) do if not (G7.RTOP and G7.RTOP[p]) then taint(p) end end
     if G7.RTOP then
         TCUR = 'saturated (past CAP) in the reflection region'
-        G7.REG, G7.RCAP, G7.RCAPD, G7.LOSTARG, G7.RESCT = {}, { inspect = 0, mutate = 0, call = 0, handout = 0 }, {}, {}, {}
+        G7.REG, G7.RCAP, G7.RCAPD, G7.LOSTARG, G7.RESCT, G7.HSKIP = {}, { inspect = 0, mutate = 0, call = 0, handout = 0 }, {}, {}, {}, {}
+        -- (may an operand from top_'s holdings dispatch handler mm? The closure of what it held over cells and keys,
+        -- cached per top; true where an object's metatable slot is saturated or tainted, or a metatable it lists holds
+        -- anything under mm or under a dynamic key)
+        G7.RCLOS = {}
+        function G7.hdispatch(top_, mm)
+            local q = G7.RCLOS[top_]
+            if not q then
+                q = {}
+                local seen = {}
+                for o in pairs(G7.RHB[top_] or NOTHING) do if not seen[o] then seen[o] = true; q[#q + 1] = o end end
+                local i = 1
+                while i <= #q do
+                    local o = q[i]; i = i + 1
+                    for f, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not seen[x] then seen[x] = true; q[#q + 1] = x end end end
+                end
+                G7.RCLOS[top_] = q
+            end
+            for _, o in ipairs(q) do
+                local mp = ofield[o] and ofield[o]['\1mt']
+                if mp then
+                    if top[mp] or tainted[mp] then return true end
+                    for m in each(mp) do
+                        local mf = ofield[m]
+                        for _, k in ipairs({ mm, '[]' }) do
+                            local hp = mf and mf[k]
+                            if hp and (top[hp] or tainted[hp] or pts[hp] ~= nil) then return true end
+                        end
+                    end
+                end
+            end
+            return false
+        end
         -- (the region BIT only from a top that held a table or a function: past a top of names alone, a store, a call
         -- or a hand-out meets no reflected object, and the ordinary rules cover what the port is — its taint stays 'r')
         G7.TMODE = 'r'
@@ -4088,7 +4120,7 @@ local function build(store, opts)
         local p = twork[#twork]; twork[#twork] = nil
         TCUR = p
         -- (a top whose holdings ESCAPED — G7.RESCT — is covered by the ordinary taint: it is no longer followed)
-        G7.TMODE, G7.TREG = tainted[p], nil
+        G7.TMODE, G7.TREG, G7.HNOCALL = tainted[p], nil, nil
         if G7.REG and G7.REG[p] then for top_ in pairs(G7.REG[p]) do if not G7.RESCT[top_] then G7.TREG = G7.TREG or {}; G7.TREG[top_] = true end end end
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
@@ -4113,15 +4145,31 @@ local function build(store, opts)
                     if G7.RCAPD[p] == true then G7.RCAP.inspect = G7.RCAP.inspect - 1 end
                     G7.RCAPD[p] = cap; G7.RCAP[cap] = G7.RCAP[cap] + 1
                 end
-                if G7.TMODE == 'r' then
-                    tainted[p] = true; G7.TMODE = true
-                    if TFROM then TFROM[p] = 'a region port ' .. (cap == 'mutate' and 'written through' or cap == 'call' and 'called through' or 'handed to a lost call') .. ': what the region held escapes' end
+                -- (what the tops it carries held: this port may hold any of them. An OPERATOR's handler — a call through
+                -- METAH[p] — runs only for an operand whose metatable holds that key: a top whose objects, and what
+                -- their cells and keys hold, have none such is no call — `name .. '.' .. k` over a module's keys, where
+                -- the tree's one __concat is hazard.lua's (flowpath on CART-1817; its checker's handlersB / nhOK).
+                -- Decided again after every drain, G7.HSKIP: a metatable slot may be tainted later. A handler port the
+                -- region alone reached, with no top that may dispatch, makes NO call: the lost-call rules skip it,
+                -- G7.HNOCALL — its operands were handed to the handler, and escaped the region)
+                local esc_, tr, tm = false, G7.TREG, G7.TMODE
+                G7.TREG, G7.TMODE = nil, true -- (an escape taints as the ordinary taint does: no region mark, not 'r')
+                for top_ in pairs(tr) do
+                    if cap == 'call' and METAH[p] and not G7.hdispatch(top_, METAH[p]) then
+                        G7.HSKIP[#G7.HSKIP + 1] = { p, top_, METAH[p] }
+                    else
+                        esc_ = true
+                        G7.RESCT[top_] = true
+                        for o in pairs(G7.RHB[top_]) do G7.escmore(o, 'region-' .. cap) end
+                    end
                 end
-                -- (what the tops it carries held: this port may hold any of them)
-                for top_ in pairs(G7.TREG) do
-                    G7.RESCT[top_] = true
-                    for o in pairs(G7.RHB[top_]) do G7.escmore(o, 'region-' .. cap) end
-                end
+                G7.TREG, G7.TMODE = tr, tm
+                if esc_ then
+                    if G7.TMODE == 'r' then
+                        tainted[p] = true; G7.TMODE = true
+                        if TFROM then TFROM[p] = 'a region port ' .. (cap == 'mutate' and 'written through' or cap == 'call' and 'called through' or 'handed to a lost call') .. ': what the region held escapes' end
+                    end
+                elseif G7.TMODE == 'r' then G7.HNOCALL = true end
                 TCUR = p
             end
         end
@@ -4165,7 +4213,7 @@ local function build(store, opts)
         -- (CART-1697): `fhitg`, 0 wrong in routegen's 8,000 candidates, -21% partial answers on vimruntime and -10% on
         -- the repo. What the full rule had covered beyond _G was coincidence, now covered by the direct rules: the
         -- handler key (CART-1750) and the parked __call (CART-1751)
-        if calls[p] then
+        if calls[p] and not G7.HNOCALL then
             if not loadf then
                 loadf = {}
                 for _, l in pairs(loads) do for _, ld in ipairs(l) do loadf[ld[2]] = ld[1] end end
@@ -4196,13 +4244,13 @@ local function build(store, opts)
                 TCUR = p
             end
         end
-        if calls[p] and not params_hit then
+        if calls[p] and not params_hit and not G7.HNOCALL then
             params_hit = true
             if TFROM then TCUR = { p, 'a call through it may reach ANY escaped function: their parameters' } end
             for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end
             TCUR = p
         end
-        for _, cl in ipairs(calls[p] or NOTHING) do
+        for _, cl in ipairs(not G7.HNOCALL and calls[p] or NOTHING) do
             -- (a call the solve lost HANDS ITS ARGUMENTS to whatever it may reach — any escaped function, whose stores
             -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
             -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
@@ -4262,6 +4310,22 @@ local function build(store, opts)
                     for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] and not G7.NOESC[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
                 end
             end
+        end
+        -- (refl-scope: a handler call skipped for a top whose objects hold no such handler — again, every round)
+        if G7.HSKIP and #G7.HSKIP > 0 then
+            local keep = {}
+            for _, sk in ipairs(G7.HSKIP) do
+                local t_ = sk[2]
+                if not G7.RESCT[t_] then
+                    if G7.hdispatch(t_, sk[3]) then
+                        G7.RESCT[t_] = true; TCUR = sk[1]
+                        for o in pairs(G7.RHB[t_]) do G7.escmore(o, 'region-call') end
+                        twork[#twork + 1] = sk[1] -- (its call rules, skipped while no handler could run)
+                        released = true
+                    else keep[#keep + 1] = sk end
+                end
+            end
+            G7.HSKIP = keep
         end
         for nm, ports in pairs(METAPEND) do
             if not ALLOW[nm] and meta_possible(nm) then

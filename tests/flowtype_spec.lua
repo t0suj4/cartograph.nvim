@@ -2850,3 +2850,33 @@ test('flowtype: refl-scope — a store through a port both region and tainted wr
         ok(R.stats.rcap and R.stats.rcap.mutate >= 1, 'the store is a capability the region used: ' .. vim.inspect(R.stats.rcap))
     end
 end)
+
+-- (an OPERATOR over region values runs a handler only if an operand may be an object whose metatable holds that key: a
+-- tree with one unrelated __concat releases the handler name, and `n .. k` over a module's keys was a region call that
+-- escaped every module; flowpath on CART-1817)
+test('flowtype: refl-scope — an operator over region values is no call where no region object has the handler (CART-1817)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(extra)
+        local SRC = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'require("ma").f(b)',
+            'local C = setmetatable({}, { __concat = function (x, y) return "c" end })', 'print(C .. "x")',
+            'for n, mod in pairs(package.loaded) do for k in pairs(mod) do print(n .. "." .. k) end end' }, '\n') .. '\n'
+        local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nfunction M.f(p) return p:m() end\nreturn M\n',
+            ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = extra or 'return { y = 2 }\n' })
+        store.ingest(ts.extract(root))
+        local cap = flowtype.CAP
+        flowtype.CAP = 2
+        local ok_, R = pcall(flowtype.solve, store, { open = false, exp = 'pkg-modules,refl-scope' })
+        flowtype.CAP = cap
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c), R.stats.rcap end end
+    end
+    local v, rcap = run()
+    ok(v and not v.partial and #v.targets == 1, 'no reflected object has __concat: M.f stays unescaped, whole {B.m}: ' .. vim.inspect(v) .. vim.inspect(rcap))
+    -- (and a module whose object DOES carry __concat: the concatenation may run it, the region escapes)
+    local w = run('local H = setmetatable({}, { __concat = function (x, y) return x end })\nreturn { h = H }\n')
+    ok(w and w.partial, 'a reflected object with __concat: the call may run it, M.f escapes: ' .. vim.inspect(w))
+end)
