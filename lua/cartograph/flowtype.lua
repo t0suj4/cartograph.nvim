@@ -4059,6 +4059,13 @@ local function build(store, opts)
             TFROM[p] = TCUR -- (the same pop reached it twice: the smaller reason, whatever the walk order)
         end
     end
+    -- (the ports whose objects leave with an escaped function: its returns and its error port, CART-1753/1826)
+    function G7.escouts(fpp)
+        local l = {}
+        for _, r in pairs(fpp.rets or { fpp.ret }) do l[#l + 1] = r end
+        if fpp.err then l[#l + 1] = fpp.err end
+        return l
+    end
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
     -- (an escaped object's fields and prototypes escaped WITH it: the solve no longer follows it, so a load through a
@@ -4085,10 +4092,11 @@ local function build(store, opts)
             -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
             -- called it, and its result port, tainted, holds only escaped objects. `local r = h()` through a lost h
             -- that was mk returned mk's table, whose method r.go then ran unseen; the old `.f` rule had covered it by
-            -- coincidence, fhitg did not: CART-1753, flowpath's rule dialog)
+            -- coincidence, fhitg did not: CART-1753, flowpath's rule dialog). What it RAISES escapes too: the outside code
+            -- that calls it may catch the value (CART-1826: gencheck's fuel table, raised by a callback handed to loaded code)
             local fpp = fnports[o]
             if fpp then
-                for _, r in pairs(fpp.rets or { fpp.ret }) do
+                for _, r in pairs(G7.escouts(fpp)) do
                     for x in each(r) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
                 end
             end
@@ -4218,8 +4226,8 @@ local function build(store, opts)
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; if ESCAT then ESCAT[c] = ESCAT[c] or { o } end; q[#q + 1] = c end end
             local fpp = fnports[o]
-            if fpp then -- (escret, as above: an escaped function's returns escape with it, CART-1753)
-                for _, r in pairs(fpp.rets or { fpp.ret }) do
+            if fpp then -- (escret, as above: an escaped function's returns and what it raises escape with it, CART-1753/1826)
+                for _, r in pairs(G7.escouts(fpp)) do
                     for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
                 end
             end

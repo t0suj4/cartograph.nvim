@@ -1474,3 +1474,30 @@ test('flowdump: `self` variables do not move with the solve (CART-1825)', functi
     for _, F in ipairs(A.functions) do n = n + 1; if sb[F.id] == F.self then same = same + 1 end end
     eq(n, same, 'every function keeps its self variable')
 end)
+
+-- (CART-1826: what an ESCAPED function raises escapes with it — outside code that calls it may catch the value. escret
+-- had closed over its returns only: gencheck.lua's callback, saturated, raised a table the dump did not list as escaped,
+-- and the E-certificate's function closure refused the whole self tree)
+test('flowdump: an escaped function\'s raised value escapes with it (CART-1826)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({ '',
+        'local function lose(x) return x end',
+        'lose({})', 'lose({})', 'lose({})',
+        'local function spend() error({ fuel = true }) end',
+        'local cb = lose(function () spend() end)',             -- the callback escapes through lose's saturated port
+        'return cb' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local lab, fsite = {}, {}
+    for _, s in ipairs(D.sites) do lab[s.id] = s.label; if s.fn then fsite[s.fn] = s.id end end
+    local esc = {}
+    for _, o in ipairs(D.solution.taint.escaped) do esc[o] = true end
+    local cbfn, raised
+    for i, nm in ipairs(D.names.functions) do if tostring(nm):match('::lose#cb@') then cbfn = i - 1 end end
+    ok(cbfn and esc[fsite[cbfn]], 'the callback escaped: ' .. tostring(cbfn))
+    for _, e in ipairs(D.solution.err.fn) do if e[1] == cbfn then raised = e[2] end end
+    ok(raised and #raised > 0, 'the callback raises something')
+    for _, o in ipairs(raised) do ok(esc[o], 'what it raises escaped: ' .. tostring(lab[o])) end
+end)

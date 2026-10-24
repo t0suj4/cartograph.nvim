@@ -56,7 +56,9 @@
 --   of that function. `v` is grouped: [var, [sites...]]; a var in `top` SATURATED (past CAP): any site — the taint
 --   carries what it lost. Only variables the IR names are listed. `htop` [site, field] a field past CAP; `htaint`
 --   [site, field | null] a field the taint reached (null: `[]`) — closedness is required except at tainted ports.
---   `taint.escaped` [sites] the ESCAPED objects (a saturated port's, a lost store's value, unknown code's), and
+--   `taint.escaped` [sites] the ESCAPED objects (a saturated port's, a lost store's value, unknown code's), closed over
+--   fields, prototypes, and an escaped function's returns and what it raises (the E-certificate's function closure,
+--   CART-1753/1826), and
 --   `taint.escaped_root` [site, class] and `taint.outside` [port]: which escaped objects outside code can reach and
 --   which the solve only lost past CAP, and which tainted ports trace back to an outside seed (CART-1782).
 --   `taint.fields_hit` [field | null]: a store of that field through a tainted base reached it on every escaped object —
