@@ -407,7 +407,7 @@ function M.build(rec, X)
             if fp.vararg then params[#params + 1] = fp.vararg end
             body[#body + 1] = { 'ret', vars(fp.rets or { fp.ret }) }
         end
-        local self = newvar()
+        local self = fp and fp.dself or X.CHUNKSELF and X.CHUNKSELF[name] or newvar() -- (by the walk where it has one, CART-1825)
         emitfn(name, params, self, body, tags)
         if fp then fp._dumpself = self end
         byname[name] = byname[name] or false
@@ -415,7 +415,7 @@ function M.build(rec, X)
         rec._self = rec._self or {}
         rec._self[self] = sitesof[name]
     end
-    local iself = newvar()
+    local iself = X.ISELF or newvar()
     rec._self[iself] = {}
     local ij = {}
     for i, ins in ipairs(init) do ij[i] = ins end

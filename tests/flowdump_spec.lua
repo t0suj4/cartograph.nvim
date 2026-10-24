@@ -1447,3 +1447,30 @@ test('flowdump: taint.from links, the GN-exclusion top\'s reason, and a stable o
     ok(partial and partial.ptport ~= nil, 'a partial answer names the tainted port it read')
     eq(vim.json.encode(from), vim.json.encode(dump(src).solution.taint.from), 'the same links on a second run')
 end)
+
+-- (CART-1825, flowpath FLOW-0099: a function's `self` variable is numbered by the WALK — a solve that makes a different
+-- number of ports (here one cut short by fuel: fewer call instances) dumps the same program, so a base and a resumed
+-- dump meet without renaming; the variables a solve makes come after every walk port)
+test('flowdump: `self` variables do not move with the solve (CART-1825)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local src = table.concat({ '',
+        'local function iter(t) local i = 0; return function () i = i + 1; return t[i] end end',
+        'local t = { { v = function () return 1 end }, { v = function () return 2 end } }',
+        'for x in iter(t) do print(x.v()) end', 'for y in iter({ t[1] }) do print(y.v()) end',
+        'local co = coroutine.wrap(function () return 1 end)', 'print(co())' }, '\n') .. '\n'
+    local function run(fuel)
+        local root = tree({ ['m.lua'] = CLASSES .. src })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true, fuel = fuel })
+        vim.fn.delete(root, 'rf')
+        return vim.json.decode(R.dump), R
+    end
+    local A, RA = run(nil)
+    local B, RB = run(3)
+    ok(RA.stats.ports ~= RB.stats.ports, 'the solves made different ports: ' .. RA.stats.ports .. ' vs ' .. RB.stats.ports)
+    local sb = {}
+    for _, F in ipairs(B.functions) do sb[F.id] = F.self end
+    local n, same = 0, 0
+    for _, F in ipairs(A.functions) do n = n + 1; if sb[F.id] == F.self then same = same + 1 end end
+    eq(n, same, 'every function keeps its self variable')
+end)

@@ -1551,6 +1551,8 @@ local function build(store, opts)
         if not p then p = new(); named[key] = p end
         return p
     end
+    if G7.REC then G7.ISELF = port('s:init') end -- (init's `self`, by the walk too: CART-1825)
+    G7.CHUNKSELF = {} -- (a file chunk's dump `self`: 'chunk:<file>' -> its walk port)
     -- ★ THE GLOBALS ARE THE FIELDS OF ONE TABLE, _G (CART-1707): a global's port IS field `name` of GOBJ, so `_G.q = b`,
     -- `_G[k] = v` and `rawset(_G, …)` write it; a global READ is a load through GPORT, copied into a port of the
     -- reading FUNCTION (G7.GR: function id -> name -> port), so `setfenv(f, env)` adds env's field to f's reads — and
@@ -2268,6 +2270,9 @@ local function build(store, opts)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
+            -- (the dump's `self` variable, numbered by the WALK: allocated after the solve it shifted with every port a
+            -- re-solve made, and a resumed dump no longer denoted the same program as its base, CART-1825)
+            if G7.REC and not inst then fp.dself = port('s:' .. id) end
             if G7.REC then G7.REC.errp[fp.err] = true end
             fnports[o] = fp
             -- (a nested function inherits its parent's environment — a top-level one its file CHUNK's: G7.fenv)
@@ -2535,6 +2540,7 @@ local function build(store, opts)
                     local ps, rs = {}, {}
                     for k = 1, MULTI do ps[k] = new(); rs[k] = new() end
                     local wfp = { params = ps, vararg = new(), ret = rs[1], rets = rs, id = id, err = new() }
+                    if G7.REC then wfp.dself = port('s:' .. id) end -- (its dump `self` by the walk, CART-1825)
                     fnports[w] = wfp
                     local args = {}
                     for k = 1, MULTI do args[k] = ps[k] end
@@ -2610,6 +2616,7 @@ local function build(store, opts)
                 local ps, rs = {}, {}
                 for k = 1, MULTI do ps[k] = new(); edge(ps[k], gresarg()); rs[k] = new(); edge(gyield(), rs[k]) end
                 local wfp = { params = ps, ret = rs[1], rets = rs, id = id, err = new(), vararg = new() }
+                if G7.REC then wfp.dself = port('s:' .. id) end -- (its dump `self` by the walk, CART-1825)
                 fnports[w] = wfp
                 -- (the resume inside w: it CATCHES what the coroutine raises — into r1 — and w raises r1 again)
                 local okv, rerr = new(), new()
@@ -3291,6 +3298,7 @@ local function build(store, opts)
         -- are FIXED is the walk's scope resolution — a reference to the global setfenv or a load of a field named so,
         -- above (CART-1775): the text scan had counted a comment, a model's among them, CART-1785)
         G7.CHUNK = not G7.HOSTWALK and src:find('setfenv', 1, true) and ('chunk:' .. file) or nil
+        if G7.REC and not G7.HOSTWALK then G7.CHUNKSELF['chunk:' .. file] = port('s:chunk:' .. file) end -- (CART-1825)
         -- (the RECORDER's state is the enclosing walk's when this one is NESTED — a literal load's chunk, CART-1796: it was
         -- left off, and every instruction after `loadstring("…")` in the caller went missing from the dump — the checker
         -- certified a smaller program than the one that runs, CART-1808)
@@ -5313,7 +5321,7 @@ local function build(store, opts)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
             LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
-            LOCP = G7.LOCP, named = named, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
+            LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)
