@@ -3092,3 +3092,63 @@ test('flowtype: a profile function value whose return is a function type keeps t
     for _, x in ipairs(D.sites) do labels[#labels + 1] = x.label end
     ok(vim.tbl_contains(labels, 'type:(fun(table: table<K, V>, index?: K):K, V)'), 'the iterator is one type: ' .. table.concat(labels, ' '))
 end)
+
+-- ★ A GENERIC RETURN THROUGH A FUNCTION VALUE (CART-1830): a profile function taken as a value is typed with its
+-- parameters, and a call through it binds a generic return to the argument — `vim.spairs` as a value returns its
+-- table (T) and an iterator whose K / V are that table's keys / elements. Read as types they had been fixed host sites
+-- (`type:T` in 110 results on the self tree), so `v:m()` reached nothing
+test('flowtype: a generic return through a profile function value is its argument (CART-1830)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/main.lua'] = table.concat({
+            'local A, B = {}, {}',
+            'function A.m(self) return 1 end',
+            'function B.m(self) return 2 end',
+            'local sp = vim.spairs',
+            'local t = { a = setmetatable({}, { __index = A }) }',
+            'for k, v in sp(t) do v:m() end',
+            'return B' }, '\n') .. '\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and atr.sl(c.at) == 5 then v = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[x.label] = true end
+    ok(not labels['type:T'] and not labels['type:K'] and not labels['type:V'], 'no generic host site')
+    ok(whole(v, 'm') and tostring(v.targets[1]):match('A%.m'), 'v is t\'s element: ' .. vim.inspect(v))
+end)
+test('flowtype: a vararg generic is any of those arguments; an unbound generic is no host site (CART-1830)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/main.lua'] = table.concat({
+            'local A, B = {}, {}',
+            'function A.m(self) return 1 end',
+            'function B.m(self) return 2 end',
+            'local a = setmetatable({}, { __index = A })',
+            'local x = vim.F.if_nil(nil, a)',                       -- (`...: T` -> T: one of its arguments)
+            'x:m()',
+            'local y = table.foreach({ 1 }, function (k, v) return v end)', -- (T is the callback's: unbound)
+            'return B, y' }, '\n') .. '\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at and atr.sl(c.at) == 5 then v = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[x.label] = true end
+    ok(whole(v, 'm') and tostring(v.targets[1]):match('A%.m'), 'if_nil returns its argument: ' .. vim.inspect(v))
+    ok(not labels['type:T'], 'no host site for an unbound T')
+end)

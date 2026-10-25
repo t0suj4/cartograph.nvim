@@ -927,9 +927,16 @@ local function build(store, opts)
             -- declared types)
             local rl = TNAME[o] and funrets(TNAME[o])
             if rl and not G7.IRES[type(res) == 'table' and res[1] or res] then
-                if type(res) == 'table' then
-                    for i, r in ipairs(res) do local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end end
-                elseif rl[1] then local ro = G7.retobj(rl[1], res, nil, args); if ro then addobj(res, ro) end end
+                -- (a generic return is its argument — its element, its key: CART-1830)
+                local gen = G7.FUNGEN[TNAME[o]] or NOTHING
+                local function one(i, r)
+                    local g = gen[i]
+                    if g and g[2] == '...' then for j = g[1], #args do edge(args[j], r) end; return end
+                    if g then if args[g[1]] then edge(g[2] and field(args[g[1]], g[2]) or args[g[1]], r) end; return end
+                    local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end
+                end
+                if type(res) == 'table' then for i, r in ipairs(res) do one(i, r) end
+                elseif res then one(1, res) end
             end
             return
         end
@@ -1414,6 +1421,8 @@ local function build(store, opts)
         local gf
         if rt and rt:match('^[A-Z]%d?$') then
             for i, pm in ipairs(sg.params or NOTHING) do
+                -- (a VARARG of that type, `vim.F.if_nil(...: T): T`: any argument from there on, gf '...', CART-1830)
+                if pm.name == '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', ''):gsub('%s', '') == rt then g, gf = i, '...'; break end
                 local pt = pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', ''):gsub('%s', '')
                 if pt == rt then g = i; break end
                 -- (an ELEMENT of an argument: `T` returned where a parameter is `T[]` or `table<K, T>` — its `[]`; `K`
@@ -1429,6 +1438,7 @@ local function build(store, opts)
     -- (a function TYPE's returns: `fun(a: integer): TSNode, string` -> { 'TSNode', 'string' }; wrapped in parentheses
     -- too. Anything else is no function type: nil)
     local FUNRETS = {}
+    G7.FUNGEN = {} -- (a function type -> per return, the { argument index, '[]' | '{k}' | nil } a generic return binds)
     funrets = function (tn)
         local r = FUNRETS[tn]
         if r ~= nil then return r or nil end
@@ -1439,19 +1449,46 @@ local function build(store, opts)
         r = {}
         if list and list ~= '' then
             local depth, from = 0, 1
-            -- (read whole, CART-1828, two returns are no host type and give no value here, as before the list was read
-            -- whole: `...` (`fun():string, ...`, gmatch's iterator), and an ELEMENT its own parameters bind — V of
-            -- `fun(table: V[], …):integer, V` (ipairs's) or of `table<K, V>` — the argument's element: a fixed `type:V`
-            -- swallowed `item.text = …` on vimruntime's TSTreeView:iter() loop. A KEY (pairs's K) stays the fixed site it
-            -- was, as T does: binding generics is CART-1830)
-            local function element(t)
-                if SCALAR[t] then return false end
-                local e = t:gsub('%p', '%%%0')
-                return params:find(e .. '%[%]') or params:find(',%s*' .. e .. '%s*>')
+            -- (read whole, CART-1828: `...` (`fun():string, ...`, gmatch's iterator) is no one type, no value here. A
+            -- GENERIC return its own parameters type — T of `fun(orig: T): T`, V of `fun(table: V[], …):integer, V`,
+            -- K of `table<K, V>` — is the call's argument, its element or its key, as genarg binds a signature's
+            -- (CART-1653/1790): G7.FUNGEN, applied at the call. Read as a type it had been a fixed host site no code holds —
+            -- `type:V` swallowed `item.text = …` on vimruntime's TSTreeView:iter() loop, `type:T` sat in 110 results on
+            -- the self tree, CART-1830)
+            local gen, pts = {}, {}
+            do
+                local inner, d, f0 = params:sub(2, -2), 0, 1
+                local function param(x)
+                    local va = x:match('^%s*%.%.%.%s*:%s*(.-)%s*$')
+                    local ty = va or x:match('^%s*[%a_][%w_]*%??%s*:%s*(.-)%s*$') or x
+                    ty = ty:gsub('%?$', ''):gsub('%s', '')
+                    pts[#pts + 1] = va and ('...' .. ty) or x:match('^%s*%.%.%.') and '' or ty
+                end
+                for i = 1, #inner do
+                    local ch = inner:sub(i, i)
+                    if ch:match('[%(<{%[]') then d = d + 1
+                    elseif ch:match('[%)>}%]]') then d = d - 1
+                    elseif ch == ',' and d == 0 then param(inner:sub(f0, i - 1)); f0 = i + 1 end
+                end
+                if inner:match('%S') then param(inner:sub(f0)) end
+            end
+            local function bind(t)
+                if not t:match('^[A-Z]%d?$') then return nil end
+                for i, pt in ipairs(pts) do
+                    if pt == '...' .. t then return { i, '...' } end
+                    if pt == t then return { i } end
+                    if pt == t .. '[]' or pt:match('^table<[^,]+,(.+)>$') == t then return { i, '[]' } end
+                    if pt:match('^table<([^,]+),') == t then return { i, '{k}' } end
+                end
+                return nil
             end
             local function put(part)
                 local t = onetype((part:gsub('^%s*[%a_][%w_]*%s*:%s+', '')))
-                r[#r + 1] = t and t ~= '...' and not element(t) and t or false
+                local g = t and bind(t)
+                gen[#r + 1] = g or false
+                -- (a generic its parameters do not bind is `any`, as at a direct call)
+                if t and not g and t:match('^[A-Z]%d?$') then t = 'any' end
+                r[#r + 1] = t and t ~= '...' and not g and t or false
             end
             for i = 1, #list do
                 local ch = list:sub(i, i)
@@ -1460,6 +1497,7 @@ local function build(store, opts)
                 elseif ch == ',' and depth == 0 then put(list:sub(from, i - 1)); from = i + 1 end
             end
             put(list:sub(from))
+            G7.FUNGEN[tn] = gen
         end
         FUNRETS[tn] = r
         return r
@@ -2166,10 +2204,17 @@ local function build(store, opts)
             for i = #scopes, 1, -1 do if scopes[i][root] then return nil end end -- (a local of that name: not the profile's)
             local tys = {}
             for k, r in ipairs(sg.returns) do tys[k] = (type(r.type) == 'string' and r.type ~= '') and r.type or 'any' end
+            -- (its PARAMETERS too: a generic return binds to its argument at a call through the value, CART-1830 —
+            -- `fun(): T` had made `type:T`)
+            local ps = {}
+            for _, pm in ipairs(sg.params or NOTHING) do
+                local pt = type(pm.type) == 'string' and pm.type ~= '' and pm.type or 'any'
+                ps[#ps + 1] = (pm.name or '_') .. (pm.opt and '?' or '') .. ': ' .. pt
+            end
             -- (a return that is itself a function type is parenthesized: its own return list would run on into the next
             -- return — `vim.spairs`'s `fun(…):K, V` and T had read as K, V, T, CART-1828)
             for k, t in ipairs(tys) do if t:match('^fun%(') then tys[k] = '(' .. t .. ')' end end
-            return typeobj('fun(): ' .. table.concat(tys, ', '))
+            return typeobj('fun(' .. table.concat(ps, ', ') .. '): ' .. table.concat(tys, ', '))
         end
         local expr, stmt
         -- ★ THE ARRAY PART `#` (CART-1643): a key that is a NUMBER — a literal, `-x` / `#x`, arithmetic, a numeric-for or
@@ -2881,9 +2926,14 @@ local function build(store, opts)
                 if not hm and not ires then
                     for k, r in ipairs(resl) do
                         local gi, gf = genarg(key, k)
-                        if gi then if aps[gi] then edge(gf and field(aps[gi], gf) or aps[gi], r) end
+                        if gi and gf == '...' then for j = gi, #aps do edge(aps[j], r) end
+                        elseif gi then if aps[gi] then edge(gf and field(aps[gi], gf) or aps[gi], r) end
                         else
                             local rt = retk(key, k)
+                            -- (a generic no parameter binds — `table.foreach`'s T, its callback's result — is no type: `any`,
+                            -- tainted where arguments are passed, CART-1790's rule. As a fixed `type:T` it had sat in 402
+                            -- variables of the self tree, CART-1830)
+                            if rt and rt:match('^[A-Z]%d?$') then rt = 'any' end
                             local ro = rt and G7.retobj(rt, r, key, aps)
                             if ro then addobj(r, ro) end
                         end
