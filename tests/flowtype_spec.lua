@@ -3262,3 +3262,25 @@ test('flowtype: under the wow profile a WoW host call holds its declared type (C
     eq({}, n.s, 'no profile: nothing')
     eq({}, n.t, 'no profile: nothing')
 end)
+
+-- (CART-1829, flowpath FLOW-0042: the string-method hedge — a string method's result on an EMPTY receiver — is typed AND
+-- tainted. Experiment sinf-untainted keeps the type and drops the taint: the hedge-free variant a certifying consumer
+-- pairs with the default dump, promoting an answer whole where this one certifies)
+test('flowtype: experiment sinf-untainted types the hedged result without tainting it (CART-1829)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local T, U = {}, {}', 'function T:upper() return 1 end', 'function U:upper() return 2 end', 'T:upper()', 'U:upper()',
+        'local function f(n) local r = n:lower(); return r:upper() end', 'f(UNDEF)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function v_of(exp)
+        local R = flowtype.solve(store, { open = false, ctx = false, exp = exp })
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'r:upper' then return R.verdict(c), R end end
+    end
+    local d = v_of(nil)
+    local u, R = v_of('sinf-untainted')
+    vim.fn.delete(root, 'rf')
+    ok(d and d.kind == 'string' and d.partial, 'default: the hedge answers, partial: ' .. vim.inspect(d))
+    ok(u and u.kind == 'string' and not u.partial, 'hedge-free: the same answer, whole: ' .. vim.inspect(u))
+    ok(R.exp and R.exp['sinf-untainted'] ~= nil, 'the solve records the experiment: ' .. vim.inspect(R.exp))
+end)

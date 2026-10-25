@@ -52,6 +52,7 @@ M.CAP = 64
 -- ran in R.exp. An option a switch names (spread, order…) is set by it unless the caller set it.
 M.EXPERIMENTS = {
     ['no-sinf'] = 'the string-method rule on an EMPTY receiver does not fire (CART-1697: an order source?)',
+    ['sinf-untainted'] = 'the string-method rule on an EMPTY receiver types its result but does not TAINT it: the hedge-free variant — a certifying consumer (flowpath) pairs it with the default dump and promotes an answer whole there when this one certifies (CART-1829, flowpath FLOW-0042)',
     spread = 'opts.spread: a saturated port saturates what it feeds, never drops out (CART-1741)',
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
     selfseed = "opts.selfseed: a host-called method's self (CART-1715)",
@@ -4471,7 +4472,7 @@ local function build(store, opts)
     TCUR = 'a file chunk\'s `...`: what its host passes (CART-1822)'
     for _, p in pairs(G7.CHUNKVA) do taint(p) end
     TCUR = 'sinf'
-    for r in pairs(sinf) do taint(r) end
+    if not G7.EXP['sinf-untainted'] then for r in pairs(sinf) do taint(r) end end
     TCUR = 'self seeded from its method declaration: the host may call it with another object'
     for r in pairs(G7.SSEED) do taint(r) end
     TCUR = 'handed to unknown code (load, a module outside the tree): it may write any field'
