@@ -40,3 +40,19 @@ test('parsecache: one text larger than the budget is still cached (the newest al
     pc.clear()
     ok(hit, 'cached despite the budget')
 end)
+
+-- (CART-1664: the bound held for five texts but not for hundreds — eviction stopped on `#ORDER`, which after the front
+-- slots are nil'd is any border, so a 1,000-byte cap kept 200 of 400 entries)
+test('parsecache: the bound holds over hundreds of texts', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local saved = pc.MAX_BYTES
+    pc.clear()
+    pc.MAX_BYTES = 1000
+    for i = 1, 400 do pc.root(('local v%d = %d'):format(i, i), 'lua') end
+    local bytes, n = pc.size()
+    local newest = pc.peek('local v400 = 400', 'lua') ~= nil
+    pc.MAX_BYTES = saved
+    pc.clear()
+    ok(bytes <= 1000 and n < 100, ('bounded: %d bytes in %d entries'):format(bytes, n))
+    ok(newest, 'the newest text is cached')
+end)

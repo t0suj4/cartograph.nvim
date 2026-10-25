@@ -3725,9 +3725,9 @@ local function build(store, opts)
     end
     local gowalk, jswalk, jsfinish
     for _, f in ipairs(files) do
-        local fd = type(root) == 'string' and io.open(root .. '/' .. f, 'rb')
-        local src = fd and fd:read('a')
-        if fd then fd:close() end
+        -- (read as the extractor reads — CRLF normalized: the raw bytes of a CRLF file were another text, so it missed
+        -- the extractor's tree and was parsed and kept a second time — 386 of WoW w1's 396 files, CART-1664)
+        local src = type(root) == 'string' and require('cartograph.transport').read_source(root .. '/' .. f) or nil
         if src then
             if f:match('%.go$') then
                 gowalk = gowalk or require('cartograph.flowtype_go').walker(S, files)

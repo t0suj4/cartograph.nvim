@@ -16,19 +16,22 @@
 --   clear()                 drop every tree (a caller that knows it is done with a world)
 local M = {}
 
-local CACHE, ORDER, HEAD, BYTES = {}, {}, 1, 0
+local CACHE, ORDER, HEAD, TAIL, BYTES = {}, {}, 1, 0, 0
 M.stats = { hits = 0, misses = 0, evictions = 0 }
 M.MAX_BYTES = (tonumber(vim.env.CARTOGRAPH_PARSECACHE_MB or '') or 32) * 1048576
 
--- (ORDER is a FIFO of { lang, text } in insertion order; HEAD its oldest live slot)
+-- (ORDER is a FIFO of { lang, text } in insertion order; HEAD its oldest live slot, TAIL its newest. Never `#ORDER`:
+-- once the front slots are nil'd the length is any border, so the loop stopped early and the bound never held — a
+-- 1,000-byte cap kept 200 of 400 entries, and WoW w3's trees stayed whole past the 32 MB default, CART-1664)
 local function insert(lang, text, owner, root)
     local per = CACHE[lang]
     if not per then per = {}; CACHE[lang] = per end
     if per[text] then return end
     per[text] = { owner, root }
-    ORDER[#ORDER + 1] = { lang, text }
+    TAIL = TAIL + 1
+    ORDER[TAIL] = { lang, text }
     BYTES = BYTES + #text
-    while BYTES > M.MAX_BYTES and HEAD < #ORDER do -- (the newest entry always stays, whatever its size)
+    while BYTES > M.MAX_BYTES and HEAD < TAIL do -- (the newest entry always stays, whatever its size)
         local o = ORDER[HEAD]
         ORDER[HEAD] = nil
         HEAD = HEAD + 1
@@ -66,6 +69,6 @@ function M.size()
     return BYTES, n
 end
 
-function M.clear() CACHE, ORDER, HEAD, BYTES = {}, {}, 1, 0 end
+function M.clear() CACHE, ORDER, HEAD, TAIL, BYTES = {}, {}, 1, 0, 0 end
 
 return M
