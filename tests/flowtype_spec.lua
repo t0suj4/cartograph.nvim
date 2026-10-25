@@ -3057,3 +3057,38 @@ test('flowtype: a host record\'s primitive field has its declared type; debuginf
     for _, x in ipairs(D.sites) do labels[#labels + 1] = x.label end
     ok(not vim.tbl_contains(labels, 'type:function'), 'no host function site: ' .. table.concat(labels, ' '))
 end)
+
+-- ★ A FUNCTION TYPE'S RETURNS, READ WHOLE (CART-1828): `fun():string, ...` (string.gmatch's iterator) had been cut
+-- after the first return. Read whole, `...` is no host type — no fixed `type:...` site — while the first stays what it
+-- was (gmatch's capture a string). Nor is an ELEMENT the type's own parameters bind (ipairs's V): a fixed `type:V` would
+-- swallow a store into the loop's item (vimruntime's TSTreeView:iter())
+test('flowtype: a fun type\'s vararg and bound-element returns make no host site (CART-1828)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local _, D = getinfo_case(table.concat({
+        'local out = {}',
+        'for a, b in ("x=y"):gmatch("(%w+)=(%w+)") do out[a] = b end',
+        'local it = ipairs({ "p" })',
+        'local i, v = it({ "q" }, 0)',
+        'return out, i, v' }, '\n') .. '\n', 99, true)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[x.label] = true end
+    ok(labels['type:string'], 'the capture is a string')
+    ok(not labels['type:...'], 'no host site for `...`')
+    ok(not labels['type:V'], 'no host site for ipairs\'s V')
+end)
+-- (and a profile function taken as a VALUE is typed `fun(): <its returns>`: a return that is itself a function type is
+-- parenthesized, or `vim.spairs`'s `fun(…):K, V` and its T read as three returns, V a fixed host site)
+test('flowtype: a profile function value whose return is a function type keeps that type whole (CART-1828)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/main.lua'] = 'local sp = vim.spairs\nlocal it = sp({ a = 1 })\nlocal k, v = it({ a = 1 })\nreturn k, v\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[#labels + 1] = x.label end
+    ok(vim.tbl_contains(labels, 'type:(fun(table: table<K, V>, index?: K):K, V)'), 'the iterator is one type: ' .. table.concat(labels, ' '))
+end)

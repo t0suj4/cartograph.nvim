@@ -334,6 +334,11 @@ test('annot: the type is ONE token, and the comment after it is not part of it',
     -- a FUNCTION type keeps its return list — nvim's iterators are typed by it
     eq('fun(): TSNode, string', parse('---@return fun(): TSNode, string').type)
     eq('fun(): string', parse('---@return fun(): string the next line').type, 'the comment after the list is not in it')
+    -- (and with no space after the colon — LuaLS's own meta: `fun():any, ...` (io.lines), `fun(t: V[], i?: integer):integer, V`
+    -- (ipairs). The list had been cut after the first comma, keeping it: `fun():any,`, CART-1828)
+    eq('fun():any, ...', parse('---@return fun():any, ...').type)
+    eq('fun(table: V[], i?: integer):integer, V', parse('---@return fun(table: V[], i?: integer):integer, V').type)
+    eq('fun():string', parse('---@return fun():string the next line').type)
     local w = parse('---@return (fun(n: integer|nil): integer, TSNode): pattern id, match')
     eq('(fun(n: integer|nil): integer, TSNode)', w.type, 'wrapped: the colon after it names the value')
     eq(nil, w.multi)

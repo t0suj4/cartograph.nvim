@@ -76,8 +76,9 @@ function M.scan_type(s)
     local tok, rest = s:sub(1, i - 1), (s:sub(i + 1):gsub('^%s+', ''))
     -- A FUNCTION TYPE'S RETURN LIST is part of it: `fun(): TSNode, string` (nvim's TSNode:iter_children) was cut at the
     -- space to `fun():` — and the list goes on while a type ends with a comma. Wrapped, `(fun(): A, B):` ends with the
-    -- tag's name colon, which is no part of the type
-    if tok:match('^fun%b()%s*:$') then
+    -- tag's name colon, which is no part of the type. With no space after the colon the first return is in the token
+    -- already: `fun():any, ...` (LuaLS's io.lines) had been cut to `fun():any,` (CART-1828)
+    if tok:match('^fun%b()%s*:$') or tok:match('^fun%b()%s*:.*,$') then
         repeat
             local t
             t, rest = M.scan_type(rest)

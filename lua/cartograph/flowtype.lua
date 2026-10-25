@@ -1439,7 +1439,20 @@ local function build(store, opts)
         r = {}
         if list and list ~= '' then
             local depth, from = 0, 1
-            local function put(part) r[#r + 1] = onetype((part:gsub('^%s*[%a_][%w_]*%s*:%s+', ''))) or false end
+            -- (read whole, CART-1828, two returns are no host type and give no value here, as before the list was read
+            -- whole: `...` (`fun():string, ...`, gmatch's iterator), and an ELEMENT its own parameters bind — V of
+            -- `fun(table: V[], …):integer, V` (ipairs's) or of `table<K, V>` — the argument's element: a fixed `type:V`
+            -- swallowed `item.text = …` on vimruntime's TSTreeView:iter() loop. A KEY (pairs's K) stays the fixed site it
+            -- was, as T does: binding generics is CART-1830)
+            local function element(t)
+                if SCALAR[t] then return false end
+                local e = t:gsub('%p', '%%%0')
+                return params:find(e .. '%[%]') or params:find(',%s*' .. e .. '%s*>')
+            end
+            local function put(part)
+                local t = onetype((part:gsub('^%s*[%a_][%w_]*%s*:%s+', '')))
+                r[#r + 1] = t and t ~= '...' and not element(t) and t or false
+            end
             for i = 1, #list do
                 local ch = list:sub(i, i)
                 if ch:match('[%(<{%[]') then depth = depth + 1
@@ -2153,6 +2166,9 @@ local function build(store, opts)
             for i = #scopes, 1, -1 do if scopes[i][root] then return nil end end -- (a local of that name: not the profile's)
             local tys = {}
             for k, r in ipairs(sg.returns) do tys[k] = (type(r.type) == 'string' and r.type ~= '') and r.type or 'any' end
+            -- (a return that is itself a function type is parenthesized: its own return list would run on into the next
+            -- return — `vim.spairs`'s `fun(…):K, V` and T had read as K, V, T, CART-1828)
+            for k, t in ipairs(tys) do if t:match('^fun%(') then tys[k] = '(' .. t .. ')' end end
             return typeobj('fun(): ' .. table.concat(tys, ', '))
         end
         local expr, stmt
