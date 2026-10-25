@@ -1417,6 +1417,7 @@ local function build(store, opts)
     -- whose elements are the arguments typed T, the elements of a `table<K, T>` / the keys of a `table<T, V>`, or both
     -- for `T|T[]` (vim._ensure_list). -> { alias = i?, srcs = { { i, '[]' | '{k}' | nil } } } or nil
     G7.GENL, G7.GENO = {}, {}
+    G7.ANDB = {} -- (an `a and b` result port -> b's port, for the `or` it is the left operand of)
     function G7.genlist(key, rt)
         if not rt:match('^[A-Z]%d?%[%]$') then return nil end
         local c = G7.GENL[key]
@@ -3230,8 +3231,11 @@ local function build(store, opts)
                 -- handed the spec MODULE itself to `types[p:type()]`, which read every field of every language's spec — a
                 -- hub over CAP whose escape made 426 TSNode answers partial, CART-1792. `or` keeps both)
                 -- (an OUTSIDE value — EXT — may be false or nil: it passes, CART-1792)
-                if op == 'and' then local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); return r end
-                if op == 'or' then local r = new(); edge(a, r); edge(b, r); return r end
+                -- (`(a and b) or c` is b where truthy, else c: the and's falsy part — a's — never reaches it, so the or
+                -- takes b itself. Through the filter an ESCAPED a had tainted it: `s.label and extend(lbls, …) or lbls`
+                -- made flow.lua's wire's lbls top, two refusals, CART-1813)
+                if op == 'and' then local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); G7.ANDB[r] = b; return r end
+                if op == 'or' then local r = new(); edge(G7.ANDB[a] or a, r); edge(b, r); return r end
                 local res = new()
                 local mm = METAOP[op]
                 -- (Lua 5.1 / LuaJIT — the dump's `ver 51`: a comparison runs a handler only when EVERY operand has one, and

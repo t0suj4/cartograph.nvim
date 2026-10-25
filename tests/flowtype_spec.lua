@@ -2644,6 +2644,27 @@ test('flowtype: the left operand of `and` reaches the result only as false, neve
     ok(v and #v.targets == 2 and not vim.tbl_contains(v.targets, 'm.lua::C.m@4'), 'x itself never flows: {A.m, B.m}: ' .. vim.inspect(v))
 end)
 
+-- (CART-1813: `(a and b) or c` is b where truthy, else c — the and's falsy part, a's, never reaches it. The or had read
+-- the and's port, so `flag and t or u` held flag's boolean, and an escaped a tainted it)
+test('flowtype: `a and b or c` holds b and c, never a (CART-1813)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local t, u = {}, {}', 'local flag = rawequal(t, u)',
+        'v = flag and t or u', 'w = flag and t', 'x = u or (flag and t)', 'y = (flag and t) or u',
+        'local s = {}', 'local z = flag and t', 'if not z then z = s end', 'q = z or u' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    local function has(g, o) return vim.tbl_contains(R.objs_of(R.port('g:' .. g)), o) end
+    local v = R.objs_of(R.port('g:v'))
+    ok(#v == 2 and not has('v', 'type:boolean'), 'v holds t and u only: ' .. vim.inspect(v))
+    ok(not has('y', 'type:boolean') and #R.objs_of(R.port('g:y')) == 2, 'parenthesized too: ' .. vim.inspect(R.objs_of(R.port('g:y'))))
+    ok(has('w', 'type:boolean'), 'a bare and keeps false: ' .. vim.inspect(R.objs_of(R.port('g:w'))))
+    ok(has('x', 'type:boolean'), 'an and on the RIGHT of or keeps false: ' .. vim.inspect(R.objs_of(R.port('g:x'))))
+    -- (a LOCAL that held an and keeps its other writers: only the expression itself is short-cut)
+    ok(#R.objs_of(R.port('g:q')) == 4, 'z or u holds s too: ' .. vim.inspect(R.objs_of(R.port('g:q'))))
+end)
+
 -- (CART-1802, Lua 5.1 / LuaJIT: a comparison runs a handler only when every operand has one — `x == nil` and `x < 0`
 -- never run x's __eq / __lt; `x == y` with both objects does)
 test('flowtype: a comparison with a literal operand runs no handler (CART-1802)', function ()
