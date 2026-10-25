@@ -3152,3 +3152,69 @@ test('flowtype: a vararg generic is any of those arguments; an unbound generic i
     ok(whole(v, 'm') and tostring(v.targets[1]):match('A%.m'), 'if_nil returns its argument: ' .. vim.inspect(v))
     ok(not labels['type:T'], 'no host site for an unbound T')
 end)
+
+-- ★ A GENERIC CONTAINER RETURN (CART-1831): `vim.tbl_values(t: table<any, T>): T[]` is a NEW list of t's elements,
+-- `vim.fn.sort(list: T[]): T[]` the list itself — not a host `T[]` whose element was a fixed `type:T`. The dump states
+-- the new list's allocation and stores (the walker's own primitives), so it stays closed
+test('flowtype: a generic container return is a list of the argument\'s elements (CART-1831)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/main.lua'] = table.concat({
+            'local A, B = {}, {}',
+            'function A.m(self) return 1 end',
+            'function B.m(self) return 2 end',
+            'local a = setmetatable({}, { __index = A })',
+            'local vs = vim.tbl_values({ x = a })',
+            'vs[1]:m()',
+            'local l = vim.fn.sort({ a })',
+            'l[1]:m()',
+            'return B' }, '\n') .. '\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    local callrec, atr = require 'cartograph.callrec', require 'cartograph.at'
+    local v = {}
+    for _, c in ipairs(store.data.calls) do
+        if callrec.file(c) == 'lua/fx/main.lua' and c.at then v[atr.sl(c.at)] = R.verdict(c) end
+    end
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local labels = {}
+    for _, x in ipairs(D.sites) do labels[x.label] = true end
+    ok(whole(v[5], 'm') and tostring(v[5].targets[1]):match('A%.m'), 'tbl_values: t\'s elements: ' .. vim.inspect(v[5]))
+    ok(whole(v[7], 'm') and tostring(v[7].targets[1]):match('A%.m'), 'fn.sort: the list itself: ' .. vim.inspect(v[7]))
+    ok(not labels['type:T'] and not labels['type:T[]'], 'no generic host site: ' .. tostring(labels['type:T']) .. tostring(labels['type:T[]']))
+    local C = require('cartograph.flowcheck').check(D)
+    eq(0, C.failed, 'the new list has its writers in the dump: ' .. vim.inspect(C.failures or C):sub(1, 900))
+end)
+test('flowtype: `vim._ensure_list(x)` is x and a new list holding x - x is no element of itself (CART-1831)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/fx/main.lua'] = 'local x = { "s" }\nlocal e = vim._ensure_list(x)\nreturn x, e\n',
+        ['plugin/fx.lua'] = 'require("fx.main")\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local xs, hostl
+    for _, s in ipairs(D.sites) do
+        if s.label:match('^tbl:lua/fx/main%.lua:0:') then xs = s.id end
+        if s.label:match('^tbl:host:vim#_ensure_list') then hostl = s.id end
+    end
+    local ls = {}
+    for _, s in ipairs(D.sites) do if s.label:match('fx') or s.label:match('host') then ls[#ls + 1] = s.label end end
+    ok(xs and hostl, 'x and the new list are sites: ' .. table.concat(ls, ' '))
+    local self_el, holds = false, false
+    local function cell(site, objs)
+        for _, o in ipairs(objs) do
+            if site == xs and o == xs then self_el = true end
+            if site == hostl and o == xs then holds = true end
+        end
+    end
+    for _, h in ipairs(D.solution.h) do cell(h[1], h[3]) end
+    for _, h in ipairs(D.solution.hdyn or {}) do cell(h[1], h[2]) end -- (the `[]` cells)
+    ok(holds, 'the new list holds x')
+    ok(not self_el, 'x is no element of itself')
+end)

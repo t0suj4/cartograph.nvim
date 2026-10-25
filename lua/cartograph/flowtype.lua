@@ -933,6 +933,8 @@ local function build(store, opts)
                     local g = gen[i]
                     if g and g[2] == '...' then for j = g[1], #args do edge(args[j], r) end; return end
                     if g then if args[g[1]] then edge(g[2] and field(args[g[1]], g[2]) or args[g[1]], r) end; return end
+                    local gl = rl[i] and G7.genplan(G7.FUNPTS[TNAME[o]] or NOTHING, rl[i]) -- (a generic container, CART-1831)
+                    if gl then G7.applylist(gl, args, r, TNAME[o]); return end
                     local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end
                 end
                 if type(res) == 'table' then for i, r in ipairs(res) do one(i, r) end
@@ -1409,6 +1411,61 @@ local function build(store, opts)
     -- `T`. 48 of lua/cartograph's empty receivers were `A().node(…)` with A = `assert(require(…).load())`: the algebra
     -- table never arrived, a bare `T` did. A return whose type is a generic-shaped name (T, K, V, T1) that also types a
     -- parameter takes that parameter's argument -> its index, or nil
+    -- ★ A GENERIC CONTAINER RETURN (CART-1831): `vim.tbl_keys(t: table<T, any>): T[]` is a list of t's keys, not a host
+    -- `T[]` whose element is a fixed `type:T`. Per the parameters: one typed `T[]` is the argument itself (fn.sort,
+    -- fn.reverse, list.unique return it; for list_slice's copy, aliasing over-approximates); else a NEW list per call
+    -- whose elements are the arguments typed T, the elements of a `table<K, T>` / the keys of a `table<T, V>`, or both
+    -- for `T|T[]` (vim._ensure_list). -> { alias = i?, srcs = { { i, '[]' | '{k}' | nil } } } or nil
+    G7.GENL, G7.GENO = {}, {}
+    function G7.genlist(key, rt)
+        if not rt:match('^[A-Z]%d?%[%]$') then return nil end
+        local c = G7.GENL[key]
+        if c ~= nil then return c or nil end
+        local sg, pts = PSIGS[key], {}
+        for i, pm in ipairs(type(sg) == 'table' and sg.params or NOTHING) do
+            pts[i] = pm.name ~= '...' and type(pm.type) == 'string' and pm.type:gsub('%?$', ''):gsub('%s', '') or ''
+        end
+        c = G7.genplan(pts, rt) or false
+        G7.GENL[key] = c
+        return c or nil
+    end
+    -- (the plan over a function's parameter types — a signature's, or a function type's at a call through a value)
+    function G7.genplan(pts, rt)
+        local X = rt:match('^([A-Z]%d?)%[%]$')
+        if not X then return nil end
+        local plan = { srcs = {} }
+        for i, pt in ipairs(pts) do
+            if pt == X .. '[]' then plan = { alias = i, srcs = {} }; break end
+            if pt == X then plan.srcs[#plan.srcs + 1] = { i }
+            elseif pt:match('^table<[^,]+,(.+)>$') == X then plan.srcs[#plan.srcs + 1] = { i, '[]' }
+            elseif pt:match('^table<([^,]+),') == X then plan.srcs[#plan.srcs + 1] = { i, '{k}' }
+            elseif pt == X .. '|' .. X .. '[]' or pt == X .. '[]|' .. X then plan.alias = plan.alias or i; plan.srcs[#plan.srcs + 1] = { i } end
+        end
+        if not plan.alias and not plan.srcs[1] then return nil end
+        return plan
+    end
+    function G7.applylist(plan, aps, r, key)
+        if plan.alias and aps[plan.alias] then edge(aps[plan.alias], r) end
+        if not plan.srcs[1] or G7.GENO[r] then return end -- (one list per result port: the direct call and its typed value both reach it)
+        local o = newobj('tbl:host:' .. key .. '@' .. tostring(r))
+        G7.GENO[r] = o
+        -- (stored through a port of its OWN: r may also hold the aliased argument — `_ensure_list(x)` — and a store
+        -- through r would make x an element of itself)
+        local lp = new()
+        addobj(lp, o)
+        for _, sc in ipairs(plan.srcs) do
+            local a = aps[sc[1]]
+            if a then
+                local v = sc[2] and field(a, sc[2]) or a
+                local kp = new(); addobj(kp, typeobj('number')) -- (an array position: a raw store under a number key, as table.insert's)
+                G7.RAWSTORE, G7.NEXTK = true, kp
+                storec(lp, '[]', v)
+                G7.RAWSTORE = nil
+                storec(lp, '{k}', kp) -- (its key joins the key set, as rawset's)
+            end
+        end
+        edge(lp, r)
+    end
     local GEN = {}
     local function genarg(key, k)
         local ck = key .. '\0' .. k
@@ -1439,6 +1496,7 @@ local function build(store, opts)
     -- too. Anything else is no function type: nil)
     local FUNRETS = {}
     G7.FUNGEN = {} -- (a function type -> per return, the { argument index, '[]' | '{k}' | nil } a generic return binds)
+    G7.FUNPTS = {} -- (a function type -> its parameter types)
     funrets = function (tn)
         local r = FUNRETS[tn]
         if r ~= nil then return r or nil end
@@ -1498,6 +1556,7 @@ local function build(store, opts)
             end
             put(list:sub(from))
             G7.FUNGEN[tn] = gen
+            G7.FUNPTS[tn] = pts
         end
         FUNRETS[tn] = r
         return r
@@ -2934,8 +2993,12 @@ local function build(store, opts)
                             -- tainted where arguments are passed, CART-1790's rule. As a fixed `type:T` it had sat in 402
                             -- variables of the self tree, CART-1830)
                             if rt and rt:match('^[A-Z]%d?$') then rt = 'any' end
-                            local ro = rt and G7.retobj(rt, r, key, aps)
-                            if ro then addobj(r, ro) end
+                            local gl = rt and G7.genlist(key, rt)
+                            if gl then G7.applylist(gl, aps, r, key)
+                            else
+                                local ro = rt and G7.retobj(rt, r, key, aps)
+                                if ro then addobj(r, ro) end
+                            end
                         end
                     end
                 end
