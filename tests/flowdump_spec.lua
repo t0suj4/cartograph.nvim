@@ -1553,3 +1553,22 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
         ok(a == b, 'fixture ' .. i .. ': the dump is the same both ways (' .. #a .. ' vs ' .. #b .. ' bytes)')
     end
 end)
+
+-- (CART-1664: a dump to a FILE streams there — never one string — and is byte for byte the text dump = true returns.
+-- Over 4,096 variables, so a list crosses the writer's chunk boundary)
+test('flowdump: a dump written to a file is the text dump = true returns, across chunk boundaries (CART-1664)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local lines = {}
+    for i = 1, 4500 do lines[i] = ('local t%d = { a = %d }'):format(i, i) end
+    local root = tree({ ['m.lua'] = CLASSES .. table.concat(lines, '\n') .. '\nprint(use(b))\n' })
+    store.ingest(ts.extract(root))
+    local path = vim.fn.tempname()
+    local Rf = flowtype.solve(store, { open = false, dump = path })
+    local Rs = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local fd = assert(io.open(path, 'rb')); local text = fd:read('a'); fd:close(); os.remove(path)
+    eq(nil, Rf.dump, 'a file dump returns no text')
+    local D = vim.json.decode(text)
+    ok(#D.solution.v > 4096, 'the v list crosses a chunk: ' .. #D.solution.v)
+    ok(text == Rs.dump, ('the same bytes (%d vs %d)'):format(#text, #Rs.dump))
+end)

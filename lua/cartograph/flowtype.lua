@@ -5460,6 +5460,8 @@ local function build(store, opts)
     if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)
         local FD = require 'cartograph.flowdump'
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
+        -- (a dump to a FILE streams there — R.dump stays nil; dump = true returns the text, CART-1664)
+        local dfd = type(opts.dump) == 'string' and assert(io.open(opts.dump, 'w')) or nil
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
@@ -5473,10 +5475,9 @@ local function build(store, opts)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)
-            sha = here and FD.head((here:gsub('/lua/cartograph$', '')), true), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) })
-        if type(opts.dump) == 'string' then
-            local fd = assert(io.open(opts.dump, 'w')); fd:write(R.dump); fd:close()
-        end
+            sha = here and FD.head((here:gsub('/lua/cartograph$', '')), true), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) },
+            dfd and function (s) dfd:write(s) end)
+        if dfd then dfd:close() end
     end
     return R
 end

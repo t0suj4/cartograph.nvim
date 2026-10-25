@@ -207,7 +207,7 @@ end
 
 --- X: the solve's internals (flowtype passes them): N, each, top, tainted, tfrom, obinfo, fnports, ofield, okeys, TNAME,
 --- GOBJ, GPORT, EXT, GERR, GYIELD, GRESARG, FENVP, EXTCALL, XA, verdicts, calls, callrec, sha
-function M.build(rec, X)
+function M.build(rec, X, sink)
     -- ★ FIXED ENVIRONMENTS, FROM THE SOLUTION (CART-1813): a setfenv whose function argument holds no TREE closure — only
     -- loaded code (a non-literal load's chunk: EXT) or nothing — sets no tree function's environment; it hands the
     -- environment to unknown code, which the solve models. Every such call keeps the claim fixed-env; a call that may
@@ -254,7 +254,17 @@ function M.build(rec, X)
         end
     end
     local out = {}
-    local function put(s) out[#out + 1] = s end
+    -- (sink: each piece goes straight out — a dump to a FILE is never one string. The whole JSON was assembled in
+    -- memory, then concatenated per section and once more as a whole: +2.6 GB on WoW w3 before the labels ran,
+    -- CART-1664. Without a sink the pieces are kept and returned joined, byte for byte the same text)
+    local function put(s) if sink then sink(s) else out[#out + 1] = s end end
+    local function putl(l) -- (a list's pieces, comma-separated, in chunks: never one string of the whole list)
+        local n = #l
+        for i = 1, n, 4096 do
+            put(table.concat(l, ',', i, math.min(i + 4095, n)))
+            if i + 4096 <= n then put(',') end
+        end
+    end
     -- (LD: what flowlabels reads, as the Lua values each section is serialized FROM — the same tables, shared. The labels
     -- had parsed the finished JSON back, a whole decoded copy of the dump beside the solve: +1.3 GB at WoW w2, the
     -- largest step of its 7.8 GB peak. A decoded dump and LD are the same value, so the labels are byte-identical)
@@ -870,28 +880,35 @@ function M.build(rec, X)
         X.LUAVER or 51,
         X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
         jstr(X.MODE or 'closed')))
-    put('"names":{"fields":[' .. table.concat(fields, ',') .. '],"functions":[' .. table.concat(fns, ',') .. ']},')
-    put('"sites":[' .. table.concat(sj, ',') .. '],')
-    put('"functions":[' .. table.concat(fjson, ',') .. '],')
-    put('"solution":{"v":[' .. table.concat(vj, ',') .. '],"top":[' .. table.concat(topj, ',') .. '],"h":[' .. table.concat(hj, ',')
-        .. '],"hdyn":[' .. table.concat(hdj, ',') .. '],"htop":[' .. table.concat(htj, ',') .. '],"htaint":[' .. table.concat(hxj, ',') .. '],"hkeys":[' .. table.concat(hkj, ',') .. '],"hkeystop":' .. jarr(hktop) .. ',"err":{"fn":[' .. table.concat(ej, ',')
-        .. '],"top":[' .. table.concat(etop, ',') .. '],"taint":[' .. table.concat(etaint, ',') .. '],"cerr":' .. jarr(cl)
-        .. '},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
-        .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or '')
-        .. ',"ctx":null,"live":null,"taint":{"ports":[' .. table.concat(tj, ',') .. '],"seeds":[' .. table.concat(sdj, ',') .. ']' .. (WNODE and (',"from":[' .. table.concat(wfj, ',') .. ']') or '')
-        .. ',"escaped":' .. jarr(escl) .. ',"escaped_root":[' .. table.concat(erj, ',') .. '],"outside":[' .. table.concat(outj, ',') .. ']'
-        .. ',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}'
-        .. ((#rtopj > 0 or #rcj > 0 or #rtopkj > 0) and (',"rtop":' .. jarr(rtopj) .. ',"rtopk":' .. jarr(rtopkj) .. ',"rcells":[' .. table.concat(rcj, ',') .. ']'
-            .. ',"rkeys":' .. jarr((function () local l = {}; for o in pairs(RK) do l[#l + 1] = o end; table.sort(l); return l end)())
-            .. ',"rroots":' .. jarr((function ()
+    put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')
+    put('"sites":['); putl(sj); put('],')
+    put('"functions":['); putl(fjson); put('],')
+    sj, fjson = nil, nil -- (written: the strings go, the labels below need only LD)
+    put('"solution":{"v":['); putl(vj); put('],"top":['); putl(topj); put('],"h":['); putl(hj)
+    put('],"hdyn":['); putl(hdj); put('],"htop":['); putl(htj); put('],"htaint":['); putl(hxj); put('],"hkeys":['); putl(hkj)
+    put('],"hkeystop":' .. jarr(hktop) .. ',"err":{"fn":['); putl(ej)
+    put('],"top":['); putl(etop); put('],"taint":['); putl(etaint); put('],"cerr":' .. jarr(cl))
+    put('},"weak":' .. jarr(weak) .. ',"rin":' .. jarr(sites(X.GRESARG)) .. ',"rout":' .. jarr(sites(X.GYIELD))
+        .. (chtop(X.GRESARG) and ',"rin_top":1' or '') .. (chtop(X.GYIELD) and ',"rout_top":1' or '') .. (cerrtop and ',"cerr_top":1' or ''))
+    put(',"ctx":null,"live":null,"taint":{"ports":['); putl(tj); put('],"seeds":['); putl(sdj); put(']')
+    if WNODE then put(',"from":['); putl(wfj); put(']') end
+    put(',"escaped":' .. jarr(escl) .. ',"escaped_root":['); putl(erj); put('],"outside":['); putl(outj); put(']')
+    put(',"fields_hit":[' .. table.concat(fhj, ',') .. '],"outside_written":' .. jarr(owl) .. '}')
+    vj, hj, hdj, hxj, hkj, tj, sdj, wfj, erj, outj = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
+    if #rtopj > 0 or #rcj > 0 or #rtopkj > 0 then
+        put(',"rtop":' .. jarr(rtopj) .. ',"rtopk":' .. jarr(rtopkj) .. ',"rcells":['); putl(rcj); put(']')
+        put(',"rkeys":' .. jarr((function () local l = {}; for o in pairs(RK) do l[#l + 1] = o end; table.sort(l); return l end)()))
+        put(',"rroots":' .. jarr((function ()
             local set, l = {}, {}
             for p, h in pairs(X.RHB or {}) do if not X.RESCT[p] then for o in pairs(h) do set[o] = true end end end
             for pl in pairs(X.PKGL or {}) do for _, fp in pairs(X.ofield[pl] or {}) do for o in X.each(fp) do set[o] = true end end end
             for o in pairs(set) do l[#l + 1] = o end
             table.sort(l)
             return l
-        end)())) or '') .. '},')
-    put('"gaps":[' .. table.concat(gj, ',') .. '],')
+        end)()))
+    end
+    put('},')
+    put('"gaps":['); putl(gj); put('],')
     if #gnx > 0 then put('"gn_exclude":' .. jarr(gnx) .. ',') end
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
@@ -917,7 +934,8 @@ function M.build(rec, X)
     -- [fn, mask] for errors and returns, rin / rout, and `region`: what the escaped region rests on (an answer labelled
     -- C1 / C3 reaches it; its cells are not expanded per answer, as flowpath's slice does not) — bit i is clauses[i + 1]
     if LD then LD.contracts.ext_channel = X.EXTCALL or vim.NIL; LD.contracts.host_models = LD.contracts.host_models or {} end
-    -- (M._labels_by_decode: the old route — the JSON parsed back — kept for the spec that pins LD to it)
+    -- (M._labels_by_decode: the old route — the JSON parsed back — kept for the spec that pins LD to it; it reads the
+    -- kept pieces, so it needs a build without a sink)
     if LD and M._ld_probe then M._ld_probe(LD, vim.json.decode(table.concat(out) .. '"answers":[]}')) end
     local L = LD and require('cartograph.flowlabels').compute(M._labels_by_decode and vim.json.decode(table.concat(out) .. '"answers":[]}') or LD) or nil
     local function pairsj(t)
@@ -956,7 +974,8 @@ function M.build(rec, X)
         for j, c in ipairs(cs) do q[j] = jstr(c) end
         aout[i] = a[1] .. '[' .. table.concat(q, ',') .. ']' .. a[5]
     end
-    put('"answers":[' .. table.concat(aout, ',') .. ']}')
+    put('"answers":['); putl(aout); put(']}')
+    if sink then return nil end
     return table.concat(out)
 end
 
