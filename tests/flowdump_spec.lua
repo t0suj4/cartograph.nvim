@@ -1572,3 +1572,26 @@ test('flowdump: a dump written to a file is the text dump = true returns, across
     ok(#D.solution.v > 4096, 'the v list crosses a chunk: ' .. #D.solution.v)
     ok(text == Rs.dump, ('the same bytes (%d vs %d)'):format(#text, #Rs.dump))
 end)
+
+-- (CART-1664: a dump is a batch run — the collector's pause is 110 during it, the caller's own afterwards; opts.gcpause
+-- sets another, false keeps the caller's)
+test('flowdump: a dump solves at GC pause 110 and restores the caller\'s pause (CART-1664)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = CLASSES })
+    store.ingest(ts.extract(root))
+    local seen = {}
+    local FD = require 'cartograph.flowdump'
+    local build0 = FD.build
+    FD.build = function (...) seen[#seen + 1] = collectgarbage('setpause', 0); collectgarbage('setpause', seen[#seen]); return build0(...) end
+    local before = collectgarbage('setpause', 175)
+    local ok1 = pcall(flowtype.solve, store, { open = false, dump = true })
+    local after = collectgarbage('setpause', 175)
+    pcall(flowtype.solve, store, { open = false, dump = true, gcpause = false })
+    pcall(flowtype.solve, store, { open = false, dump = true, gcpause = 130 })
+    collectgarbage('setpause', before)
+    FD.build = build0
+    vim.fn.delete(root, 'rf')
+    ok(ok1, 'the dump solved')
+    eq({ 110, 175, 130 }, seen, 'the pause during each dump')
+    eq(175, after, 'the caller\'s pause is back afterwards')
+end)

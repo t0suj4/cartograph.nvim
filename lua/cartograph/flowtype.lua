@@ -5489,6 +5489,17 @@ end
 local build1 = build
 build = function (store, opts)
     opts = opts or {}
+    -- (a DUMP is a batch run: the collector runs at a pause of 110 for it — opts.gcpause, false for the caller's own.
+    -- LuaJIT never returns its arena, so the solve loop's GARBAGE peak is the process's floor: WoW w3's loop left
+    -- 8.26 GB at the default 200 and 5.42 GB at 110, and only at 110 does its full dump fit under 9.5 GB, CART-1664 /
+    -- CART-1835. The solution is the same — w2's dump byte-identical — for ~18% more time)
+    if opts.dump and opts.gcpause ~= false then
+        local prev = collectgarbage('setpause', opts.gcpause or 110)
+        local ok, R = pcall(build1, store, opts)
+        collectgarbage('setpause', prev)
+        if not ok then error(R, 0) end
+        return R
+    end
     if opts.ctx == false or opts.ctxfns or opts.dump then return build1(store, opts) end
     local R1 = build1(store, setmetatable({ keepsat = true, ctxsel = true }, { __index = opts }))
     if (R1.nctx or 0) == 0 then return R1 end
