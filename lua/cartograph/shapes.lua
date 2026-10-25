@@ -136,6 +136,36 @@ M.registry = {
         config = { entrypoints = { '^plugin/[%w_%-]+%.lua$' }, profile = 'nvim' },
     },
     {
+        -- WORLD OF WARCRAFT (CART-1827): an addon is a directory with its `.toc` manifest, `<Dir>/<Dir>.toc`, and the
+        -- client loads every one under AddOns/ — so a root is an addon (the manifest here) or a folder of them (one a
+        -- level down). A `.toc` is also LaTeX's table of contents: the evidence is a manifest's `## Interface:` line.
+        name = 'wow-addon',
+        detect = function (root)
+            local function manifest(path)
+                local fd = io.open(path, 'rb')
+                if not fd then return false end
+                local head = fd:read(512) or ''
+                fd:close()
+                return head:find('## *Interface *:') ~= nil
+            end
+            local it = vim.uv.fs_scandir(root)
+            local dirs = {}
+            while it do
+                local name, ty = vim.uv.fs_scandir_next(it)
+                if not name then break end
+                if ty ~= 'directory' and name:match('%.toc$') and manifest(root .. '/' .. name) then return name end
+                if ty == 'directory' then dirs[#dirs + 1] = name end
+            end
+            table.sort(dirs)
+            for _, d in ipairs(dirs) do
+                local rel = d .. '/' .. d .. '.toc'
+                if manifest(root .. '/' .. rel) then return rel end
+            end
+        end,
+        -- the WoW Lua environment, distilled from vscode-wow-api's annotations (tools/wowdistill.lua, CART-1827)
+        config = { profile = 'wow' },
+    },
+    {
         name = 'nvim-config',
         detect = function (root)
             -- @langs-ok the nvim DIRECTORY name again, not a grammar

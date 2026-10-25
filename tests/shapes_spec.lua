@@ -457,3 +457,38 @@ test('factorio shape: the entry list agrees with the PROFILE stage table',
         'the profile declares a root stage entry the shape detector does not know: '
         .. table.concat(missing, ', '))
 end)
+
+-- (CART-1827: a WoW addon is a directory with its `.toc` manifest; an AddOns folder holds one per child. The manifest's
+-- `## Interface:` line is the evidence — LaTeX writes `.toc` files too)
+test('shapes: a WoW addon and a folder of addons select the wow profile; a LaTeX .toc does not', function ()
+    local TOC = '## Interface: 30300\n## Title: Align\nAlign.lua\n'
+    local addon = mkroot({ ['Align.toc'] = TOC, ['Align.lua'] = 'local x = 1\n' })
+    local folder = mkroot({ ['Align/Align.toc'] = TOC, ['Align/Align.lua'] = 'local x = 1\n' })
+    local latex = mkroot({ ['paper.toc'] = '\\contentsline {section}{Intro}{1}\n', ['x.lua'] = 'local x = 1\n' })
+    local pa, pf, pl = shapes.profile_for(addon), shapes.profile_for(folder), shapes.profile_for(latex)
+    local pin = shapes.profile_for(folder .. '/Align')
+    for _, r in ipairs { addon, folder, latex } do vim.fn.delete(r, 'rf') end
+    eq('wow', pa and pa.profile, 'an addon root')
+    eq('Align.toc', pa and pa.evidence)
+    eq('wow', pf and pf.profile, 'a folder of addons')
+    eq('Align/Align.toc', pf and pf.evidence)
+    eq('wow', pin and pin.profile, 'an addon inside the folder')
+    eq(nil, pl, 'a LaTeX table of contents is no manifest')
+end)
+
+-- (CART-1827: the wow profile, distilled from vscode-wow-api — tools/wowdistill.lua. Lua tier believed in full, compat
+-- aliases carry their target's signature; a global's FIRST return only, and only a primitive one)
+test('profile wow: WoW Lua extensions and aliases typed; a documented global keeps a primitive first return only', function ()
+    local p = require('cartograph.spec.profile').load('wow')
+    ok(p, 'the wow profile loads')
+    local function ret(k, i) local s = p.sigs[k]; return s and s.returns and s.returns[i or 1] and s.returns[i or 1].type end
+    eq('string', ret('string#trim'), 'string.trim')
+    eq('string', ret('strtrim'), 'strtrim = string.trim')
+    eq('string#trim', p.sigs.strtrim.alias_of)
+    eq('string', ret('debugstack'), 'debugstack: a documented global, a string first')
+    eq(nil, ret('CreateFont'), 'CreateFont returns a Font: no primitive, no claim')
+    eq(nil, p.sigs.GetAddOnInfo, '3.3.5\'s global is today\'s C_AddOns.GetAddOnInfo: absent, never the namespaced one')
+    for k, s in pairs(p.sigs) do
+        if s.tier == 'api' then ok(#s.returns <= 1, k .. ' keeps one return at most') end
+    end
+end)

@@ -3239,3 +3239,26 @@ test('flowtype: `vim._ensure_list(x)` is x and a new list holding x - x is no el
     ok(holds, 'the new list holds x')
     ok(not self_el, 'x is no element of itself')
 end)
+
+-- (CART-1827: the wow profile types WoW's host calls — `debugstack()` and `strtrim(x)` hold a string, and a string
+-- method on them is the string library's. Without a profile both are empty: an undefined global's call reached nothing)
+test('flowtype: under the wow profile a WoW host call holds its declared type (CART-1827)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function objs(profile)
+        local root = tree({ ['m.lua'] = 's = debugstack(2)\nt = strtrim(" x ")\nu = t:upper()\nf = CreateFont("x")\n' })
+        store.ingest(ts.extract(root))
+        store.data.profile = profile
+        local R = flowtype.solve(store, { open = false, ctx = false, explain = true })
+        vim.fn.delete(root, 'rf')
+        local o = {}
+        for _, g in ipairs { 's', 't', 'u', 'f' } do o[g] = R.objs_of(R.port('g:' .. g)) end
+        return o
+    end
+    local w, n = objs('wow'), objs(nil)
+    eq({ 'type:string' }, w.s, 'debugstack() is a string')
+    eq({ 'type:string' }, w.t, 'strtrim, an alias of string.trim, returns a string')
+    eq({ 'type:string' }, w.u, 'and a string method on it is the string library\'s')
+    eq({}, w.f, 'CreateFont returns a Font: no primitive, no claim')
+    eq({}, n.s, 'no profile: nothing')
+    eq({}, n.t, 'no profile: nothing')
+end)
