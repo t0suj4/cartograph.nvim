@@ -255,6 +255,11 @@ function M.build(rec, X)
     end
     local out = {}
     local function put(s) out[#out + 1] = s end
+    -- (LD: what flowlabels reads, as the Lua values each section is serialized FROM — the same tables, shared. The labels
+    -- had parsed the finished JSON back, a whole decoded copy of the dump beside the solve: +1.3 GB at WoW w2, the
+    -- largest step of its 7.8 GB peak. A decoded dump and LD are the same value, so the labels are byte-identical)
+    local LD = M.labels and { functions = {}, sites = {}, names = {},
+        solution = { v = {}, top = {}, h = {}, hdyn = {}, htop = {}, taint = { ports = {} } }, contracts = {} } or nil
     -- field ids
     local fid, fnames, nextf = {}, {}, 0
     for nm, id in pairs(RESERVED) do fid[nm] = id; fnames[id] = nm == '\1mt' and '<meta>' or nm end
@@ -348,6 +353,7 @@ function M.build(rec, X)
     local function emitfn(name, params, self, body, tags)
         fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s}'):format(FN(name), jarr(vars(params)),
             V(self), jarr(body), jarr(tags))
+        if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags } end
     end
     local keys = {}
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
@@ -439,6 +445,7 @@ function M.build(rec, X)
         -- (a HOST site carries its kind, the profile's — prim / open / members: the certificate's supplied premise, CART-1761)
         local hk = kind == 'type' and (X.NATIVE and X.NATIVE[o] and 'prim' or X.hostkind and X.TNAME[o] and X.hostkind(X.TNAME[o])) or nil
         sj[#sj + 1] = ('{"id":%d,"kind":"%s","label":%s,"fn":%s%s}'):format(o, kind, jstr(info), fn, hk and (',"host":"' .. hk .. '"') or '')
+        if LD then LD.sites[#LD.sites + 1] = { id = o, kind = kind, label = info, fn = tonumber(fn) or vim.NIL, host = hk } end
     end
     -- the solution
     -- (refl-scope, CART-1817 stage 3: the REGION — a region top whose holdings did not escape, and a port the region's
@@ -513,11 +520,11 @@ function M.build(rec, X)
     table.sort(vlist)
     for _, p in ipairs(vlist) do
         if rlive(p) then if RK2[p] then rtopkj[#rtopkj + 1] = p else rtopj[#rtopj + 1] = p end end
-        if X.top[p] then if not rlive(p) then topj[#topj + 1] = tostring(p) end
+        if X.top[p] then if not rlive(p) then topj[#topj + 1] = tostring(p); if LD then LD.solution.top[#LD.solution.top + 1] = p end end
         else
             local ss = rec._self[p]
             if not ss then ss = {}; for o in X.each(p) do ss[#ss + 1] = o end end
-            if #ss > 0 then table.sort(ss); vj[#vj + 1] = '[' .. p .. ',' .. jarr(ss) .. ']' end
+            if #ss > 0 then table.sort(ss); vj[#vj + 1] = '[' .. p .. ',' .. jarr(ss) .. ']'; if LD then LD.solution.v[#LD.solution.v + 1] = { p, ss } end end
         end
     end
     -- ★ WHAT A DYNAMIC STORE MAY WRITE BESIDES ITS CELL (CART-1763; the key set / __mode analog of CART-1744). `t[k] = v`
@@ -618,13 +625,13 @@ function M.build(rec, X)
                 local rcell = RC[o] ~= nil and RC[o][f] == true
                 if rcell then rcj[#rcj + 1] = ('[%d,%s]'):format(o, f == '[]' and 'null' or tostring(F(f))) end
                 if X.top[fp] then
-                    if f ~= '[]' and not rcell then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)) end
+                    if f ~= '[]' and not rcell then htj[#htj + 1] = ('[%d,%d]'):format(o, F(f)); if LD then LD.solution.htop[#LD.solution.htop + 1] = { o, F(f) } end end
                 else
                     for b in X.each(fp) do ss[#ss + 1] = b end
                     if #ss > 0 then
                         table.sort(ss)
-                        if f == '[]' then hdj[#hdj + 1] = ('[%d,%s]'):format(o, jarr(ss))
-                        else hj[#hj + 1] = ('[%d,%d,%s]'):format(o, F(f), jarr(ss)) end
+                        if f == '[]' then hdj[#hdj + 1] = ('[%d,%s]'):format(o, jarr(ss)); if LD then LD.solution.hdyn[#LD.solution.hdyn + 1] = { o, ss } end
+                        else hj[#hj + 1] = ('[%d,%d,%s]'):format(o, F(f), jarr(ss)); if LD then LD.solution.h[#LD.solution.h + 1] = { o, F(f), ss } end end
                     end
                 end
                 ::nextf::
@@ -670,6 +677,7 @@ function M.build(rec, X)
     for _, p in ipairs(vlist) do
         if X.tainted[p] then
             tj[#tj + 1] = tostring(p)
+            if LD then LD.solution.taint.ports[#LD.solution.taint.ports + 1] = p end
             local w = X.tfrom and X.tfrom[p]
             if type(w) == 'string' then sdj[#sdj + 1] = ('[%d,%s]'):format(p, jstr(w)) end
         end
@@ -760,6 +768,7 @@ function M.build(rec, X)
     local escl, fhj = {}, {}
     for o in pairs(X.escaped or {}) do if type(o) == 'number' and not ISG[o] then escl[#escl + 1] = o end end
     table.sort(escl)
+    if LD then LD.solution.taint.escaped = escl end
     -- ★ WHAT OUTSIDE CODE CAN REACH vs WHAT THE SOLVE LOST (CART-1782): escaped mixes both — vimruntime 93% and WoW
     -- 99.6% of it rooted at a saturated port, which a refinement (contexts, CAP) could recover, where an outside root
     -- only a contract could. `escaped_root` [site, class]: `unknown-code` (handed to it), `export` (open mode: reached
@@ -830,6 +839,7 @@ function M.build(rec, X)
             if p then for o in X.each(p) do local fp = X.fnports[o]; if fp and fp.id then ids[#ids + 1] = FN(fp.id) end end end
             table.sort(ids)
             hmj[#hmj + 1] = '[' .. jstr(k) .. ',' .. jarr(ids) .. ']'
+            if LD then local l = LD.contracts.host_models or {}; LD.contracts.host_models = l; l[#l + 1] = { k, ids } end
         end
     end
     local owl = {}
@@ -850,6 +860,7 @@ function M.build(rec, X)
     local maxf = 0
     for id in pairs(fnames) do if id > maxf then maxf = id end end
     for id = 0, maxf do fields[id + 1] = fnames[id] and jstr(fnames[id]) or 'null' end
+    if LD then local l = {}; for id = 0, maxf do l[id + 1] = fnames[id] or vim.NIL end; LD.names.fields = l end
     local fns = {}
     for i, n in ipairs(fnlist) do fns[i] = jstr(n) end
     -- (the solve's real mode — open or closed: it had been written "closed" whatever the solve was, CART-1777)
@@ -885,8 +896,8 @@ function M.build(rec, X)
     local gs = { tostring(X.GOBJ) }
     for i, e in ipairs(X.ENVL or {}) do if i > 1 then gs[#gs + 1] = tostring(e.GOBJ) end end
     put('"contracts":{"host_kinds":["type","ext"],"globals_site":' .. tostring(X.GOBJ) .. ',"globals_sites":[' .. table.concat(gs, ',') .. '],"dyn_keys":true,"strlib_site":' .. tostring(X.STRLIB or 'null') .. ',"ext_channel":' .. tostring(X.EXTCALL or 'null') .. ',"host_models":[' .. table.concat(hmj, ',') .. ']'
-        .. ',"library_sites":' .. jarr((function () local l = {}; for o in pairs(X.LIBSITES or {}) do l[#l + 1] = o end; table.sort(l); return l end)())
-        .. ',"package_loaded_sites":' .. jarr((function () local l = {}; for o in pairs(X.PKGL or {}) do l[#l + 1] = o end; table.sort(l); return l end)())
+        .. ',"library_sites":' .. jarr((function () local l = {}; for o in pairs(X.LIBSITES or {}) do l[#l + 1] = o end; table.sort(l); if LD then LD.contracts.library_sites = l end; return l end)())
+        .. ',"package_loaded_sites":' .. jarr((function () local l = {}; for o in pairs(X.PKGL or {}) do l[#l + 1] = o end; table.sort(l); if LD then LD.contracts.package_loaded_sites = l end; return l end)())
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
@@ -897,6 +908,7 @@ function M.build(rec, X)
             end
             table.sort(ks)
             for i, k in ipairs(ks) do kv[i] = jstr(k) .. ':' .. jstr(M.CONTRACTS[k]) end
+            if LD then local c = {}; for _, k in ipairs(ks) do c[k] = M.CONTRACTS[k] end; LD.contracts.clauses = c end
             return '{' .. table.concat(kv, ',') .. '}'
         end)() .. '},')
     -- ★ CONTRACT LABELS (CART-1801): the dump so far is the program the checker verifies — its labels are a fixpoint over
@@ -904,7 +916,10 @@ function M.build(rec, X)
     -- [var, mask] / [site, field, mask] / [site, mask] for the dynamic (`d`), key (`k`) and every-field (`w`) cells,
     -- [fn, mask] for errors and returns, rin / rout, and `region`: what the escaped region rests on (an answer labelled
     -- C1 / C3 reaches it; its cells are not expanded per answer, as flowpath's slice does not) — bit i is clauses[i + 1]
-    local L = M.labels and require('cartograph.flowlabels').compute(vim.json.decode(table.concat(out) .. '"answers":[]}')) or nil
+    if LD then LD.contracts.ext_channel = X.EXTCALL or vim.NIL; LD.contracts.host_models = LD.contracts.host_models or {} end
+    -- (M._labels_by_decode: the old route — the JSON parsed back — kept for the spec that pins LD to it)
+    if LD and M._ld_probe then M._ld_probe(LD, vim.json.decode(table.concat(out) .. '"answers":[]}')) end
+    local L = LD and require('cartograph.flowlabels').compute(M._labels_by_decode and vim.json.decode(table.concat(out) .. '"answers":[]}') or LD) or nil
     local function pairsj(t)
         local ks = {}
         for k in pairs(t) do ks[#ks + 1] = k end

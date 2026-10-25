@@ -1501,3 +1501,55 @@ test('flowdump: an escaped function\'s raised value escapes with it (CART-1826)'
     ok(raised and #raised > 0, 'the callback raises something')
     for _, o in ipairs(raised) do ok(esc[o], 'what it raises escaped: ' .. tostring(lab[o])) end
 end)
+
+-- (CART-1664: the labels read the dump's own Lua values (LD), not the finished JSON parsed back — a whole decoded copy
+-- of the dump beside the solve. LD lists by hand what flowlabels reads, so it is pinned to the parsed-back route: every
+-- fixture's dump byte-identical both ways — a section LD missed would label less, silently)
+test('flowdump: labels from the dump\'s Lua values equal labels from its JSON parsed back (CART-1664)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local FD = require 'cartograph.flowdump'
+    local fixtures = {
+        { ['m.lua'] = CLASSES .. 'x = b\nprint(use(x))\n' },
+        { ['m.lua'] = CLASSES .. 'local s = UNDEFINED_SOURCE\nlocal x = s:lower():upper()\nlocal t = {}\nt[s] = x\nprint(use(t[UNDEFINED_KEY] or a))\nreturn t\n' },
+        { ['m.lua'] = CLASSES .. 'local h = {}\nh[G_KEY] = b\nlocal r = h[G_KEY2]\nloadstring(CODE)(r)\nprint(use(r or a))\nprint(use(GLOBAL_OBJ))\nprint(coroutine.wrap(function (v) return use(v) end)(b))\n' },
+        { ['m.lua'] = CLASSES .. 'require("my.mod").obj = a\nfor _, m in pairs(package.loaded) do if type(m) == "table" and m.run then m.run(b) end end\n',
+          ['lua/my/mod.lua'] = 'local M = {}\nfunction M.run(q) return use and q end\nreturn M\n', exp = 'pkg-modules' },
+        -- (a function reached only through a DYNAMIC cell of a table handed to an unresolved callee: hdyn)
+        { ['m.lua'] = CLASSES .. 'local t = {}\nt[UNKNOWN_K] = function (q) return use(q) end\nUNRESOLVED_FN(t)\n' },
+        -- (a call into a host model: host_models)
+        { ['m.lua'] = CLASSES .. 'debug.getregistry().obj = a\nprint(use(debug.getregistry().obj))\n',
+          hostmodels = { test = 'local REG = {}\nreturn { ["debug#getregistry"] = function () return REG end }\n' } },
+    }
+    local function run(files, byd)
+        local f = vim.deepcopy(files); local exp, hm = f.exp, f.hostmodels; f.exp, f.hostmodels = nil, nil
+        local root = tree(f)
+        store.ingest(ts.extract(root))
+        FD._labels_by_decode = byd
+        -- (and LD itself against the same projection of the parsed-back dump: a section no fixture's labels depend on —
+        -- host_models has function ids on no corpus — is still pinned)
+        local same = true
+        FD._ld_probe = function (LD, D)
+            local s, c = D.solution, D.contracts
+            local proj = { functions = {}, sites = {}, names = { fields = D.names.fields },
+                solution = { v = s.v, top = s.top, h = s.h, hdyn = s.hdyn, htop = s.htop, taint = { ports = s.taint.ports, escaped = s.taint.escaped } },
+                contracts = { library_sites = c.library_sites, package_loaded_sites = c.package_loaded_sites, host_models = c.host_models, ext_channel = c.ext_channel, clauses = c.clauses } }
+            for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags } end
+            for i, x in ipairs(D.sites) do proj.sites[i] = { id = x.id, kind = x.kind, label = x.label, fn = x.fn, host = x.host } end
+            same = vim.deep_equal(vim.json.decode(vim.json.encode(LD)), vim.json.decode(vim.json.encode(proj)))
+        end
+        local okr, R = pcall(flowtype.solve, store, { open = false, dump = true, exp = exp, hostmodels = hm })
+        FD._labels_by_decode, FD._ld_probe = nil, nil
+        ok(same, 'LD is the parsed-back dump\'s projection')
+        vim.fn.delete(root, 'rf')
+        assert(okr, R)
+        return R.dump
+    end
+    for i, fx in ipairs(fixtures) do
+        -- (each run has its own temp root, which the dump records: the rest must agree byte for byte)
+        local a, b = run(fx, false), run(fx, true)
+        local D = vim.json.decode(a)
+        a, b = a:gsub('"corpus":{"root":"[^"]*"', '', 1), b:gsub('"corpus":{"root":"[^"]*"', '', 1)
+        ok(D.labels and #D.labels.clauses > 0 and #D.answers > 0, 'fixture ' .. i .. ' carries labels and answers')
+        ok(a == b, 'fixture ' .. i .. ': the dump is the same both ways (' .. #a .. ' vs ' .. #b .. ' bytes)')
+    end
+end)
