@@ -2041,6 +2041,43 @@ test('flowtype: a dynamic walk into a saturated destination over an already-fed 
     eq(a, b, 'the same ports, objects, tops, taint, escapes and answers')
 end)
 
+-- (CART-1834: LuaJIT seeds its string hash PER PROCESS, so `pairs` over field names runs in a different order in every
+-- run. Where that order decides something — which port a field gets (ports are numbered as they are made), which carrier
+-- an escape is recorded through — the solve walks the names SORTED, and two runs give the same dump)
+test('flowtype: field names are walked in one order — a keyed copy makes the target\'s fields sorted, an escape is carried by the first field (CART-1834)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local names = { 'kilo', 'alpha', 'juliet', 'bravo', 'india', 'charlie', 'hotel', 'delta', 'golf', 'echo', 'foxtrot', 'lima' }
+    local src = { 'local X = {}' }
+    local hub = {}
+    for i, n in ipairs(names) do
+        src[#src + 1] = ('local C%d = { x = X }'):format(i)
+        hub[#hub + 1] = ('%s = C%d'):format(n, i)
+    end
+    src[#src + 1] = 'local E = { ' .. table.concat(hub, ', ') .. ' }'
+    src[#src + 1] = 'local T = {}'
+    src[#src + 1] = 'for k in pairs(E) do T[k] = E[k] end' -- (a KEYED COPY, CART-1726)
+    src[#src + 1] = 'local function sink(x) return x end'
+    src[#src + 1] = 'sink(E)'
+    for _ = 1, 70 do src[#src + 1] = 'sink({})' end -- (past CAP: sink's parameter saturates and E escapes)
+    src[#src + 1] = 'return T'
+    local root = tree({ ['m.lua'] = table.concat(src, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.of(store, { open = false, explain = true, keepsat = true })
+    local T = R.object('tbl:m.lua:' .. (#names + 2) .. ':10')
+    ok(T, 'the copy target T')
+    local sortedn = vim.deepcopy(names); table.sort(sortedn)
+    local ports = {}
+    for _, n in ipairs(sortedn) do ports[#ports + 1] = R.field_port(T, n) or -1 end
+    local asc = vim.deepcopy(ports); table.sort(asc)
+    ok(ports[1] > 0, 'the copy made T\'s fields: ' .. vim.inspect(ports))
+    eq(asc, ports, 'T\'s field ports are made in name order')
+    -- (X escapes with E's fields' objects: the carrier recorded is the one under the FIRST name, alpha = C2)
+    local path = R.escape_of(R.object('tbl:m.lua:0:10'))
+    local s = table.concat(path, ' | ')
+    ok(s:find('m.lua:2:', 1, true) and not s:find('m.lua:1:', 1, true), 'carried through alpha\'s table (line 3): ' .. s)
+    vim.fn.delete(root, 'rf')
+end)
+
 -- (USER 2026-10-17: "flowtype could have some experiments" — a variant of the solve is a NAMED switch, selected by opts.exp
 -- or CARTOGRAPH_FLOWTYPE_EXP, recorded in R.exp; an unknown name is an error)
 test('flowtype experiments: named switches from opts or the environment; an unknown name refuses; no-sinf turns the rule off', function ()

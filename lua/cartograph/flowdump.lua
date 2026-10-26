@@ -700,7 +700,7 @@ function M.build(rec, X, sink)
     local wfj = {}
     if X.tfrom then
         local fieldOf, errOf, retOf, parOf, keyOf = {}, {}, {}, {}, {}
-        for o, m in pairs(X.ofield) do if type(o) == 'number' then for f, fp in pairs(m) do local c = fieldOf[fp]; if not c or o < c[1] then fieldOf[fp] = { o, f } end end end end
+        for o, m in pairs(X.ofield) do if type(o) == 'number' then for f, fp in pairs(m) do local c = fieldOf[fp]; if not c or o < c[1] or (o == c[1] and f < c[2]) then fieldOf[fp] = { o, f } end end end end
         for _, name in ipairs(keys) do
             local fp = byname[name]
             if fp then

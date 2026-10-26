@@ -1050,7 +1050,7 @@ local function build(store, opts)
         m[o] = v
         if G7.uncopyable(s0) then edge(v, ofp(o, '[]')) end
         if s0 == G7.EXT or TNAME[s0] then return end
-        for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then edge(fp, ofp(o, f)) end end
+        for _, f in ipairs(okeys(s0)) do if f:byte(1) ~= 1 then edge(ofield[s0][f], ofp(o, f)) end end -- (the target's fields made in ONE order: a port's number is its creation order, CART-1834)
     end
     function G7.copyf(dst, src, v)
         local r = { dst, src, v }
@@ -3719,7 +3719,7 @@ local function build(store, opts)
             -- `vim#split`, a nested table's as `vim.list#unique`; any other returned table is keyed by signature key)
             local gname = {}
             for n, gp in pairs(ofield[G7.GOBJ] or NOTHING) do
-                if type(n) == 'string' and n:match('^[%a_][%w_]*$') then for o in each(gp) do if not gname[o] then gname[o] = n end end end
+                if type(n) == 'string' and n:match('^[%a_][%w_]*$') then for o in each(gp) do if not gname[o] or n < gname[o] then gname[o] = n end end end
             end
             local function bind(o, ns, depth)
                 for k, fp in pairs(ofield[o] or NOTHING) do
@@ -4238,8 +4238,9 @@ local function build(store, opts)
         local i = 1
         while i <= #esc do
             local o = esc[i]; i = i + 1
-            for _, fp in pairs(ofield[o] or NOTHING) do
-                for x in each(fp) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+            local m = ofield[o] or NOTHING
+            for _, fk in ipairs(okeys(o)) do -- (field NAMES in one order: pairs over strings is the process's hash order, CART-1834)
+                for x in each(m[fk]) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
             -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
@@ -4333,7 +4334,8 @@ local function build(store, opts)
         TCUR = o2 and 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
             or 'the outside may write any DATA field of what escaped (C1, open mode)'
         -- (every name read from it has a field port — a load made it — so a key the tree never wrote is covered too)
-        for f, fp in pairs(ofield[o] or NOTHING) do
+        for _, f in ipairs(okeys(o)) do -- (field names in one order: CART-1834)
+            local fp = ofield[o][f]
             if f:byte(1) ~= 1 and f ~= '{k}' and f ~= '[]' then
                 local fn = false
                 for x in each(fp) do if fnports[x] then fn = true; break end end
@@ -4372,7 +4374,9 @@ local function build(store, opts)
             local tc = TCUR
             local tp = type(tc) == 'number' and tc or type(tc) == 'table' and tc[1] or nil
             local function why_(r) return tp and { tp, r } or r end
-            for fk, fp in pairs(ofield[o] or NOTHING) do
+            local m = ofield[o] or NOTHING
+            for _, fk in ipairs(okeys(o)) do -- (in one order, as above: CART-1834)
+                local fp = m[fk]
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then TCUR = why_('the outside may write any field of what escaped'); taint(fp) end
                 for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
@@ -4392,7 +4396,8 @@ local function build(store, opts)
     if G7.ANYLOAD and G7.EXP['loaded-globals'] then
         TCUR = 'code loaded at run time reads and writes every global by name (CART-1796)'
         for _, e in ipairs(G7.ENVL) do
-            for nm, gp in pairs(ofield[e.GOBJ] or NOTHING) do
+            for _, nm in ipairs(okeys(e.GOBJ)) do
+                local gp = ofield[e.GOBJ][nm]
                 if type(nm) == 'string' and nm:byte(1) ~= 1 and nm ~= '[]' and nm ~= '{k}' then
                     taint(gp)
                     for o in each(gp) do G7.escmore(o, 'loaded-code-global') end
@@ -4441,7 +4446,7 @@ local function build(store, opts)
                 local i = 1
                 while i <= #q do
                     local o = q[i]; i = i + 1
-                    for f, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not seen[x] then seen[x] = true; q[#q + 1] = x end end end
+                    for _, f in ipairs(okeys(o)) do for x in each(ofield[o][f]) do if not seen[x] then seen[x] = true; q[#q + 1] = x end end end
                 end
                 G7.RCLOS[top_] = q
             end
@@ -4491,8 +4496,8 @@ local function build(store, opts)
     for o in pairs(XESC) do
         if G7.NOESC[o] then goto nextx end -- (a builtin, a library: unknown code does not patch them — C2, CART-1791)
         PINC[o] = PINC[o] or G7.EXTCALL
-        for _, fp in pairs(ofield[o] or NOTHING) do taint(fp) end
-        for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+        for _, f in ipairs(okeys(o)) do taint(ofield[o][f]) end -- (in one order, CART-1834)
+        for f, l in sorted(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
         ::nextx::
     end
     TCUR = 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
@@ -4635,8 +4640,8 @@ local function build(store, opts)
             if p == r[1] then
                 for s0 in each(r[2]) do
                     -- (what the copy writes escapes with its target, as a store's value does — CART-1732)
-                    for f, fp in pairs(ofield[s0] or NOTHING) do if f:byte(1) ~= 1 then for o in each(fp) do G7.escmore(o, 'copied-into-lost-target') end end end
-                    for f in pairs(G7.copykeys(s0)) do
+                    for _, f in ipairs(okeys(s0)) do if f:byte(1) ~= 1 then for o in each(ofield[s0][f]) do G7.escmore(o, 'copied-into-lost-target') end end end
+                    for f in sorted(G7.copykeys(s0)) do
                         if f:byte(1) ~= 1 and not field_hit[f] then
                             if TFROM then TCUR = { p, 'a keyed copy of .' .. tostring(f) .. ' into it reaches that field of EVERY escaped object' } end
                             G7.fieldhit(f)
@@ -4683,7 +4688,7 @@ local function build(store, opts)
                     end
                 end
                 local function hit(l) for _, x in ipairs(l) do G7.tparams(fnports[x]) end end
-                if f == '[]' then for _, l in pairs(G7.FNF) do hit(l) end
+                if f == '[]' then for _, l in sorted(G7.FNF) do hit(l) end
                 elseif G7.FNF[f] then hit(G7.FNF[f]) end
                 TCUR = p
             end
