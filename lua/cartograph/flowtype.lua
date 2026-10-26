@@ -31,6 +31,8 @@
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
 --     global read on the repo partial, or WoW w2's solve 15x slower); and _G never ESCAPES — a write through a value
 --     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial);
+--   - _G takes a metatable only through a setmetatable target that holds nothing else (GE's clause: the slot is touched
+--     by an access whose base is exactly {_G} — CART-1837, the user's decision 2026-10-26; experiment no-ge-meta: any);
 --   - a call on a MEMBER of unknown code's value (a receiver load / an unmappable module returned) runs no tree code
 --     and hands its arguments nowhere — a member of EXT is not EXT (CART-1715: 427 typed / string answers went
 --     unknown when it was); a call the flow cannot resolve runs nothing (the name join is no input, CART-1689).
@@ -52,7 +54,7 @@ M.CAP = 64
 -- ran in R.exp. An option a switch names (spread, order…) is set by it unless the caller set it.
 M.EXPERIMENTS = {
     ['no-sinf'] = 'the string-method rule on an EMPTY receiver does not fire (CART-1697: an order source?)',
-    ['ge-meta'] = 'GE\'s metatable slot in the solve: a setmetatable whose target port also holds a value other than the globals table does not give _G the metatable (its __index prototypes and functions, its \\1mt) — GE says _G\'s slot is touched only by an access whose base is exactly {_G}. Order: decided when _G reaches the target, by what the target held then (CART-1837: on WoW w3 a debug printer\'s `pcall(t[k], t)` called AceDB\'s ResetDB with _G, and every undefined global read then called AceDB\'s __index)',
+    ['no-ge-meta'] = 'the plain reading of _G\'s metatable slot: a setmetatable gives _G the metatable through ANY target that holds it. By default (the user\'s decision 2026-10-26, CART-1837) the solve applies GE\'s clause — the slot is touched only by an access whose base is exactly {_G}: a target that holds another value when _G reaches it does not set it (decided then, by what the target held). On WoW w3 a debug printer\'s `pcall(t[k], t)` had called AceDB\'s ResetDB with _G, and every undefined global read then called AceDB\'s __index: exact 175 -> 613, GE refusals 20,943 -> 1,679',
     ['sinf-untainted'] = 'the string-method rule on an EMPTY receiver types its result but does not TAINT it: the hedge-free variant — a certifying consumer (flowpath) pairs it with the default dump and promotes an answer whole there when this one certifies (CART-1829, flowpath FLOW-0042)',
     spread = 'opts.spread: a saturated port saturates what it feeds, never drops out (CART-1741)',
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
@@ -1881,8 +1883,9 @@ local function build(store, opts)
     -- file assigns; value-keyed instances)
     G7.LITKEYS, G7.CONSTK, G7.REASGF, G7.VINST, G7.VINSTN = opts.litkeys or nil, {}, {}, {}, 0
     G7.MAPNAMEF, G7.MAPSITE = {}, {} -- (experiment `strict-records`: file -> map names; object -> a map site)
-    -- (experiment ge-meta, CART-1837: the setmetatable target ports, and whether one holds anything but the globals table)
-    G7.MTT = G7.EXP['ge-meta'] and {} or nil
+    -- (GE's metatable slot, CART-1837 — off under experiment no-ge-meta: the setmetatable target ports, and whether one holds
+    -- anything but the globals table)
+    G7.MTT = not G7.EXP['no-ge-meta'] and {} or nil
     function G7.gemeta(p, o)
         if not (G7.MTT and G7.MTT[p] and G7.ISG[o]) then return false end
         for x in each(p) do if not G7.ISG[x] then return true end end
@@ -2556,7 +2559,7 @@ local function build(store, opts)
                 if argn[2] then
                     local mtp = expr(argn[2])
                     G7.ins({ 'setmeta', tp, mtp })
-                    if G7.MTT then G7.MTT[tp] = true end -- (experiment ge-meta, CART-1837)
+                    if G7.MTT then G7.MTT[tp] = true end -- (GE's metatable slot, CART-1837)
                     proto(tp, field(mtp, '__index'), true)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
                     MTSTORES[#MTSTORES + 1] = { tp, mtp } -- (it was never filled: a parked handler port was never released)
