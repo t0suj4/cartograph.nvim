@@ -72,6 +72,35 @@ for _, r in ipairs(ROUTES) do
     end)
 end
 
+-- (CART-1832: `a and b` passes a's FALSE — a boolean, and ext — through a filter the core IR has no instruction for. The
+-- solve put type:boolean into the result, no instruction said so: the dump states it as a `new` of the boolean site into the
+-- and's result, in the and's function, for each such object a's final set holds)
+test('flowdump: an `a and b` states the booleans its left side passes as a `new` into the result (CART-1832)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local t, u = {}, {}\nlocal function g(flag) w = flag and t end\ng(rawequal(t, u))\nlocal function h(x) v = x and t end\nh(t)\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local bool
+    for _, s in ipairs(D.sites) do if s.label == 'type:boolean' then bool = s.id end end
+    ok(bool, 'the boolean site')
+    local function body(name) for _, F in ipairs(D.functions) do if D.names.functions[F.id + 1]:match(name) then return F.body end end end
+    local function stated(b)
+        local stored, newb = {}, {}
+        for _, i in ipairs(b) do
+            if i[1] == 'store' then stored[i[4]] = true end
+            if i[1] == 'new' and i[3] == bool then newb[i[2]] = true end
+        end
+        for v in pairs(newb) do if stored[v] then return true end end
+        return false
+    end
+    ok(stated(body('::g@')), 'g: the boolean flag passes into w through a `new`: ' .. vim.inspect(body('::g@')))
+    ok(not stated(body('::h@')), 'h: x holds only a table, no boolean is stated: ' .. vim.inspect(body('::h@')))
+    local c = flowcheck.check(D, 5)
+    eq(0, c.unwritten, 'complete')
+end)
+
 test('flowdump: the format — the Lua instance\'s field ids, host sites, per-function error ports, tags, contracts', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local D = dump('local ok, e = pcall(function () error(b) end)\nprint(use(e))\nlocal t = { x = a }\nfor k in pairs(t) do print(k) end\n')

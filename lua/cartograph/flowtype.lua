@@ -1435,6 +1435,7 @@ local function build(store, opts)
     -- for `T|T[]` (vim._ensure_list). -> { alias = i?, srcs = { { i, '[]' | '{k}' | nil } } } or nil
     G7.GENL, G7.GENO = {}, {}
     G7.ANDB = {} -- (an `a and b` result port -> b's port, for the `or` it is the left operand of)
+    G7.ANDF = {} -- (a dump's `a and b`: { a, result, function } — what the filter passed is emitted after the solve, CART-1832)
     function G7.genlist(key, rt)
         if not rt:match('^[A-Z]%d?%[%]$') then return nil end
         local c = G7.GENL[key]
@@ -3260,7 +3261,11 @@ local function build(store, opts)
                 -- (`(a and b) or c` is b where truthy, else c: the and's falsy part — a's — never reaches it, so the or
                 -- takes b itself. Through the filter an ESCAPED a had tainted it: `s.label and extend(lbls, …) or lbls`
                 -- made flow.lua's wire's lbls top, two refusals, CART-1813)
-                if op == 'and' then local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); G7.ANDB[r] = b; return r end
+                if op == 'and' then
+                    local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); G7.ANDB[r] = b
+                    if G7.REC and G7.W then G7.ANDF[#G7.ANDF + 1] = { a, r, G7.cur() } end -- (CART-1832: its left flow, emitted after the solve)
+                    return r
+                end
                 if op == 'or' then local r = new(); edge(G7.ANDB[a] or a, r); edge(b, r); return r end
                 local res = new()
                 local mm = METAOP[op]
@@ -5489,6 +5494,14 @@ local function build(store, opts)
         end
     end
     if G7.REC then -- (opts.dump: the program in the core IR and this solution, CART-1710)
+        -- (an `a and b`'s LEFT flow, CART-1832: the solve passes a's booleans and ext through a filter the core IR has no
+        -- instruction for — each one a's final set holds is stated as a `new` of its site into the result, in the and's
+        -- function)
+        for _, af in ipairs(G7.ANDF) do
+            if not top[af[1]] then
+                for o in each(af[1]) do if TNAME[o] == 'boolean' or o == G7.EXT then G7.REC.ins(af[3], { 'new', af[2], o }) end end
+            end
+        end
         local FD = require 'cartograph.flowdump'
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         -- (a dump to a FILE streams there — R.dump stays nil; dump = true returns the text, CART-1664)
