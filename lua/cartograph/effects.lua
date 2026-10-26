@@ -1193,6 +1193,14 @@ function M.summaries(store)
                     -- (an INFERRED edge — the name join's guess, not a binding — is a premise like a joined candidate: what
                     -- the callee does is taken, hedged `~`, never confirmed. CART-1715: repo, 261 of 17,836 purity verdicts)
                     if to and c.inferred then sum.jp = true end
+                    -- (a bare LOCAL derived from a parameter — `pred = value … pred(v)`, vim.tbl_contains — may hold what
+                    -- the caller passed there: the call is ALSO a call of that parameter, whatever else it resolved to —
+                    -- the local's other writer, a closure, is its `to`. CART-1787: shared.lua's summary said calls {})
+                    do
+                        local cn = caller and caller.derived and (callrec.full(c) or callrec.callee(c))
+                        local dj = cn and not cn:find('[.:]') and caller.derived[cn]
+                        if dj then cp_add(sum, caller.id, dj) end
+                    end
                     if to and con.comp[to] == ci then
                         -- intra-SCC: members share this summary already
                         intra[#intra + 1] = { c = c, caller = caller, to = to }

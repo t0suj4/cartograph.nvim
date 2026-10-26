@@ -238,6 +238,26 @@ test('fixpoint: a call through a PARAMETER is substituted at each call to its ow
     eq('pure', effects.purity(store, by.done.id), 'a continuation inside the walker\'s component is the component\'s own')
 end)
 
+-- (CART-1787: vim.tbl_contains's shape — `local pred; if opts then pred = value else pred = function … end end; pred(v)`.
+-- The call resolves to the local closure; pred ALSO holds parameter 2, so the call is a call of that parameter too)
+test('fixpoint: a call through a LOCAL derived from a parameter is also a call of that parameter (CART-1787)', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local log = {}',
+        'local function contains(t, value, opts)',
+        '  local pred',
+        '  if opts then pred = value else pred = function (v) return v == value end end',
+        '  for _, v in pairs(t) do if pred(v) then return true end end',
+        '  return false',
+        'end',
+        'local function noisy(t) return contains(t, function (v) log[#log + 1] = v; return false end, true) end',
+        'local function quiet(t) return contains(t, 3) end',
+        'return { noisy, quiet }' }, '\n'))))
+    local by = byname()
+    eq('writes', effects.purity(store, by.noisy.id), 'the predicate it hands in writes `log`')
+    eq('pure', effects.purity(store, by.quiet.id), 'a value handed there: calling it would raise, no write')
+end)
+
 test('fixpoint: REBINDING a parameter (`t = t.kids[i]`) is no write through it — only a store INTO it (`t.x = 1`, `t[k] = 1`) mutates the caller\'s table', function ()
     if not ready() then skip 'no lua parser' end
     store.ingest(ts.extract(mkroot(table.concat({
