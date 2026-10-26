@@ -668,7 +668,7 @@ local function build(store, opts)
         addobj(ofp(o, f), c)
     end
     local LOADV = 0 -- (load_obj calls: stats.loadvisits, the complexity a spec pins — CART-1686)
-    local function load_obj(o, f, dst, seen, strict)
+    local function load_obj(o, f, dst, seen, strict, via)
         LOADV = LOADV + 1
         if G7.PH and G7.PH[o] then G7.phchild(o, f) end
         -- (the cycle guard only matters along PROTOTYPES: allocated at the first one — 2.2 M sets per solve were built
@@ -682,7 +682,7 @@ local function build(store, opts)
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
             -- `string.pick = …` among them; `s[k]` had read nothing, an unexplained loadDyn in the dump, CART-1730)
             local sl = G7.MULTI and G7.LENV[dst] and G7.LENV[dst].STRLIB or G7.STRLIB
-            if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict) end
+            if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict, o) end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             -- (a host RECORD's declared field, CART-1827: `debug.getinfo(1, 'S').source` is a string — the profile's
@@ -713,6 +713,18 @@ local function build(store, opts)
         -- the same call, below), and a prototype o gains LATER receives o's recorded loads through replay_loads — so a
         -- repeat could only re-walk the prototype DAG under a fresh `seen`. On WoW's mixin-dense trees that re-walk was
         -- 91% of the solve (w2, 607k lines: 184.7 s -> 15.6 s, every verdict row identical)
+        -- (open mode, CART-1784: the children a list's readers came THROUGH — `via`, the object whose prototype o is — and
+        -- whether any reader loaded o ITSELF; O2 asks it of a prototype's data field. Begun at the first read through a
+        -- child (every reader already there a direct one), one record per list: per reader had cost vimruntime's open
+        -- solve +70% peak)
+        if G7.VIA then
+            local v = G7.VIA[l]
+            if not v and via then
+                v = { d = next(l) ~= nil or next(G7.PARK[l] or NOTHING) ~= nil, c = {} }
+                G7.VIA[l] = v
+            end
+            if v then if via then v.c[via] = true else v.d = true end end
+        end
         if l[dst] ~= nil then return end
         do local pk = G7.PARK and G7.PARK[l]; if pk and pk[dst] ~= nil then return end end -- CART-1742 (parked: registered)
         do
@@ -760,7 +772,7 @@ local function build(store, opts)
         -- (a HIDDEN field — the metatable `\1mt`, a thread's `\1co` — is the object's own: no __index chain reaches it)
         if pr and f:byte(1) ~= 1 then
             seen = seen or { [o] = true }
-            for c in pairs(pr) do load_obj(c, f, dst, seen, strict) end
+            for c in pairs(pr) do load_obj(c, f, dst, seen, strict, o) end
         end
     end
     -- the loads recorded on o, replayed on c (a prototype o gained) — field names in ONE order
@@ -769,7 +781,7 @@ local function build(store, opts)
         local r = rd[o]
         if not r then return end
         for f, l in sorted(r) do
-            if f ~= NS and f:byte(1) ~= 1 then G7.allreaders(l, function (dst, strict) load_obj(c, f, dst, nil, strict) end) end -- CART-1742
+            if f ~= NS and f:byte(1) ~= 1 then G7.allreaders(l, function (dst, strict) load_obj(c, f, dst, nil, strict, o) end) end -- CART-1742
         end
     end
     -- (PARAMETER PATHS, opts.pathsum — CART-1673: a parameter's port is tagged { fn, j, path = '' }, a load through a
@@ -1435,6 +1447,7 @@ local function build(store, opts)
     -- for `T|T[]` (vim._ensure_list). -> { alias = i?, srcs = { { i, '[]' | '{k}' | nil } } } or nil
     G7.GENL, G7.GENO = {}, {}
     G7.ANDB = {} -- (an `a and b` result port -> b's port, for the `or` it is the left operand of)
+    G7.VIA = open and {} or nil -- (open mode: a load's reader list -> reader -> the children it came through, CART-1784)
     G7.ANDF = {} -- (a dump's `a and b`: { a, result, function } — what the filter passed is emitted after the solve, CART-1832)
     function G7.genlist(key, rt)
         if not rt:match('^[A-Z]%d?%[%]$') then return nil end
@@ -4338,6 +4351,21 @@ local function build(store, opts)
         end
         return false
     end
+    -- (CART-1784: o's field f is read ONLY through children whose own f holds a function — `M.mk_b` on M whose prototype
+    -- is P: the lookup stops at M's member, which C1 says the outside does not replace, so what it writes into P.mk_b
+    -- reaches none of these readers. A reader of o itself, or through a child whose f is data, keeps the taint)
+    function G7.shadowed(o, f)
+        local l = G7.VIA and rd[o] and rd[o][f]
+        local v = l and G7.VIA[l]
+        if not v or v.d then return false end
+        for x in pairs(v.c) do
+            local xp = ofield[x] and ofield[x][f]
+            local fnf = false
+            if xp and not top[xp] then for y in each(xp) do if fnports[y] then fnf = true; break end end end
+            if not fnf then return false end
+        end
+        return next(v.c) ~= nil
+    end
     function G7.outw(o, o2)
         if G7.OUTWD[o] or fnports[o] then return end
         -- (a host value escaping late — a string handed to a lost call — has no data fields the outside writes: its
@@ -4357,7 +4385,7 @@ local function build(store, opts)
             if f:byte(1) ~= 1 and f ~= '{k}' and f ~= '[]' then
                 local fn = false
                 for x in each(fp) do if fnports[x] then fn = true; break end end
-                if not (fn or G7.protofn(o, f, {})) then taint(fp) end
+                if not (fn or G7.protofn(o, f, {}) or G7.shadowed(o, f)) then taint(fp) end
             end
         end
         if TNAME[o] or o == EXT then return end

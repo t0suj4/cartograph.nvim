@@ -2111,6 +2111,53 @@ test('flowtype: GE\'s metatable slot (no-ge-meta off): a setmetatable target tha
     ok(ge:find('@4', 1, true), 'default: only\'s target held exactly _G, so it does: ' .. ge)
 end)
 
+-- (CART-1784, open mode: O2 taints a prototype's DATA field the outside may write — but `M.mk_b` reads M's OWN member, a
+-- function C1 says the outside does not replace, so the lookup never reaches P.mk_b. A reader of P itself keeps it)
+test('flowtype open mode: a prototype field read only through a child\'s function member is not tainted by O2 (CART-1784)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['lua/m/init.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return "A" end',
+        'function B.m(self) return "B" end',
+        'local P = {}',
+        'function P.one() end',
+        'local M = setmetatable({}, { __index = P })',
+        'M.one = setmetatable({}, { __index = A })',
+        'function M.mk_b() return setmetatable({}, { __index = B }) end',
+        'function M.run() return M[("oth"):lower() .. "er"]:m() end',
+        'local w = M.mk_b(); w:m()',
+        'P.cfg = setmetatable({}, { __index = A })',
+        'local z = P.cfg; z:m()',
+        -- (the same shape, but P2.mk_b is ALSO read on P2 itself: the outside's write reaches that reader, and the
+        -- taint of the one cell reaches every reader of it — w2 stays partial)
+        'local P2 = {}',
+        'local M2 = setmetatable({}, { __index = P2 })',
+        'function M2.mk_b() return setmetatable({}, { __index = B }) end',
+        'M.two = M2',
+        'local raw = P2.mk_b',
+        'local w2 = M2.mk_b(); w2:m()',
+        'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { ctx = false })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local by = {}
+    for _, c in ipairs(store.data.calls) do
+        local full = callrec.full(c)
+        if full == 'w:m' or full == 'z:m' or full == 'w2:m' then by[full] = R.verdict(c) or { kind = 'none' } end
+    end
+    local w = by['w:m']
+    ok(w, 'the call w:m(): ' .. vim.inspect(by))
+    eq('exact', w.kind, vim.inspect(w))
+    ok(not w.partial, 'M.mk_b reads M\'s own function: P.mk_b\'s taint does not reach it — ' .. vim.inspect(w))
+    local z = by['z:m']
+    ok(z and z.kind == 'exact', 'the call z:m(): ' .. vim.inspect(by))
+    ok(z.partial, 'P.cfg is a data field read on P ITSELF: the outside may write it, the answer stays partial — ' .. vim.inspect(z))
+    local w2 = by['w2:m']
+    ok(w2 and w2.kind == 'exact', 'the call w2:m(): ' .. vim.inspect(by))
+    ok(w2.partial, 'P2.mk_b is also read on P2 itself: its taint reaches M2.mk_b\'s reader too — ' .. vim.inspect(w2))
+end)
+
 -- (USER 2026-10-17: "flowtype could have some experiments" — a variant of the solve is a NAMED switch, selected by opts.exp
 -- or CARTOGRAPH_FLOWTYPE_EXP, recorded in R.exp; an unknown name is an error)
 test('flowtype experiments: named switches from opts or the environment; an unknown name refuses; no-sinf turns the rule off', function ()
