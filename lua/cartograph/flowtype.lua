@@ -530,6 +530,7 @@ local function build(store, opts)
     -- error port an __index function's raise reaches, LOADERR — so prototype replays and __index calls still see them)
     -- and the list feeds ⊤ once instead (the strict ⊤ for a strict reader)
     G7.PARK, G7.FEDTOP = {}, {}
+    G7.FEDK, G7.FEDKN = opts.fedk ~= false and {} or nil, 0 -- (CART-1836: an object's key count at its last completed ⊤ walk)
     function G7.rereaders(l)
         local dead
         for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS and not G7.isrtop(dst) then dead = dead or {}; dead[#dead + 1] = dst end end
@@ -735,7 +736,18 @@ local function build(store, opts)
             elseif f == '[]' then
                 local m = ofield[o]
                 local named = G7.PKGL and G7.PKGL[o] and G7.PKGNAMED
-                for _, fk in ipairs(okeys(o)) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(m[fk]) end end
+                -- (CART-1836, flowpath FLOW-0116: into ⊤ a walk only marks each field FEDTOP, once per field, so a walk
+                -- over o when o has the key count a completed ⊤ walk had does nothing: skipped. Exact — fields are only
+                -- added, never replaced, so an equal count is the same key set; PKGNAMED only grows; the condition is
+                -- taken BEFORE the walk, a dst that saturates during it records nothing. w3: keys walked 483M -> 80M,
+                -- answer rows identical. opts.fedk = false walks every time)
+                local ks = okeys(o)
+                local fedtop = G7.FEDK and G7.TOPL and top[dst] and not G7.isrtop(dst)
+                if fedtop and G7.FEDK[o] == #ks then G7.FEDKN = G7.FEDKN + 1
+                else
+                    for _, fk in ipairs(ks) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(m[fk]) end end
+                    if fedtop then G7.FEDK[o] = #ks end
+                end
             else pull(ofp(o, f)); pull(ofp(o, '[]')) end
             -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
             local fm = IDXFN[o]
@@ -4775,7 +4787,7 @@ local function build(store, opts)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
     local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
-        files = #files, ports = N, objects = NO }
+        files = #files, ports = N, objects = NO, fedk_skips = G7.FEDKN }
     stats.vinstances = G7.VINSTN
     -- (refl-scope: what the region taint inspected, and the capabilities that fell back — DIAGNOSTIC counts: which port a
     -- capability is first seen at depends on the drain order, string-keyed walks among it; which tops escape does not)

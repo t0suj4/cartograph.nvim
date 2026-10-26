@@ -1993,6 +1993,54 @@ test('flowtype: one top node for every saturated port moves no answer', function
     eq(a, b, 'the same answers')
 end)
 
+-- (CART-1836: a dynamic `o[k]` walk into ⊤ over an object whose key set a completed ⊤ walk already fed is skipped — an
+-- optimisation, never a change: twelve objects share a prototype P, each `oI[K]` saturates its destination on oI's own
+-- five fields and then walks P into ⊤; every walk of P after the first is a skip, and the solution is the same without it)
+test('flowtype: a dynamic walk into a saturated destination over an already-fed object is skipped, the solution unchanged (CART-1836)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local src = { 'local A, B = {}, {}', 'function A:go() return 1 end', 'function B:go() return 2 end',
+        'local P = { x = function () end, y = A, z = {} }', 'local mt = { __index = P }', 'local K = UNKNOWN_KEY' }
+    for i = 1, 12 do
+        src[#src + 1] = ('local o%d = setmetatable({ a = {}, b = {}, c = {}, d = {}, e = B }, mt)'):format(i)
+        src[#src + 1] = ('local v%d = o%d[K]'):format(i, i)
+        src[#src + 1] = ('v%d:go(); o%d.y:go(); o%d.e:go()'):format(i, i, i)
+    end
+    -- (P gains a key DURING the solve, after walks of it: a later walk is no skip — its new field's objects arrive)
+    src[#src + 1] = 'local function put(t, v) t.w = v end'
+    src[#src + 1] = 'put(o12[K], { go = function () return 3 end })'
+    src[#src + 1] = 'put(P, function () end)'
+    src[#src + 1] = 'local L = P.w; L:go()'
+    src[#src + 1] = 'return P, A, B'
+    local root = tree({ ['m.lua'] = table.concat(src, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 4
+    local function solution(fedk)
+        local R = flowtype.solve(store, { open = false, ctx = false, fedk = fedk, exp = 'expose' })
+        local I, out = R.internals, {}
+        for p = 1, I.NW do
+            local os = {}
+            if not I.top[p] then for o in I.each(p) do os[#os + 1] = tostring(I.obinfo[o]) end end
+            table.sort(os)
+            out[#out + 1] = p .. (I.top[p] and ' T' or '') .. (I.tainted[p] and ' ~' or '') .. ' ' .. table.concat(os, ',')
+        end
+        local esc = {}
+        for o in pairs(I.escaped) do esc[#esc + 1] = tostring(I.obinfo[o]) end
+        table.sort(esc)
+        out[#out + 1] = 'escaped ' .. table.concat(esc, ',')
+        for _, pr in ipairs(R.probes) do out[#out + 1] = pr.line .. ':' .. pr.col .. ' ' .. pr.kind .. ' ' .. table.concat(pr.targets, ',') .. (pr.partial and '~' or '') end
+        return out, R.stats
+    end
+    local a, sa = solution(false)
+    local b, sb = solution(nil)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    eq(0, sa.fedk_skips, 'opts.fedk = false: every walk runs')
+    ok(sb.fedk_skips >= 10, 'the walks of P after the first are skipped: ' .. sb.fedk_skips)
+    ok(sb.probes >= 30, 'the probes: ' .. sb.probes)
+    eq(a, b, 'the same ports, objects, tops, taint, escapes and answers')
+end)
+
 -- (USER 2026-10-17: "flowtype could have some experiments" — a variant of the solve is a NAMED switch, selected by opts.exp
 -- or CARTOGRAPH_FLOWTYPE_EXP, recorded in R.exp; an unknown name is an error)
 test('flowtype experiments: named switches from opts or the environment; an unknown name refuses; no-sinf turns the rule off', function ()
