@@ -2078,6 +2078,39 @@ test('flowtype: field names are walked in one order — a keyed copy makes the t
     vim.fn.delete(root, 'rf')
 end)
 
+-- (experiment ge-meta, CART-1837: GE's metatable slot — _G takes a metatable only through a target that holds nothing
+-- else. On WoW w3 a debug printer's `pcall(t[k], t)` called AceDB's ResetDB with _G among t's values, initdb set dbmt on
+-- it, and every undefined global read then called dbmt's __index)
+test('flowtype experiment ge-meta: a setmetatable target that also holds other tables gives _G no metatable; an exact _G target does', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = table.concat({
+            'local mt = { __index = function (t, k) return k end }',
+            'local function set(x) setmetatable(x, mt) end',
+            'set({})',
+            'set(_G)',
+            'local mt2 = { __index = function (t, k) return 2 end }',
+            'local function only(g) setmetatable(g, mt2) end',
+            'only(_G)',
+            'return set, only' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local function g_protos(exp)
+        local R = flowtype.solve(store, { open = false, ctx = false, exp = exp })
+        local I, G = R.internals, nil
+        for o, n in pairs(I.obinfo) do if n == '_G' then G = o end end
+        local out = {}
+        for c in pairs(I.protos[G] or {}) do out[#out + 1] = tostring(I.obinfo[c]) end
+        table.sort(out)
+        return table.concat(out, ' ')
+    end
+    local stock, ge = g_protos('expose'), g_protos('expose,ge-meta')
+    vim.fn.delete(root, 'rf')
+    ok(stock:find('@0', 1, true) and stock:find('@4', 1, true), 'stock: _G has both __index functions as prototypes: ' .. stock)
+    ok(not ge:find('@0', 1, true), 'ge-meta: set\'s target held {} too, so _G takes no mt: ' .. ge)
+    ok(ge:find('@4', 1, true), 'ge-meta: only\'s target held exactly _G, so it does: ' .. ge)
+end)
+
 -- (USER 2026-10-17: "flowtype could have some experiments" — a variant of the solve is a NAMED switch, selected by opts.exp
 -- or CARTOGRAPH_FLOWTYPE_EXP, recorded in R.exp; an unknown name is an error)
 test('flowtype experiments: named switches from opts or the environment; an unknown name refuses; no-sinf turns the rule off', function ()

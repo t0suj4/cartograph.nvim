@@ -52,6 +52,7 @@ M.CAP = 64
 -- ran in R.exp. An option a switch names (spread, order…) is set by it unless the caller set it.
 M.EXPERIMENTS = {
     ['no-sinf'] = 'the string-method rule on an EMPTY receiver does not fire (CART-1697: an order source?)',
+    ['ge-meta'] = 'GE\'s metatable slot in the solve: a setmetatable whose target port also holds a value other than the globals table does not give _G the metatable (its __index prototypes and functions, its \\1mt) — GE says _G\'s slot is touched only by an access whose base is exactly {_G}. Order: decided when _G reaches the target, by what the target held then (CART-1837: on WoW w3 a debug printer\'s `pcall(t[k], t)` called AceDB\'s ResetDB with _G, and every undefined global read then called AceDB\'s __index)',
     ['sinf-untainted'] = 'the string-method rule on an EMPTY receiver types its result but does not TAINT it: the hedge-free variant — a certifying consumer (flowpath) pairs it with the default dump and promotes an answer whole there when this one certifies (CART-1829, flowpath FLOW-0042)',
     spread = 'opts.spread: a saturated port saturates what it feeds, never drops out (CART-1741)',
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
@@ -817,7 +818,7 @@ local function build(store, opts)
         -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761)
         for o in each(x) do
             local tn = TNAME[o]
-            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt') then edge(v, ofp(o, f)) end
+            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt') and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
         end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
@@ -1187,6 +1188,7 @@ local function build(store, opts)
         -- reads the slot, or its __metatable. pairs / ipairs return the iterator — next's native, the table — CART-1793)
         M0['setmetatable'] = function (a, rl)
             if a[1] and a[2] then
+                if G7.MTT then G7.MTT[a[1]] = true end
                 proto(a[1], field(a[2], '__index'), true)
                 storec(a[1], '\1mt', a[2])
                 MTSTORES[#MTSTORES + 1] = { a[1], a[2] }
@@ -1640,7 +1642,7 @@ local function build(store, opts)
                             -- (a host object takes a store only when its kind is OPEN: a 'prim' raises, a 'members' one has
                             -- its declared members only, CART-1761)
                             local tn = TNAME[o]
-                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st[1] == '\1mt') then edge(st[2], ofp(o, st[1])) end
+                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st[1] == '\1mt') and not (st[1] == '\1mt' and G7.MTT and G7.gemeta(p, o)) then edge(st[2], ofp(o, st[1])) end
                         end
                     end
                     G7.mtcopy(p)
@@ -1666,11 +1668,11 @@ local function build(store, opts)
                     end
                     for _, idx in ipairs(protos_at[p] or NOTHING) do
                         local lua = LUAIDX[idx]
-                        for _, o in dit(d) do for c in each(idx) do protolink(o, c, lua) end end
+                        for _, o in dit(d) do if not (G7.MTT and G7.gemeta(p, o)) then for c in each(idx) do protolink(o, c, lua) end end end
                     end
                     local plua = LUAIDX[p]
                     for _, t in ipairs(protos_rev[p] or NOTHING) do
-                        for o in each(t) do for _, c in dit(d) do protolink(o, c, plua) end end
+                        for o in each(t) do if not (G7.MTT and G7.gemeta(t, o)) then for _, c in dit(d) do protolink(o, c, plua) end end end
                     end
                 end
             end
@@ -1879,6 +1881,13 @@ local function build(store, opts)
     -- file assigns; value-keyed instances)
     G7.LITKEYS, G7.CONSTK, G7.REASGF, G7.VINST, G7.VINSTN = opts.litkeys or nil, {}, {}, {}, 0
     G7.MAPNAMEF, G7.MAPSITE = {}, {} -- (experiment `strict-records`: file -> map names; object -> a map site)
+    -- (experiment ge-meta, CART-1837: the setmetatable target ports, and whether one holds anything but the globals table)
+    G7.MTT = G7.EXP['ge-meta'] and {} or nil
+    function G7.gemeta(p, o)
+        if not (G7.MTT and G7.MTT[p] and G7.ISG[o]) then return false end
+        for x in each(p) do if not G7.ISG[x] then return true end end
+        return false
+    end
     G7.MSELF = opts.selfseed and {} or nil -- (each `function T:m`'s self port and T's port: the self seed, CART-1715)
     -- (the modules the environment profile declares: every dotted prefix of a signature's path)
     function G7.profmod(name)
@@ -2547,6 +2556,7 @@ local function build(store, opts)
                 if argn[2] then
                     local mtp = expr(argn[2])
                     G7.ins({ 'setmeta', tp, mtp })
+                    if G7.MTT then G7.MTT[tp] = true end -- (experiment ge-meta, CART-1837)
                     proto(tp, field(mtp, '__index'), true)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
                     MTSTORES[#MTSTORES + 1] = { tp, mtp } -- (it was never filled: a parked handler port was never released)
