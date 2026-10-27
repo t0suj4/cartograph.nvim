@@ -2111,6 +2111,35 @@ test('flowtype: GE\'s metatable slot (no-ge-meta off): a setmetatable target tha
     ok(ge:find('@4', 1, true), 'default: only\'s target held exactly _G, so it does: ' .. ge)
 end)
 
+-- (CART-1838: a FUNCTION takes no metatable — setmetatable raises on one, the dump's clause function-no-metatable — so
+-- a setmetatable target that may hold a function links its __index to the tables only; debug.setmetatable may set one)
+test('flowtype: a setmetatable target holding a function gives the function no prototype; debug.setmetatable does (CART-1838)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = table.concat({
+            'local idx = { m = function () return 1 end }',
+            'local mt = { __index = idx }',
+            'local function set(x) setmetatable(x, mt) end',
+            'local t = {}',
+            'local function f() end',
+            'set(t)',
+            'set(f)',
+            'local function g() end',
+            'debug.setmetatable(g, mt)',
+            'return t, f, g' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, ctx = false, exp = 'expose' })
+    local I = R.internals
+    local function obj(pat) for o, n in pairs(I.obinfo) do if tostring(n):find(pat) then return o end end end
+    local idx, t, f, g = obj('^tbl:a.lua:0:'), obj('^tbl:a.lua:3:'), obj('::f@4$'), obj('::g@7$')
+    vim.fn.delete(root, 'rf')
+    ok(idx and t and f and g, 'objects found')
+    ok(I.protos[t] and I.protos[t][idx], 'the table takes __index')
+    ok(not (I.protos[f] and I.protos[f][idx]), 'the function set reached does not')
+    ok(I.protos[g] and I.protos[g][idx], 'debug.setmetatable\'s function does')
+end)
+
 -- (CART-1784, open mode: O2 taints a prototype's DATA field the outside may write — but `M.mk_b` reads M's OWN member, a
 -- function C1 says the outside does not replace, so the lookup never reaches P.mk_b. A reader of P itself keeps it)
 test('flowtype open mode: a prototype field read only through a child\'s function member is not tainted by O2 (CART-1784)', function ()

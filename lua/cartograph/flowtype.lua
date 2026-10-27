@@ -1267,6 +1267,7 @@ local function build(store, opts)
         -- (on a STRING it replaces every string's metatable: the string library gains the new __index as a prototype —
         -- l34, CART-1811; the old one is kept, a sound over-approximation)
         M0['debug#setmetatable'] = function (a, rl)
+            if a[1] then G7.DBGMT[a[1]] = true end
             M0['setmetatable'](a, rl)
             if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
         end
@@ -1682,13 +1683,18 @@ local function build(store, opts)
                             if rt then addobj(mf[2], G7.retobj(rt, mf[2], tn .. '#' .. mf[1])) end
                         end
                     end
+                    -- (a FUNCTION takes no metatable — setmetatable raises on one, the dump's clause function-no-metatable:
+                    -- a Lua link to a function target is not made, unless debug.setmetatable reached that target.
+                    -- WoW w3: 9 of the top 26 __index objects were functions, CART-1838)
                     for _, idx in ipairs(protos_at[p] or NOTHING) do
                         local lua = LUAIDX[idx]
-                        for _, o in dit(d) do if not (G7.MTT and G7.gemeta(p, o)) then for c in each(idx) do protolink(o, c, lua) end end end
+                        local nofn = lua and not G7.DBGMT[p]
+                        for _, o in dit(d) do if not (G7.MTT and G7.gemeta(p, o)) and not (nofn and fnports[o]) then for c in each(idx) do protolink(o, c, lua) end end end
                     end
                     local plua = LUAIDX[p]
                     for _, t in ipairs(protos_rev[p] or NOTHING) do
-                        for o in each(t) do if not (G7.MTT and G7.gemeta(t, o)) then for _, c in dit(d) do protolink(o, c, plua) end end end
+                        local nofn = plua and not G7.DBGMT[t]
+                        for o in each(t) do if not (G7.MTT and G7.gemeta(t, o)) and not (nofn and fnports[o]) then for _, c in dit(d) do protolink(o, c, plua) end end end
                     end
                 end
             end
@@ -1900,6 +1906,7 @@ local function build(store, opts)
     -- (GE's metatable slot, CART-1837 — off under experiment no-ge-meta: the setmetatable target ports, and whether one holds
     -- anything but the globals table)
     G7.MTT = not G7.EXP['no-ge-meta'] and {} or nil
+    G7.DBGMT = {} -- (the debug.setmetatable target ports: a function there may take the metatable, CART-1838)
     function G7.gemeta(p, o)
         if not (G7.MTT and G7.MTT[p] and G7.ISG[o]) then return false end
         for x in each(p) do if not G7.ISG[x] then return true end end
@@ -4764,11 +4771,12 @@ local function build(store, opts)
         for _, mf in ipairs(mflows[p] or NOTHING) do taint(mf[2]) end
         for _, t in ipairs(protos_rev[p] or NOTHING) do
             -- (its __index SOURCE is incomplete, so o's prototype chain may be: o is PROTOTYPE-INCOMPLETE — the
-            -- verdict walks protos[o] directly, CART-1709)
-            for o in each(t) do
+            -- verdict walks protos[o] directly, CART-1709; a function target takes no Lua link, CART-1838)
+            local nofn = LUAIDX[p] and not G7.DBGMT[t]
+            for o in each(t) do if not (nofn and fnports[o]) then
                 PINC[o] = PINC[o] or p
                 for f, l in pairs(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
-            end
+            end end
         end
         ::parked::
     end
