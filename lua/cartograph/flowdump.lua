@@ -220,7 +220,12 @@ function M.build(rec, X, sink)
             local bad = sf.level ~= nil
             if not bad and sf.port then
                 if X.top and X.top[sf.port] then bad = true
-                else for o in X.each(sf.port) do if X.fnports[o] then bad = true; break end end end
+                else
+                    -- (holding NOTHING it was handed a level — a number is no object, CART-1840)
+                    local any = false
+                    for o in X.each(sf.port) do any = true; if X.fnports[o] then bad = true; break end end
+                    if not any then bad = true end
+                end
             end
             if bad then
                 harmful = harmful + 1

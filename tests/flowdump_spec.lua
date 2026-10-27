@@ -666,6 +666,26 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when a
     end
 end)
 
+-- (CART-1840: a LEVEL held in a variable — a number is no object, so the argument holds nothing. It sets the calling
+-- function's environment: no fixed-env, a setfenv gap, and the solve applies it)
+test('flowdump: a setfenv level held in a variable withholds fixed-env and keeps a gap; the solve applies it (CART-1840)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D, R = dump('\nlocal n = 1\nlocal function f() setfenv(n, { y = a }); return y:m() end\nreturn f\n')
+    local kinds = {}
+    for _, g in ipairs(D.gaps) do kinds[g.kind] = true end
+    ok(D.contracts.clauses['fixed-env'] == nil and kinds.setfenv, 'no fixed-env, a setfenv gap: ' .. vim.inspect(D.gaps))
+    -- (`y` in f reads the environment's field — CLASSES' a, whose m is A.m)
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'y:m' then v = R.verdict(c) end end
+    ok(v and v.kind == 'exact' and tostring(v.targets[1]):find('A.m', 1, true), 'y:m() is A.m: ' .. vim.inspect(v))
+    -- (a level may be 0, the thread's: a store through getfenv(0) lands in E)
+    D, R = dump('\nlocal E = {}\nlocal n = 0\nsetfenv(n, E)\ngetfenv(0).z = b\nE.z:m()\nreturn E\n')
+    v = nil
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'E.z:m' then v = R.verdict(c) end end
+    ok(v and v.kind == 'exact' and tostring(v.targets[1]):find('B.m', 1, true), 'E.z:m() is B.m: ' .. vim.inspect(v))
+end)
+
 -- (CART-1838 (experiment no-getfenv0: the plain union): getfenv(0) is the THREAD's environment. A setfenv at level 1 withholds fixed-env, but
 -- getfenv(0) is still the globals table — no gap, under the clause thread-env; a setfenv that may set level 0 keeps it)
 test('flowdump: getfenv(0) is the globals table under thread-env; a setfenv that may set level 0 keeps the gap (CART-1838)', function ()

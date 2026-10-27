@@ -1946,8 +1946,8 @@ local function build(store, opts)
         end
         return e.G0P
     end
-    function G7.g0set(env)
-        local e = G7.ENV
+    function G7.g0set(env, e)
+        e = e or G7.ENV
         e.G0SET = e.G0SET or {}
         e.G0SET[#e.G0SET + 1] = env
         if e.G0P then edge(env, e.G0P) end
@@ -2668,7 +2668,8 @@ local function build(store, opts)
                 local pf = fnstack[#fnstack]
                 if fa:type() ~= 'number' then
                     local fp = expr(fa)
-                    G7.FENV[#G7.FENV + 1] = { port = fp, env = env }
+                    -- (lvl: the environment the readings of a LEVEL apply in, if fp ends empty — CART-1840)
+                    G7.FENV[#G7.FENV + 1] = { port = fp, env = env, lvl = G7.ENV }
                     G7.SETFENVS[#G7.SETFENVS + 1] = { fn = G7.cur(), port = fp }
                     return fp
                 elseif txt(fa) == '1' and (pf or G7.CHUNK) then G7.FENV[#G7.FENV + 1] = { id = pf and pf.id or G7.CHUNK, env = env }
@@ -3855,6 +3856,28 @@ local function build(store, opts)
         end
     end
     solve()
+    -- (CART-1840: a setfenv whose first argument holds NOTHING was handed a LEVEL — a number is no object. Once the
+    -- solve shows it empty, every reading of a level: any function's environment — env a prototype of _G, which covers
+    -- the calling function's (1) — and the thread's (0, CART-1838); then solved again. `local n = 1; setfenv(n, env)`
+    -- had set no environment. The dump keeps its setfenv gap)
+    do
+        local more = false
+        for _, fe in ipairs(G7.FENV) do
+            local lv = fe.lvl
+            if lv and not top[fe.port] then
+                local empty = true
+                for _ in each(fe.port) do empty = false; break end
+                if empty then
+                    more = true
+                    local gp = lv.GPORT
+                    proto(gp, fe.env)
+                    for o in each(gp) do for c in each(fe.env) do protolink(o, c) end end -- (proto links only what arrives later)
+                    if not G7.EXP['no-getfenv0'] then G7.g0set(fe.env, lv) end
+                end
+            end
+        end
+        if more then solve() end
+    end
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
     for _ = 1, 20 do
         local grew = false
