@@ -671,6 +671,19 @@ local function build(store, opts)
         addobj(ofp(o, f), c)
     end
     local LOADV = 0 -- (load_obj calls: stats.loadvisits, the complexity a spec pins — CART-1686)
+    -- (CART-1839: load_obj's `pull`, hoisted — a function that makes a closure closes its upvalues (UCLO) before every
+    -- return, which LuaJIT 2.1's recorder does not implement: every trace through load_obj aborted at its exit)
+    function G7.pull(dst, q)
+        if top[q] then if spread then settop(dst) end return end
+        -- CART-1742: into ⊤, a field's objects are marked escaped ONCE: the first saturated reader stays
+        -- registered on it (parked) and the list's ⊤ marker takes what it gains later
+        if G7.TOPL and top[dst] and not G7.isrtop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
+        local sq = pts[q]
+        local ts, tk = G7.TSRC, G7.TKIND
+        if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
+        if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
+        if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
+    end
     local function load_obj(o, f, dst, seen, strict, via)
         LOADV = LOADV + 1
         if G7.PH and G7.PH[o] then G7.phchild(o, f) end
@@ -734,23 +747,13 @@ local function build(store, opts)
             l[dst] = strict and true or false
             if not strict and f ~= '[]' then local ns = r[NS]; if not ns then ns = {}; r[NS] = ns end; ns[dst] = true end
             -- (what the fields hold already; what they gain later reaches dst as their readers)
-            local function pull(q)
-                if top[q] then if spread then settop(dst) end return end
-                -- CART-1742: into ⊤, a field's objects are marked escaped ONCE: the first saturated reader stays
-                -- registered on it (parked) and the list's ⊤ marker takes what it gains later
-                if G7.TOPL and top[dst] and not G7.isrtop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
-                local sq = pts[q]
-                local ts, tk = G7.TSRC, G7.TKIND
-                if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
-                if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
-                if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
-            end
-            if strict then pull(ofp(o, f))
+            local pull = G7.pull
+            if strict then pull(dst, ofp(o, f))
             elseif f == '[]' and G7.ISG[o] then
                 -- (`_G[k]`, k unknown: what a dynamic-key write stored, and a global the HOST defines — EXT. Not every
                 -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
                 -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
-                pull(ofp(o, '[]')); if G7.EXT then addobj(dst, G7.EXT) end
+                pull(dst, ofp(o, '[]')); if G7.EXT then addobj(dst, G7.EXT) end
             elseif f == '[]' then
                 local m = ofield[o]
                 local named = G7.PKGL and G7.PKGL[o] and G7.PKGNAMED
@@ -763,10 +766,10 @@ local function build(store, opts)
                 local fedtop = G7.FEDK and G7.TOPL and top[dst] and not G7.isrtop(dst)
                 if fedtop and G7.FEDK[o] == #ks then G7.FEDKN = G7.FEDKN + 1
                 else
-                    for _, fk in ipairs(ks) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(m[fk]) end end
+                    for _, fk in ipairs(ks) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(dst, m[fk]) end end
                     if fedtop then G7.FEDK[o] = #ks end
                 end
-            else pull(ofp(o, f)); pull(ofp(o, '[]')) end
+            else pull(dst, ofp(o, f)); pull(dst, ofp(o, '[]')) end
             -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
             local fm = IDXFN[o]
             if fm then for g in pairs(fm) do idxcall(g, o, f, dst) end end
@@ -891,6 +894,15 @@ local function build(store, opts)
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
     G7.LOADK, G7.DYNL, G7.LDL, G7.STL, G7.DYNS, G7.LITV = {}, {}, {}, {}, {}, {}
+    -- (bindcall's `one`, hoisted — CART-1839, see G7.pull)
+    function G7.bindone(i, r, o, args, rl, gen)
+        local g = gen[i]
+        if g and g[2] == '...' then for j = g[1], #args do edge(args[j], r) end; return end
+        if g then if args[g[1]] then edge(g[2] and field(args[g[1]], g[2]) or args[g[1]], r) end; return end
+        local gl = rl[i] and G7.genplan(G7.FUNPTS[TNAME[o]] or NOTHING, rl[i]) -- (a generic container, CART-1831)
+        if gl then G7.applylist(gl, args, r, TNAME[o]); return end
+        local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end
+    end
     local function bindcall(o, args, res, site, cerr)
         if site and clone_at then
             local inst = clone_at(site, o)
@@ -960,16 +972,9 @@ local function build(store, opts)
             if rl and not G7.IRES[type(res) == 'table' and res[1] or res] then
                 -- (a generic return is its argument — its element, its key: CART-1830)
                 local gen = G7.FUNGEN[TNAME[o]] or NOTHING
-                local function one(i, r)
-                    local g = gen[i]
-                    if g and g[2] == '...' then for j = g[1], #args do edge(args[j], r) end; return end
-                    if g then if args[g[1]] then edge(g[2] and field(args[g[1]], g[2]) or args[g[1]], r) end; return end
-                    local gl = rl[i] and G7.genplan(G7.FUNPTS[TNAME[o]] or NOTHING, rl[i]) -- (a generic container, CART-1831)
-                    if gl then G7.applylist(gl, args, r, TNAME[o]); return end
-                    local ro = rl[i] and G7.retobj(rl[i], r, nil, args); if ro then addobj(r, ro) end
-                end
-                if type(res) == 'table' then for i, r in ipairs(res) do one(i, r) end
-                elseif res then one(1, res) end
+                local one = G7.bindone
+                if type(res) == 'table' then for i, r in ipairs(res) do one(i, r, o, args, rl, gen) end
+                elseif res then one(1, res, o, args, rl, gen) end
             end
             return
         end
@@ -1608,6 +1613,10 @@ local function build(store, opts)
             if rt then addobj(res, G7.retobj(rt, res, tn .. '#' .. m)) end
         end
     end
+    -- (the loop's reader callbacks, made once — CART-1839: a closure per pop was an FNEW in the loop body, NYI in LuaJIT
+    -- 2.1's recorder. G7.RDD is the delta handed on, saved around readers())
+    function G7.rdbits(q) addbits(q, G7.RDD) end
+    function G7.rdadd(q) for _, o in dit(G7.RDD) do addobj(q, o) end end
     local function solve()
         if walking then walking = false; NW, NOW = N, NO; G7.CURLOC = nil; G7.CURFN = nil end
         if OUT then return end
@@ -1640,7 +1649,7 @@ local function build(store, opts)
                     local anytop = false
                     for q in sit(succ[p]) do addbits(q, db); if top[q] then anytop = true end end
                     if anytop and G7.TOPL then G7.resucc(p) end -- CART-1742
-                    if fowner[p] then readers(fowner[p], fname[p], function (q) addbits(q, db) end) end
+                    if fowner[p] then local sv = G7.RDD; G7.RDD = db; readers(fowner[p], fname[p], G7.rdbits); G7.RDD = sv end
                     d = {}
                     for o in bs_iter(db) do d[#d + 1] = o end
                 elseif d then
@@ -1649,7 +1658,7 @@ local function build(store, opts)
                     for q in sit(succ[p]) do for _, o in dit(d) do addobj(q, o) end; if top[q] then anytop = true end end
                     if anytop and G7.TOPL then G7.resucc(p) end -- CART-1742
                     if G7.TR then G7.TKIND = 'read' end
-                    if fowner[p] then readers(fowner[p], fname[p], function (q) for _, o in dit(d) do addobj(q, o) end end) end
+                    if fowner[p] then local sv = G7.RDD; G7.RDD = d; readers(fowner[p], fname[p], G7.rdadd); G7.RDD = sv end
                     if G7.TR then G7.TSRC, G7.TKIND = nil, nil end
                 end
                 if d then
@@ -3534,6 +3543,10 @@ local function build(store, opts)
         G7.WALKFILE = wf0
         G7.CHUNK = saved
     end
+    -- (CART-1839, CART-1541's per-function policy: the walk's functions make closures, so each closes upvalues before
+    -- its returns (UCLO, NYI in LuaJIT 2.1's recorder) — no trace through them completes, and the attempts were churn.
+    -- Interpreted from the start, in an editor too: they never compile either way)
+    if jit and jit.off then jit.off(walk_file, true) end
     local instances = {}
     -- (an INSTANCE walked in the middle of a file's walk: it walks under its own file's environment and leaves the
     -- caller's as it was — walk_file sets a file's environment and never restores it, so an instance of a function of
