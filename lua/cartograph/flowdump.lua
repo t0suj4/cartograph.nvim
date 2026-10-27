@@ -128,6 +128,7 @@ M.CONTRACTS = {
     ['strict-global'] = 'GN, one run hypothesis with computed-global: a DYNAMIC step on _G — a key computed at run time: `_G[k]`, `rawget(_G, k)`, `rawset(_G, k, v)`, next / pairs over _G — never reaches a NAMED global: a string key the tree uses on _G as a constant (`x`, `_G.x`, `_G["x"]`, `rawget(_G, "x")`, lowered to static fields) or a global the environment defines by name. A numeric key is no name. So a named global read does not see a dynamic-key write (tag contract:strict-global; a `#` load is untagged, CART-1799)',
     ['globals-per-program'] = 'each program of the tree has its own globals table: other programs do not read this program\'s globals (stated only when the tree holds several programs; false for WoW addons and Neovim plugins, which share _G)',
     ['fixed-env'] = 'no setfenv / debug.setfenv in the tree targets a tree function (by the solution: each one\'s function argument holds only loaded code or nothing — CART-1813), and outside code does not set a tree function\'s environment: every tree function\'s environment is the globals table (stated only when that holds)',
+    ['thread-env'] = 'getfenv(0) is the globals table: no setfenv in the tree sets the thread\'s environment — none at a literal level 0, and none whose first argument may hold anything but a function (by the solution: a number, unknown code, a value past CAP) — and outside code does not set it (CART-1838, experiment no-getfenv0 withholds it; stated only when a getfenv(0) site exists and fixed-env is not stated)',
     ['computed-global'] = 'GN (stated under strict-global): a dynamic read on _G — `_G[k]` with k unknown, rawget(_G, k), next / pairs over _G — sees dynamic-key writes and EXT, not the named globals',
     ['globals-never-escape'] = 'GE, a run hypothesis (flowpath FLOW-0057): _G may escape, but its named globals and its metatable slot are touched only by an ENVIRONMENT access — a static access whose base points to exactly {_G} — never through another value, an __index chain or outside code (outside code may consult its metamethods implicitly; the metatable and its handlers then escape). So the globals site is kept out of the escape closure and a write through a cap-cut value that may be _G is not followed. Known violations: require("_G").x (an external site, the host contract), debug.setmetatable(_G, …); package.loaded._G.x is an environment access since CART-1797',
     ['libraries-never-escape'] = 'the library tables (contracts.library_sites: each library, the string library, package, package.loaded) never escape, as the globals site does not: a write through a cap-cut value that may be one is not followed (tag contract:libraries-never-escape, CART-1797)',
@@ -223,10 +224,35 @@ function M.build(rec, X, sink)
             end
             if bad then
                 harmful = harmful + 1
-                if sf.fn then rec.gap(sf.fn, 'setfenv', sf.port and { sf.port } or {}) end
+                -- (by VALUE the call has no walk position: init carries its gap. The getfenv gap had stood in for it,
+                -- until getfenv(0) became the thread's environment, CART-1838)
+                rec.gap(sf.fn or 'init', 'setfenv', sf.port and { sf.port } or {})
             end
         end
         X.FIXEDENV = harmful == 0
+    end
+    -- (THE THREAD'S ENVIRONMENT — CART-1838, off under experiment no-getfenv0: getfenv(0) was the globals table and what a setfenv at
+    -- a literal level 0 set. That is exact while no setfenv may set level 0: none at a literal 0, and none whose first
+    -- argument the solution says may hold a non-function — a value past CAP, an object other than a function or loaded
+    -- code (fixed-env's reading of EXT), or NOTHING: a number is no object. Then the clause thread-env (under fixed-env
+    -- it adds nothing); else every getfenv(0) site keeps its getfenv gap — fixed-env, which is about FUNCTIONS'
+    -- environments, does not drop it)
+    if #(X.G0SITES or {}) > 0 then
+        local set = false
+        for _, sf in ipairs(X.SETFENVS or {}) do
+            if sf.level == '0' then set = true
+            elseif sf.port then
+                if X.top and X.top[sf.port] then set = true
+                else
+                    local fn = false
+                    for o in X.each(sf.port) do if X.fnports[o] or o == X.EXT then fn = true else set = true; break end end
+                    if not fn then set = true end -- (holding nothing: a number is no object)
+                end
+            end
+            if set then break end
+        end
+        X.THREADENV = not set and not X.FIXEDENV
+        if set then for _, fn in ipairs(X.G0SITES) do rec.gap(fn, 'getfenv', {}); rec.gaps[#rec.gaps].thread = true end end
     end
     -- ★ UPVALUE CALLS AS COPIES (CART-1813): the IR has no upvalue op, so a debug.setupvalue / getupvalue / upvaluejoin
     -- call by name was a gap — and a gap blocks the certificate. Once solved, the functions its first argument holds
@@ -304,6 +330,7 @@ function M.build(rec, X, sink)
     -- init: what the solve itself starts with
     local init = { { 'new', V(X.GPORT), X.GOBJ } }
     if X.FENVP then init[#init + 1] = { 'new', V(X.FENVP), X.GOBJ } end
+    if X.G0P then init[#init + 1] = { 'new', V(X.G0P), X.GOBJ } end -- (getfenv(0): CART-1838)
     -- (every further PROGRAM's globals table, CART-1737: its port and its getfenv port hold it)
     local ISG = { [X.GOBJ] = true }
     for i, e in ipairs(X.ENVL or {}) do
@@ -311,6 +338,7 @@ function M.build(rec, X, sink)
             ISG[e.GOBJ] = true
             init[#init + 1] = { 'new', V(e.GPORT), e.GOBJ }
             if e.FENVP then init[#init + 1] = { 'new', V(e.FENVP), e.GOBJ } end
+            if e.G0P then init[#init + 1] = { 'new', V(e.G0P), e.GOBJ } end
         end
     end
     -- (what a declared LOADER passes each file's chunk, CART-1822: each position's value, then the chunk's `...` holds it
@@ -768,7 +796,7 @@ function M.build(rec, X, sink)
     for _, g in ipairs(rec.gaps) do
         -- (FIXED environments: a tree that never calls setfenv has every environment _G, and getfenv(…) IS the globals
         -- port the IR already holds — the clause `fixed-env` states it; with a setfenv the gap stays, CART-1775)
-        if g.kind == 'getfenv' and X.FIXEDENV then goto nextgap end
+        if g.kind == 'getfenv' and X.FIXEDENV and not g.thread then goto nextgap end
         gj[#gj + 1] = ('{"fn":%d,"kind":%s,"vars":%s,"at":%s}'):format(FN(g.fn), jstr(g.kind), jarr(g.vars), g.at and jstr(g.at) or 'null')
         ::nextgap::
     end
@@ -918,7 +946,7 @@ function M.build(rec, X, sink)
         .. ',"clauses":' .. (function () -- (by name: the dump is compared byte for byte, pairs order varies by process)
             local ks, kv = {}, {}
             for k in pairs(M.CONTRACTS) do
-                if not (k == 'fixed-env' and not X.FIXEDENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
+                if not (k == 'fixed-env' and not X.FIXEDENV) and not (k == 'thread-env' and not X.THREADENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
                     and not (k == 'loader-args' and #(X.CHUNKINIT or {}) == 0)
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end

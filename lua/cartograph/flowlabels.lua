@@ -22,7 +22,7 @@ local bor, band = bit.bor, bit.band
 
 M.CLAUSES = { 'GN', 'strict-global', 'computed-global', 'host', 'unknown-receiver', 'unknown-code',
     'outside-raises-strings', 'C1', 'C3', 'globals-never-escape', 'libraries-never-escape', 'host-model',
-    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'reflection:package.loaded' }
+    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'reflection:package.loaded', 'thread-env' }
 local B = {}
 for i, c in ipairs(M.CLAUSES) do B[c] = bit.lshift(1, i - 1) end
 local ESC = bor(B.C1, B.C3)
@@ -480,7 +480,7 @@ function M.compute(D)
     local stated = D.contracts.clauses or {}
     -- (globals-never-escape's world side and an unresolved callee's unknown-receiver are seeded where they reach, above;
     -- init's own call of the ext channel lists nothing by construction and is no unresolved call)
-    for _, c in ipairs({ 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env' }) do
+    for _, c in ipairs({ 'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'thread-env' }) do
         if stated[c] then global = bor(global, B[c]) end
     end
     -- (the reflective reads, the functions holding them, and the BOUNDARY: every labelled variable of another function,

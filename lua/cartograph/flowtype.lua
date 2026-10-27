@@ -31,6 +31,8 @@
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
 --     global read on the repo partial, or WoW w2's solve 15x slower); and _G never ESCAPES — a write through a value
 --     the cap cut that may be _G is not followed (WoW passes _G as an argument: w3, 308 whole answers partial);
+--   - getfenv(0) is the thread's environment: _G and what a setfenv at level 0 sets — outside code sets none (as
+--     with any environment: the dump's thread-env / fixed-env, CART-1838; experiment no-getfenv0: every one set);
 --   - _G takes a metatable only through a setmetatable target that holds nothing else (GE's clause: the slot is touched
 --     by an access whose base is exactly {_G} — CART-1837, the user's decision 2026-10-26; experiment no-ge-meta: any);
 --   - a call on a MEMBER of unknown code's value (a receiver load / an unmappable module returned) runs no tree code
@@ -55,6 +57,7 @@ M.CAP = 64
 M.EXPERIMENTS = {
     ['no-sinf'] = 'the string-method rule on an EMPTY receiver does not fire (CART-1697: an order source?)',
     ['no-ge-meta'] = 'the plain reading of _G\'s metatable slot: a setmetatable gives _G the metatable through ANY target that holds it. By default (the user\'s decision 2026-10-26, CART-1837) the solve applies GE\'s clause — the slot is touched only by an access whose base is exactly {_G}: a target that holds another value when _G reaches it does not set it (decided then, by what the target held). On WoW w3 a debug printer\'s `pcall(t[k], t)` had called AceDB\'s ResetDB with _G, and every undefined global read then called AceDB\'s __index: exact 175 -> 613, GE refusals 20,943 -> 1,679',
+    ['no-getfenv0'] = 'the plain reading of getfenv(0): every environment any setfenv set (G7.FENVP), with a getfenv gap. By default (CART-1838) getfenv(0) is the THREAD\'s environment — the globals table and what a setfenv at a literal level 0 sets — with no gap; the dump states the clause thread-env when the solution shows no setfenv may set level 0, or keeps the gap at each site. On WoW w3 MySales\' `setmetatable(MS, {__index = getfenv(0)})` had linked __index to MS\'s 54 objects through FENVP: solve 161 / 169 -> 100 / 96 s, 19 verdicts gained and none lost, unknown 1,247 -> 1,037, dump gaps 61 -> 21',
     ['sinf-untainted'] = 'the string-method rule on an EMPTY receiver types its result but does not TAINT it: the hedge-free variant — a certifying consumer (flowpath) pairs it with the default dump and promotes an answer whole there when this one certifies (CART-1829, flowpath FLOW-0042)',
     spread = 'opts.spread: a saturated port saturates what it feeds, never drops out (CART-1741)',
     order = 'opts.order = asc | lifo | fifo: another worklist order, an instrument (CART-1697 order test)',
@@ -1932,6 +1935,23 @@ local function build(store, opts)
     G7.FENVP = new()
     addobj(G7.FENVP, G7.GOBJ)
     G7.ENV.FENVP = G7.FENVP
+    -- (CART-1838 — off under experiment no-getfenv0: getfenv(0) is the thread's environment, an environment's G0P — _G and what a
+    -- setfenv at level 0 sets. Made at the first getfenv(0), so a tree without one numbers its ports as before)
+    G7.G0SITES = {}
+    function G7.g0p()
+        local e = G7.ENV
+        if not e.G0P then
+            e.G0P = new(); addobj(e.G0P, e.GOBJ)
+            for _, env in ipairs(e.G0SET or NOTHING) do edge(env, e.G0P) end
+        end
+        return e.G0P
+    end
+    function G7.g0set(env)
+        local e = G7.ENV
+        e.G0SET = e.G0SET or {}
+        e.G0SET[#e.G0SET + 1] = env
+        if e.G0P then edge(env, e.G0P) end
+    end
     function G7.fenv(id, env, seen)
         seen = seen or {}
         if seen[id] then return end
@@ -2632,12 +2652,19 @@ local function build(store, opts)
             -- after the walk, when every function's reads are known (G7.FENV). setfenv(1, env) is the calling
             -- function (at the top level, the file's chunk); a deeper level is any function: env becomes a prototype of
             -- _G. getfenv returns _G and every environment set. rawget / rawset are a load and a store)
+            -- (CART-1838, off under experiment no-getfenv0: a literal level 0 is the thread's environment — no gap at the walk; the dump
+            -- decides from the solution whether the clause thread-env holds, or gives each site its getfenv gap)
+            if fname == 'getfenv' and gbl() and not G7.EXP['no-getfenv0'] and argn[1] and not argn[2] and argn[1]:type() == 'number' and txt(argn[1]) == '0' then
+                if G7.REC and G7.W then G7.G0SITES[#G7.G0SITES + 1] = G7.cur() end
+                return G7.g0p()
+            end
             if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; G7.gap('getfenv', {}); return G7.FENVP end
             if fname == 'setfenv' and argn[2] and gbl() then
                 -- (no gap here: the DUMP decides from the solution whether this call can set a TREE function's
                 -- environment — a function argument holding only loaded code does not, CART-1813)
                 local fa, env = argn[1], expr(argn[2])
                 edge(env, G7.FENVP)
+                if not G7.EXP['no-getfenv0'] and fa:type() == 'number' and txt(fa) == '0' then G7.g0set(env) end -- (CART-1838)
                 local pf = fnstack[#fnstack]
                 if fa:type() ~= 'number' then
                     local fp = expr(fa)
@@ -5549,7 +5576,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

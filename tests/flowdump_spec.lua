@@ -636,7 +636,8 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when a
     local D = dump('\nlocal G = getfenv(0)\nreturn G\n')
     ok(not kinds(D).getfenv, 'no getfenv gap without setfenv')
     ok(D.contracts.clauses['fixed-env'] ~= nil, 'the fixed-env clause is stated')
-    D = dump('\nlocal G = getfenv(0)\nsetfenv(1, {})\nreturn G\n')
+    -- (level 1, the calling function's: getfenv(0) is the thread's, no gap under thread-env since CART-1838)
+    D = dump('\nlocal G = getfenv(1)\nsetfenv(1, {})\nreturn G\n')
     ok(kinds(D).getfenv, 'with a setfenv the getfenv gap stays')
     ok(D.contracts.clauses['fixed-env'] == nil, 'and the fixed-env clause is not stated')
     -- (by the walk's SCOPE resolution, not the text, CART-1785: a comment or a string naming it, or a LOCAL called
@@ -654,8 +655,8 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when a
         '\nlocal function f() return x end\ndebug.setfenv(f, {})\nlocal G = getfenv(0)\nreturn G\n',
         '\nlocal sf = debug.setfenv\nlocal function f() return x end\nsf(f, {})\nlocal G = getfenv(0)\nreturn G\n' } do
         local D2 = dump(src)
-        -- (by value the call has no walk position: the claim is withheld and the getfenv gap stays)
-        ok(D2.contracts.clauses['fixed-env'] == nil and (kinds(D2).setfenv or kinds(D2).getfenv), 'not fixed, a gap: ' .. src)
+        -- (by value the call has no walk position: the claim is withheld and init carries the setfenv gap, CART-1838)
+        ok(D2.contracts.clauses['fixed-env'] == nil and kinds(D2).setfenv, 'not fixed, a setfenv gap: ' .. src)
     end
     for _, src in ipairs {
         '\nlocal sf = setfenv\nlocal G = getfenv(0)\nreturn G, sf\n',
@@ -663,6 +664,42 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when a
         local D2 = dump(src)
         ok(D2.contracts.clauses['fixed-env'] ~= nil and not kinds(D2).setfenv and not kinds(D2).getfenv, 'fixed, no gap: ' .. src)
     end
+end)
+
+-- (CART-1838 (experiment no-getfenv0: the plain union): getfenv(0) is the THREAD's environment. A setfenv at level 1 withholds fixed-env, but
+-- getfenv(0) is still the globals table — no gap, under the clause thread-env; a setfenv that may set level 0 keeps it)
+test('flowdump: getfenv(0) is the globals table under thread-env; a setfenv that may set level 0 keeps the gap (CART-1838)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function kinds(D) local g = {}; for _, x in ipairs(D.gaps) do g[x.kind] = true end; return g end
+    local src = '\nlocal M = {}\nlocal G = getfenv(0)\nlocal function f() setfenv(1, M) end\nreturn G, f\n'
+    local D = dump(src)
+    ok(not kinds(D).getfenv, 'no getfenv gap: ' .. vim.inspect(D.gaps))
+    ok(D.contracts.clauses['thread-env'] ~= nil and D.contracts.clauses['fixed-env'] == nil, 'thread-env stated, fixed-env not')
+    local C = flowcheck.check(D)
+    eq(0, C.failed, 'the dump is closed')
+    -- (init makes the globals site in getfenv(0)'s variable too — one `new` more than the stock dump: a copy out of an
+    -- unwritten variable checks closed, vacuously)
+    local function gnews(X)
+        local n, initid = 0, nil
+        for i, nm in ipairs(X.names.functions) do if nm == 'init' then initid = i - 1 end end
+        for _, F in ipairs(X.functions) do
+            if F.id == initid then for _, i in ipairs(F.body) do if i[1] == 'new' and i[3] == X.contracts.globals_site then n = n + 1 end end end
+        end
+        return n
+    end
+    local g0 = gnews(D)
+    D = dump(src, 'no-getfenv0')
+    ok(kinds(D).getfenv and D.contracts.clauses['thread-env'] == nil, 'no-getfenv0: the gap stays, no clause')
+    eq(gnews(D) + 1, g0, 'init news the globals site into getfenv(0)\'s variable')
+    for _, s in ipairs {
+        '\nlocal M = {}\nlocal G = getfenv(0)\nsetfenv(0, M)\nreturn G\n',
+        '\nlocal n = 0\nlocal G = getfenv(0)\nsetfenv(n, {})\nreturn G\n' } do
+        D = dump(s)
+        ok(kinds(D).getfenv and D.contracts.clauses['thread-env'] == nil, 'may set level 0, the gap stays: ' .. s)
+    end
+    -- (loaded code is a function, as fixed-env reads it: no level 0, and fixed-env already covers getfenv)
+    D = dump('\nlocal G = getfenv(0)\nsetfenv(loadstring(tostring(1)), {})\nreturn G\n')
+    ok(not kinds(D).getfenv and D.contracts.clauses['fixed-env'] ~= nil, 'loaded code: no gap, fixed-env')
 end)
 
 -- (CART-1776, the world: the OUTSIDE writes into what escaped, data fields included — `[]` is hit once anything escapes,

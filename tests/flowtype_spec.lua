@@ -2140,6 +2140,41 @@ test('flowtype: a setmetatable target holding a function gives the function no p
     ok(I.protos[g] and I.protos[g][idx], 'debug.setmetatable\'s function does')
 end)
 
+-- (CART-1838 (experiment no-getfenv0: the plain union): getfenv(0) is the thread's environment — not every environment a setfenv set. MySales
+-- on WoW w3 read `getfenv(0)` after `setfenv(1, MS)` elsewhere: every function MS held became an __index of MS's objects)
+test('flowtype: getfenv(0) holds the globals table, not what setfenv(1, ...) set; setfenv(0, ...) does reach it (CART-1838)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function held(lines, exp)
+        local root = tree({ ['a.lua'] = table.concat(lines, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, ctx = false, exp = exp })
+        vim.fn.delete(root, 'rf')
+        local callrec = require 'cartograph.callrec'
+        local I, recv = R.internals, {}
+        for _, pr in pairs(I.probes) do
+            if callrec.full(pr.c) == 'G.hub' then for o in I.each(pr.recv) do recv[tostring(I.obinfo[o])] = true end end
+        end
+        for _, c in ipairs(store.data.calls) do
+            if callrec.full(c) == 'G.hub' then return (R.verdict(c) or { kind = 'none' }).kind, recv end
+        end
+    end
+    local one = { 'local M = { hub = function () return 1 end }',
+        'local N = { hub = function () return 2 end }', -- (a second hub: the name join is ambiguous, so the call has a verdict)
+        'local function f() setfenv(1, M) end',
+        'local G = getfenv(0)', 'G.hub()', 'return f, N' }
+    eq('exact', held(one, 'expose,no-getfenv0'), 'no-getfenv0: getfenv returns every environment set — M among them')
+    ok(held(one, 'expose') ~= 'exact', 'default: getfenv(0) is _G alone, which has no hub')
+    local zero = { 'local M = { hub = function () return 1 end }',
+        'local N = { hub = function () return 2 end }', -- (a second hub: the name join is ambiguous, so the call has a verdict)
+        'local function f() setfenv(0, M) end',
+        'local G = getfenv(0)', 'G.hub()', 'return f, N' }
+    -- (level 0 also makes M a prototype of _G — the walk's deeper-level reading — so the lookup alone would pass: the
+    -- receiver must hold M itself, as getfenv(0) returns it)
+    local k, recv = held(zero, 'expose')
+    eq('exact', k, 'default: a setfenv at level 0 sets the thread\'s environment')
+    ok(recv['tbl:a.lua:0:10'], 'getfenv(0) holds M itself: ' .. vim.inspect(recv))
+end)
+
 -- (CART-1784, open mode: O2 taints a prototype's DATA field the outside may write — but `M.mk_b` reads M's OWN member, a
 -- function C1 says the outside does not replace, so the lookup never reaches P.mk_b. A reader of P itself keeps it)
 test('flowtype open mode: a prototype field read only through a child\'s function member is not tainted by O2 (CART-1784)', function ()
