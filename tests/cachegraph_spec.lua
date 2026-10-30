@@ -21,6 +21,9 @@ test('cache.graph: a cold run extracts and saves RAW; the next run opens WARM, t
     local d2, how2, note = cache.graph(root)
     eq('warm', how2, tostring(note))
     eq(#d1.nodes, #d2.nodes); eq(#d1.calls, #d2.calls)
+    -- (record for record: a call comes back with the fields it left with — a false `method` came back absent, the
+    -- segment's flags are bits, and a consumer keying calls by their fields saw other records warm, CART-1844)
+    for i, c in ipairs(d1.calls) do eq(vim.inspect(c), vim.inspect(d2.calls[i]), 'call ' .. i) end
     vim.fn.delete(root, 'rf')
 end)
 

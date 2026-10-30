@@ -9197,7 +9197,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     end
                     local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe, cba = cba,
                         crk = (full and full ~= callee and namen) and M._root_key(calln:field('name')[1]) or nil,
-                        file = file, line = sp.start.line, method = method,
+                        -- (a flag is true or absent, never false: the cache's segment stores flags as bits, so a false
+                        -- came back absent and a warm call was another record than the cold one, CART-1844)
+                        file = file, line = sp.start.line, method = method or nil,
                         full = full ~= callee and full or nil,
                         chainroot = chroot, chainfield = chfield,
                         dynamic = dynamic,
@@ -9260,7 +9262,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     local is_top = encl == nil
                     if spec.is_top then is_top = spec.is_top(id, src) end
                     local c = { callee = name, args = {}, argv = {},
-                        file = file, line = sp.start.line, method = false,
+                        file = file, line = sp.start.line,
                         full = full ~= name and full or nil, hedge = qhedge,
                         at = pos_of(id), top = is_top or nil, bare = true }
                     calls[#calls + 1] = c
@@ -9287,7 +9289,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local sp = pos_of(s.node)
                 local encl = in_function(s.node, spec, ifmemo)
                 local c = { callee = 'super', args = {}, argv = {}, file = file,
-                    line = sp.start.line, method = false, at = pos_of(s.node),
+                    line = sp.start.line, at = pos_of(s.node),
                     superx = { cls = s.cls, member = s.member, sing = s.sing } }
                 calls[#calls + 1] = c
                 pending[#pending + 1] = { call = c, file = file, full = 'super',
