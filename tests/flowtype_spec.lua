@@ -3538,3 +3538,25 @@ test('flowtype: an instanced call carries what its callee raises to the caller (
     ok(tbl(off), 'one walk: e holds the raised table: ' .. vim.inspect((off.arg_objs(sinkc, 1))))
     ok(tbl(inst), 'instanced: e still holds it: ' .. vim.inspect((inst.arg_objs(sinkc, 1))))
 end)
+
+-- (CART-1842, flowpath FLOW-0093: a function nested in a context instance is a new object under the original's id — a
+-- receiver holding two instances' closures has ONE target, exact, not narrowed {f, f})
+test('flowtype: two instances of one nested function answer one target, exact (CART-1842)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local N, P = {}, {}', 'function N:run() return 0 end', 'local function mk(t) return { run = function () return t end } end',
+        'local a = mk(1)', 'local b = mk(2)', 'local o = a; if N:run() then o = b end', 'o:run()',
+        'function P:run() return 1 end', 'return N, P' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local AT = require 'cartograph.at'
+    local cc, pc, id = {}, nil, nil
+    for _, c in ipairs(store.data.calls) do
+        if (c.to or ''):match('::mk@') then cc[c] = c.to; id = c.to end
+        if AT.sl(c.at) == 6 then pc = c end
+    end
+    local v = flowtype.solve(store, { open = false, ctxfns = { [id] = true }, ctxcallee = cc }).verdict(pc)
+    vim.fn.delete(root, 'rf')
+    ok(id ~= nil and pc ~= nil, 'the calls mk(…) and o:run() are in the graph')
+    eq('exact', v and v.kind, 'both instances\' run: ' .. vim.inspect(v))
+    eq({ 'm.lua::run@2' }, v and v.targets, 'the one target')
+end)

@@ -5015,12 +5015,14 @@ local function build(store, opts)
                     -- such tables read `none`, and 275 of lua/cartograph's 566 non-empty `none` receivers were that
                 end
             end
-            local fns, unknown = {}, sat
+            local fns, unknown, ids = {}, sat, {}
             for x in pairs(out) do
                 if x == EXT then unknown = true
                 elseif fnports[x] then
+                    -- (one id, many objects: a context instance's nested function is a new object under the original's id —
+                    -- the answer is one target, CART-1842)
                     local id = obinfo[x]
-                    if tostring(id):find('^ts:') then unknown = true else fns[#fns + 1] = id end
+                    if tostring(id):find('^ts:') then unknown = true elseif not ids[id] then ids[id] = true; fns[#fns + 1] = id end
                 end
             end
             table.sort(fns)
