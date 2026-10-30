@@ -3003,7 +3003,7 @@ local function build(store, opts)
             end
             if to and CTXFNS and CTXFNS[to] and not clone then
                 if not callee and f then expr(f) end -- (the callee expression is still walked: a call inside it)
-                ctx_direct[#ctx_direct + 1] = { to, aps, resl }
+                ctx_direct[#ctx_direct + 1] = { to, aps, resl, curerr() } -- (what it raises, the caller raises: CART-1841)
                 return want and resl or res
             end
             -- ★ THE NAME JOIN IS NOT AN INPUT (CART-1689 / 1691 / 1692, the user's direction CART-1714 / 1715): a call the
@@ -3842,11 +3842,11 @@ local function build(store, opts)
         local byid = {}
         for o, fp in pairs(fnports) do if not fp.inst and fp.id and CTX[o] then byid[fp.id] = o end end
         for _, d in ipairs(ctx_direct) do
-            local to, aps, resl = d[1], d[2], d[3]
+            local to, aps, resl, ce = d[1], d[2], d[3], d[4]
             local o = byid[to]
             local info = o and setmetatable({ obj = false }, { __index = CTX[o] })
             if info then walk_file(info.file, info.src, info) end
-            if info and info.obj then bindcall(info.obj, aps, #resl > 1 and resl or resl[1])
+            if info and info.obj then bindcall(info.obj, aps, #resl > 1 and resl or resl[1], nil, ce)
             else
                 for j, ap in ipairs(aps) do edge(ap, port('a:' .. to .. ':' .. j)) end
                 for k, r in ipairs(resl) do edge(port('r:' .. to .. (k > 1 and (':' .. k) or '')), r) end

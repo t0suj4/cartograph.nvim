@@ -3513,3 +3513,28 @@ test('flowtype: experiment sinf-untainted types the hedged result without tainti
     ok(u and u.kind == 'string' and not u.partial, 'hedge-free: the same answer, whole: ' .. vim.inspect(u))
     ok(R.exp and R.exp['sinf-untainted'] ~= nil, 'the solve records the experiment: ' .. vim.inspect(R.exp))
 end)
+
+-- (CART-1841, flowpath FLOW-0093: a context-instanced call raises what its callee raises — the instance's error port
+-- reaches the caller's, as the shared binding's does (CART-1705); without it a pcall's second value misses the table)
+test('flowtype: an instanced call carries what its callee raises to the caller (CART-1841)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local M = {}', 'local function sink(v) return v end', 'local function thrower(x) error({ x = x }) end',
+        'function M.go(y) local ok, e = pcall(function () thrower(y) end); return sink(e) end', 'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local AT = require 'cartograph.at'
+    local cc, sinkc = {}, nil
+    for _, c in ipairs(store.data.calls) do
+        local to = c.at and AT.sl(c.at) == 3 and c.to or ''
+        if to:match('::thrower@') then cc[c] = to end
+        if to:match('::sink@') then sinkc = c end
+    end
+    local id = next(cc) and cc[next(cc)]
+    local function tbl(R) for _, o in ipairs((R.arg_objs(sinkc, 1))) do if tostring(o):match('^tbl:') then return true end end return false end
+    local off = flowtype.solve(store, { open = false, ctx = false, argprobes = true })
+    local inst = flowtype.solve(store, { open = false, ctxfns = { [id] = true }, ctxcallee = cc, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    ok(id ~= nil and sinkc ~= nil, 'the calls thrower(y) and sink(e) are in the graph')
+    ok(tbl(off), 'one walk: e holds the raised table: ' .. vim.inspect((off.arg_objs(sinkc, 1))))
+    ok(tbl(inst), 'instanced: e still holds it: ' .. vim.inspect((inst.arg_objs(sinkc, 1))))
+end)
