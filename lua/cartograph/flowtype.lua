@@ -4023,26 +4023,6 @@ local function build(store, opts)
         end
         if #plan > 0 then solve() end
     end
-    -- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): `name:lower()`, `raw:sub(i)` — the receiver reached no value
-    -- the solve holds, but a program that got past the call had a string there (a table would need the member; none
-    -- arrived), so the result is what the string library returns. Only where the receiver ended EMPTY — a user table
-    -- with its own `find` keeps its own answer — and HEDGED (tainted below): it is the call's evidence, not a flow.
-    -- Rounds, because a typed result can feed the next call's receiver
-    local sinf = {}
-    for _ = 1, 4 do
-        local grew = false
-        for _, mc in ipairs(mcalls) do
-            local recvp, m, resl = mc[1], mc[2], mc[3]
-            if not G7.EXP['no-sinf'] and pts[recvp] == nil and not top[recvp] and PSIGS['string#' .. m] then
-                for k, r in ipairs(resl) do
-                    local rt = retk('string#' .. m, k)
-                    if rt and not sinf[r] then sinf[r] = true; addobj(r, typeobj(rt)); grew = true end
-                end
-            end
-        end
-        if not grew then break end
-        solve()
-    end
     -- (OPEN: an exported function's callers are not all in the tree — its parameters may hold anything)
     if open then
         -- (the export ROOTS: each module's value, and the STRING LIBRARY of every program — one string metatable per Lua
@@ -4083,6 +4063,27 @@ local function build(store, opts)
                 if fpp then for _, r in pairs(fpp.rets or { fpp.ret }) do for x in each(r) do reach(x) end end end
             end
         end
+    end
+    -- ★ A STRING METHOD ON AN EMPTY RECEIVER (CART-1643): `name:lower()`, `raw:sub(i)` — the receiver reached no value
+    -- the solve holds, but a program that got past the call had a string there (a table would need the member; none
+    -- arrived), so the result is what the string library returns. Only where the receiver ended EMPTY — a user table
+    -- with its own `find` keeps its own answer — and HEDGED (tainted below): it is the call's evidence, not a flow.
+    -- Rounds, because a typed result can feed the next call's receiver. AFTER open's seeding: an exported function's
+    -- parameter holds EXT there, and a receiver empty before it was not empty in the solve (CART-1845, flowpath FLOW-0122)
+    local sinf = {}
+    for _ = 1, 4 do
+        local grew = false
+        for _, mc in ipairs(mcalls) do
+            local recvp, m, resl = mc[1], mc[2], mc[3]
+            if not G7.EXP['no-sinf'] and pts[recvp] == nil and not top[recvp] and PSIGS['string#' .. m] then
+                for k, r in ipairs(resl) do
+                    local rt = retk('string#' .. m, k)
+                    if rt and not sinf[r] then sinf[r] = true; addobj(r, typeobj(rt)); grew = true end
+                end
+            end
+        end
+        if not grew then break end
+        solve()
     end
     -- ★ PARTIAL: a set the cap made INCOMPLETE (CART-1643). A port past CAP drops out: what it held before has gone
     -- downstream (an order-chosen part), what came after is lost — and a call through it never binds the functions it

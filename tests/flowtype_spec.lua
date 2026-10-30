@@ -3560,3 +3560,22 @@ test('flowtype: two instances of one nested function answer one target, exact (C
     eq('exact', v and v.kind, 'both instances\' run: ' .. vim.inspect(v))
     eq({ 'm.lua::run@2' }, v and v.targets, 'the one target')
 end)
+
+-- (CART-1845, flowpath FLOW-0122: the string-method rule decides on an EMPTY receiver, so it runs after open mode
+-- seeds EXT into exported functions' parameters — an outside caller may pass s a table with its own upper)
+test('flowtype: open mode\'s outside arguments come before the string-method rule (CART-1845)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local M, T, U = {}, {}, {}', 'function T:lower() return 1 end', 'function U:lower() return 2 end',
+        'function M.f(s) local r = s:upper(); return r:lower() end', 'return M' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local AT = require 'cartograph.at'
+    local c
+    for _, x in ipairs(store.data.calls) do if AT.sl(x.at) == 3 and AT.sc(x.at) > 40 then c = x end end
+    local closed = flowtype.solve(store, { open = false, ctx = false }).verdict(c)
+    local opened = flowtype.solve(store, { open = true, ctx = false }).verdict(c)
+    vim.fn.delete(root, 'rf')
+    ok(c ~= nil, 'the call r:lower() is in the graph')
+    eq('string', closed and closed.kind, 'closed: no caller, s:upper() returned a string: ' .. vim.inspect(closed))
+    ok(not (opened and opened.kind == 'string'), 'open: s may be any outside value, no string answer: ' .. vim.inspect(opened))
+end)
