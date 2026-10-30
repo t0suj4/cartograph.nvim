@@ -230,6 +230,10 @@ local function build(store, opts)
     local N, NO = 0, 0
     local pts, cnt, top, delta = {}, {}, {}, {}
     local succ, loads, stores, calls, mflows, protos_at = {}, {}, {}, {}, {}, {}
+    -- (CART-1843, flowpath FLOW-0117: a port's LOADS and CALLS as append-order linked lists in one strided array each,
+    -- not a table per record plus a list table per port. loads[x] / calls[x]: the LAST record (circular, see below).
+    -- G7.LREC: f, dst, strict, next (4 slots); G7.CREC: args, res, site, cerr, next (5); false for nil. In G7, cached
+    -- per function: the builder is at Lua's 200-local limit)
     local ofield, protos, fnports, obinfo = {}, {}, {}, {}
     local TYPEOBJ, TNAME = {}, {} -- (type objects: below, with typeobj)
     local typeobj
@@ -243,11 +247,51 @@ local function build(store, opts)
     -- (CART-1708: where an error raised by tree code that a LOAD runs — an __index function — goes: the load site's
     -- function's error port, LOADERR[load result]; WALKERR is the walker's current one. ARGERR: a call's argument
     -- port -> the error ports a function value arriving there carries into — a builtin may call it)
-    local LOADERR, ARGERR, WALKERR = {}, {}, nil
+    local LOADERR, ARGERR, WALKERR = nil, {}, nil -- (LOADERR as runs, G7.lerget)
     -- (CART-1707: EXTCALL — what UNKNOWN code (a call of EXT: load / loadstring / dofile, a module outside the tree)
     -- is handed; it may call every function arriving there with unknown arguments, and write or re-metatable every
     -- object. GOBJ / GPORT — the globals table, whose fields the globals are. Set below, with port)
     local G7 = {} -- (EXTCALL, GOBJ, GPORT, gport, gread: one local — the builder is at Lua's 200-local limit)
+    G7.LREC, G7.CREC = {}, {}
+    -- (the lists are CIRCULAR - loads[x] / calls[x] / stores[x] / ARGERR[ap] hold the LAST record, whose next is the
+    -- first: appending stays O(1) without tail tables. A walk stops at the list's current last record, read after its
+    -- body where the linear walk read next after it, before where it read next before)
+    -- (a port's STORES as LREC is: G7.SREC f, v, next; an argument port's ERROR ports as G7.AREC ce, next; the last
+    -- record at stores[x] / ARGERR[ap])
+    G7.SREC, G7.AREC = {}, {}
+    -- (a call record's PLAIN argument list - positional ports, maybe `spread`, nothing else - pooled in G7.APOOL as
+    -- n, spread (0: none), a1 .. an; the record's args slot holds the offset. G7.argsat(off): the list as a table again)
+    G7.APOOL = {}
+    -- (LOADERR as RUNS along port order - a load's result port is made by field(), in increasing order, and only
+    -- such ports are looked up: G7.LERS the first port of a run, G7.LERV its error port, false for none)
+    G7.LERS, G7.LERV = {}, {}
+    function G7.lerset(p, e)
+        local S, V = G7.LERS, G7.LERV
+        local n = #S
+        if e == nil then e = false end
+        if (n == 0 and e ~= false) or (n > 0 and V[n] ~= e) then S[n + 1] = p; V[n + 1] = e end
+    end
+    function G7.lerget(p)
+        local S = G7.LERS
+        local lo, hi = 1, #S
+        if hi == 0 or S[1] > p then return nil end
+        while lo < hi do local mid = math.floor((lo + hi + 1) / 2); if S[mid] <= p then lo = mid else hi = mid - 1 end end
+        local e = G7.LERV[lo]
+        if e == false then return nil end
+        return e
+    end
+    function G7.argsat(off)
+        local AP, t = G7.APOOL, {}
+        for i = 1, AP[off] do t[i] = AP[off + 1 + i] end
+        if AP[off + 1] > 0 then t.spread = AP[off + 1] end
+        return t
+    end
+    function G7.ldlist(t) -- (a port's loads as { f, dst, strict } records, for the cold paths; t: the last record)
+        local LREC, l = G7.LREC, {}
+        local i = t and LREC[t + 3]
+        while i do l[#l + 1] = { LREC[i], LREC[i + 1], LREC[i + 2] }; if i == t then break end; i = LREC[i + 3] end
+        return l
+    end
     -- (the experiments: G7.EXP, and the options they name — on a copy, the caller's table is never written)
     do
         local ex = M.experiments(opts)
@@ -289,7 +333,7 @@ local function build(store, opts)
         l = {}
         for f in pairs(ofield[o] or NOTHING) do l[#l + 1] = f end
         table.sort(l)
-        okeys_cache[o] = l
+        if #l >= 8 then okeys_cache[o] = l end -- (a short list is recomputed)
         return l
     end
     local NS = '\0ns'
@@ -315,7 +359,7 @@ local function build(store, opts)
     -- processed in the same relative order whatever else the tree holds. (`opts.order` = 'asc' / 'lifo' / 'fifo':
     -- other orders, an INSTRUMENT — how much an answer depends on the schedule)
     local order = opts.order
-    local pinfo = {}
+    local pinfo = nil -- (recomputed, see less; R.pinfo answers per port)
     local LATE = { math.huge, '' } -- (a port made after the walk other than a field port: last, by number)
     local less
     less = function (a, b)
@@ -323,12 +367,16 @@ local function build(store, opts)
         if wa and wb then return a < b end
         if wa then return true end
         if wb then return false end
-        local x, y = pinfo[a] or LATE, pinfo[b] or LATE
-        if x[1] ~= y[1] then
-            if type(x[1]) == type(y[1]) then return x[1] < y[1] end
-            return type(x[1]) == 'number'
+        -- ({ okey(owner), field } recomputed - every field port made after the walk had it stored, the same)
+        local oa, ob = fowner[a], fowner[b]
+        local x1, x2, y1, y2 = LATE[1], LATE[2], LATE[1], LATE[2]
+        if oa then x1, x2 = okey(oa), fname[a] end
+        if ob then y1, y2 = okey(ob), fname[b] end
+        if x1 ~= y1 then
+            if type(x1) == type(y1) then return x1 < y1 end
+            return type(x1) == 'number'
         end
-        if x[2] ~= y[2] then return x[2] < y[2] end
+        if x2 ~= y2 then return x2 < y2 end
         return a < b
     end
     -- (DESCENDING: the latest port first — what a stack did, depth-first, so a value travels before a helper fills;
@@ -429,7 +477,7 @@ local function build(store, opts)
         local s = pts[p]
         if type(s) == 'table' and s.bs then return s end
         local b = bs_new(rshift(NO, 5) + 2)
-        if type(s) == 'number' then bs_set(b, s) elseif s then for o in pairs(s) do bs_set(b, o) end end
+        if type(s) == 'number' then bs_set(b, s); cnt[p] = 1 elseif s then for o in pairs(s) do bs_set(b, o) end else cnt[p] = 0 end -- (a number's count, 1, was implied)
         pts[p] = b
         return b
     end
@@ -444,21 +492,22 @@ local function build(store, opts)
     local function addobj(p, o)
         if top[p] then if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end else G7.rheld(o, p) end; return end
         local s = pts[p]
-        if s == nil then pts[p] = o; cnt[p] = 1
+        local n -- (cnt holds only a SET's count - a number in pts is one object)
+        if s == nil then pts[p] = o; n = 1
         elseif type(s) == 'number' then
             if s == o then return end
-            pts[p] = { [s] = true, [o] = true }; cnt[p] = 2
+            pts[p] = { [s] = true, [o] = true }; cnt[p] = 2; n = 2
         elseif s.bs then
             if not bs_set(s, o) then return end
-            cnt[p] = cnt[p] + 1
+            n = cnt[p] + 1; cnt[p] = n
         else
             if s[o] then return end
             s[o] = true
-            cnt[p] = cnt[p] + 1
-            if cnt[p] > BIG then tobits(p) end
+            n = cnt[p] + 1; cnt[p] = n
+            if n > BIG then tobits(p) end
         end
         if G7.TR and G7.TSRC then G7.trbump(G7.TSRC, p, G7.TKIND) end
-        if cnt[p] > M.CAP and G7.capped(p) then return settop(p) end
+        if n > M.CAP and G7.capped(p) then return settop(p) end
         -- (a port's pending delta as its objects are: ONE object is the number itself, more a list, many a bitset — most
         -- deltas hold one object, and a list per port per round was the allocation census's top site, 1.3 M per run)
         local d = delta[p]
@@ -537,16 +586,57 @@ local function build(store, opts)
     -- and the list feeds ⊤ once instead (the strict ⊤ for a strict reader)
     G7.PARK, G7.FEDTOP = {}, {}
     G7.FEDK, G7.FEDKN = opts.fedk ~= false and {} or nil, 0 -- (CART-1836: an object's key count at its last completed ⊤ walk)
+    -- (a list's parked readers are a SHARED node - most lists park the same readers: w3 63,512 sets, 3,109 distinct.
+    -- G7.PARK[l] = { ks = the readers ascending, m = reader -> its strict flag, n, h1, h2 }, never empty, never changed;
+    -- G7.PINT interns them (weakly) by a Zobrist key of the content, a hit checked entry by entry)
+    G7.PINT, G7.PZ = setmetatable({}, { __mode = 'v' }), {}
+    G7.PSEED = 0x2545F491
+    function G7.pz(k) -- (a reader's random word, per strict flag)
+        local z = G7.PZ[k]
+        if not z then
+            local x = G7.PSEED
+            x = bit.bxor(x, lshift(x, 13)); x = bit.bxor(x, rshift(x, 17)); x = bit.bxor(x, lshift(x, 5))
+            local y = bit.bxor(x, lshift(x, 13)); y = bit.bxor(y, rshift(y, 17)); y = bit.bxor(y, lshift(y, 5))
+            G7.PSEED = y
+            z = { x, y }; G7.PZ[k] = z
+        end
+        return z
+    end
+    function G7.park(l, dead, vals)
+        local old = G7.PARK[l]
+        local h1, h2, n = 0, 0, 0
+        if old then h1, h2, n = old.h1, old.h2, old.n end
+        for i = 1, #dead do
+            local z = G7.pz(vals[i] == true and -dead[i] or dead[i]) -- (strict: the negated key - readers are positive ports)
+            h1 = bit.bxor(h1, z[1]); h2 = bit.bxor(h2, z[2])
+        end
+        n = n + #dead
+        local key = h1 .. ':' .. h2 .. ':' .. n
+        local c = G7.PINT[key]
+        if c and c.n == n then
+            local same = true
+            for i = 1, #dead do if c.m[dead[i]] ~= vals[i] then same = false; break end end
+            if same and old then for k, v in pairs(old.m) do if c.m[k] ~= v then same = false; break end end end
+            if same then G7.PARK[l] = c; return end
+        end
+        local ks, m = {}, {}
+        if old then for i = 1, old.n do local k = old.ks[i]; ks[i] = k; m[k] = old.m[k] end end
+        for i = 1, #dead do ks[#ks + 1] = dead[i]; m[dead[i]] = vals[i] end
+        table.sort(ks)
+        c = { ks = ks, m = m, n = n, h1 = h1, h2 = h2 }
+        G7.PINT[key] = c
+        G7.PARK[l] = c
+    end
     function G7.rereaders(l)
         local dead
         for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS and not G7.isrtop(dst) then dead = dead or {}; dead[#dead + 1] = dst end end
         if dead then
-            local pk = G7.PARK[l]
-            if not pk then pk = {}; G7.PARK[l] = pk end
+            local vals = {}
             for i = 1, #dead do
-                local v = l[dead[i]]; l[dead[i]] = nil; pk[dead[i]] = v
+                local v = l[dead[i]]; l[dead[i]] = nil; vals[i] = v
                 if v == true then l[G7.TOPS] = true else l[G7.TOPL] = v end
             end
+            G7.park(l, dead, vals)
         end
     end
     -- every reader of a list, live and parked, without the ⊤ markers: for registrations that need the readers themselves
@@ -554,7 +644,7 @@ local function build(store, opts)
         local T, S = G7.TOPL, G7.TOPS
         for dst, v in pairs(l) do if dst ~= T and dst ~= S then fn(dst, v) end end
         local pk = G7.PARK[l]
-        if pk then for dst, v in pairs(pk) do fn(dst, v) end end
+        if pk then local ks, m = pk.ks, pk.m; for i = 1, pk.n do fn(ks[i], m[ks[i]]) end end
     end
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
@@ -587,7 +677,6 @@ local function build(store, opts)
             p = new(); m[f] = p
             okeys_cache[o] = nil
             fowner[p], fname[p] = o, f
-            if not walking then pinfo[p] = { okey(o), f } end
             local cp = G7.CPAIR and G7.CPAIR[o] -- (a KEYED COPY's source gained a field: its targets gain it too)
             if cp and f:byte(1) ~= 1 then for t in pairs(cp) do G7.edge(p, ofp(t, f)) end end
         end
@@ -736,13 +825,13 @@ local function build(store, opts)
         if G7.VIA then
             local v = G7.VIA[l]
             if not v and via then
-                v = { d = next(l) ~= nil or next(G7.PARK[l] or NOTHING) ~= nil, c = {} }
+                v = { d = next(l) ~= nil or G7.PARK[l] ~= nil, c = {} }
                 G7.VIA[l] = v
             end
             if v then if via then v.c[via] = true else v.d = true end end
         end
         if l[dst] ~= nil then return end
-        do local pk = G7.PARK and G7.PARK[l]; if pk and pk[dst] ~= nil then return end end -- CART-1742 (parked: registered)
+        do local pk = G7.PARK and G7.PARK[l]; if pk and pk.m[dst] ~= nil then return end end -- CART-1742 (parked: registered)
         do
             l[dst] = strict and true or false
             if not strict and f ~= '[]' then local ns = r[NS]; if not ns then ns = {}; r[NS] = ns end; ns[dst] = true end
@@ -807,9 +896,10 @@ local function build(store, opts)
         if f == 'setfenv' and not G7.HOSTWALK then G7.ANYSETFENV = true end
         if G7.MULTI then G7.LENV[dst] = G7.ENV end
         if WALKERR then
-            LOADERR[dst] = WALKERR()
-            if f:byte(1) ~= 1 and f ~= '{k}' then G7.LDL[#G7.LDL + 1] = { x, LOADERR[dst] } end -- (CART-1769)
-        end
+            local e = WALKERR()
+            G7.lerset(dst, e)
+            if f:byte(1) ~= 1 and f ~= '{k}' then local L = G7.LDL; local n = #L; L[n + 1] = x; L[n + 2] = e or false end -- (CART-1769)
+        else G7.lerset(dst, nil) end
         if PTAG then
             local tg = PTAG[x]
             if tg and tg.d < 3 then PTAG[dst] = { fn = tg.fn, j = tg.j, path = tg.path .. '.' .. tostring(f), d = tg.d + 1 } end
@@ -819,9 +909,14 @@ local function build(store, opts)
         local nk = G7.NEXTK
         G7.NEXTK = nil
         if f == '[]' and nk then G7.LOADK[dst] = nk; G7.DYNL[#G7.DYNL + 1] = { x, nk, dst } end
-        local l = loads[x]
-        if not l then l = {}; loads[x] = l end
-        l[#l + 1] = { f, dst, strict }
+        do
+            local LREC = G7.LREC
+            local i = #LREC + 1
+            LREC[i], LREC[i + 1], LREC[i + 2], LREC[i + 3] = f, dst, strict and true or false, i
+            local t = loads[x]
+            if t then LREC[i + 3] = LREC[t + 3]; LREC[t + 3] = i end
+            loads[x] = i
+        end
         if top[x] and spread then settop(dst) end
         for o in each(x) do load_obj(o, f, dst, nil, strict) end
         return dst
@@ -830,9 +925,14 @@ local function build(store, opts)
         local nk = G7.NEXTK -- (a dynamic store's key port, CART-1820 — taken once, CART-1821)
         G7.NEXTK = nil
         if f == '[]' and nk then G7.DYNS[#G7.DYNS + 1] = { x, nk } end
-        local l = stores[x]
-        if not l then l = {}; stores[x] = l end
-        l[#l + 1] = { f, v }
+        do
+            local SREC = G7.SREC
+            local i = #SREC + 1
+            SREC[i], SREC[i + 1], SREC[i + 2] = f, v, i
+            local t = stores[x]
+            if t then SREC[i + 2] = SREC[t + 2]; SREC[t + 2] = i end
+            stores[x] = i
+        end
         -- (a FUNCTION has no metatable of its own — setmetatable raises on one — so `\1mt` never lands on it: a generic
         -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710)
         -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761)
@@ -993,6 +1093,30 @@ local function build(store, opts)
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
         else edge(fp.ret, res) end
     end
+    -- (bindcall over a POOLED argument list - an ordinary Lua function reads the pool, in bindcall's edge order;
+    -- anything else gets the list back as a table)
+    function G7.bindcallp(o, off, res, site, cerr)
+        if site and clone_at then
+            local inst = clone_at(site, o)
+            if inst then o = inst end
+        end
+        local fp = fnports[o]
+        if not fp or G7.NATIVE[o] or (G7.PH and G7.PH[o]) or (o == G7.EXT and G7.EXTCALL) then return bindcall(o, G7.argsat(off), res, nil, cerr) end
+        local AP = G7.APOOL
+        local n, sp = AP[off], AP[off + 1]
+        local ps = fp.params
+        for i = 1, n do if ps[i] then edge(AP[off + 1 + i], ps[i]) end end
+        if cerr and fp.err then edge(fp.err, cerr) end
+        if fp.vararg then for i = #ps + 1, n do edge(AP[off + 1 + i], fp.vararg) end end
+        if sp > 0 then
+            local a = AP[off + 1 + sp]
+            for i = sp + 1, #ps do edge(a, ps[i]) end
+            if fp.vararg then edge(a, fp.vararg) end
+        end
+        if type(res) == 'table' then
+            for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
+        else edge(fp.ret, res) end
+    end
     -- (one yield set and one resume-argument set for the whole program, CART-1700: any yield's values reach any resume,
     -- any resume's arguments any yield. GERR: what MODULE-LEVEL code raises — a function's own errors go to its port
     -- `e:<id>`, up the call graph to the pcall that protects it, CART-1705; one global set saturated on the repo and
@@ -1028,12 +1152,39 @@ local function build(store, opts)
             kp = new(); KEYPORT[f] = kp
             if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
         end
-        bindcall(g, { op, kp }, dst, nil, LOADERR[dst])
+        bindcall(g, { op, kp }, dst, nil, G7.lerget(dst))
     end
     local function callc(callee, args, res, site, cerr)
-        local l = calls[callee]
-        if not l then l = {}; calls[callee] = l end
-        l[#l + 1] = { args, res, site, cerr }
+        do
+            local CREC = G7.CREC
+            local i = #CREC + 1
+            local a_ = args
+            do -- (pool a plain list)
+                local n, plain = 0, true
+                for k, v in pairs(args) do
+                    if k == 'spread' then if type(v) ~= 'number' then plain = false end
+                    elseif type(k) == 'number' and type(v) == 'number' then n = n + 1
+                    else plain = false end
+                    if not plain then break end
+                end
+                if plain then
+                    for k = 1, n do if args[k] == nil then plain = false; break end end
+                end
+                if plain then
+                    local AP = G7.APOOL
+                    local off = #AP + 1
+                    AP[off], AP[off + 1] = n, args.spread or 0
+                    for k = 1, n do AP[off + 1 + k] = args[k] end
+                    a_ = off
+                end
+            end
+            local r_, s_, e_ = res, site, cerr
+            if r_ == nil then r_ = false end; if s_ == nil then s_ = false end; if e_ == nil then e_ = false end
+            CREC[i], CREC[i + 1], CREC[i + 2], CREC[i + 3], CREC[i + 4] = a_, r_, s_, e_, i
+            local t = calls[callee]
+            if t then CREC[i + 4] = CREC[t + 4]; CREC[t + 4] = i end
+            calls[callee] = i
+        end
         if top[callee] and spread and type(res) ~= 'table' then settop(res) end
         for o in each(callee) do bindcall(o, args, res, site, cerr) end
     end
@@ -1101,7 +1252,7 @@ local function build(store, opts)
     -- (a store `x.f = v` / `x[k] = v` also reaches x's `__newindex`: a FUNCTION is called with (x, key, v), a TABLE
     -- receives the store — CART-1704)
     local function metastore(base, f, kp, v, cerr)
-        if cerr and f:byte(1) ~= 1 then G7.STL[#G7.STL + 1] = { base, cerr } end -- (a store's error port, CART-1769)
+        if cerr and f:byte(1) ~= 1 then local L = G7.STL; local n = #L; L[n + 1] = base; L[n + 2] = cerr end -- (a store's error port, CART-1769)
         local nh = field(field(base, '\1mt', true), '__newindex')
         METAH[nh] = '__newindex'
         callc(nh, { base, kp, v }, new(), nil, cerr)
@@ -1636,8 +1787,8 @@ local function build(store, opts)
                 if spread then
                     for q in sit(succ[p]) do settop(q) end
                     if fowner[p] then readers(fowner[p], fname[p], settop) end
-                    for _, ld in ipairs(loads[p] or NOTHING) do settop(ld[2]) end
-                    for _, cl in ipairs(calls[p] or NOTHING) do if type(cl[2]) ~= 'table' then settop(cl[2]) end end
+                    do local LREC, i = G7.LREC, loads[p]; i = i and LREC[i + 3]; while i do settop(LREC[i + 1]); if i == loads[p] then break end; i = LREC[i + 3] end end
+                    do local CREC, i = G7.CREC, calls[p]; i = i and CREC[i + 4]; while i do local r = CREC[i + 1]; if r == false then r = nil end; if type(r) ~= 'table' then settop(r) end; if i == calls[p] then break end; i = CREC[i + 4] end end
                 end
             else
                 local d = delta[p]
@@ -1662,16 +1813,25 @@ local function build(store, opts)
                     if G7.TR then G7.TSRC, G7.TKIND = nil, nil end
                 end
                 if d then
-                    for _, ld in ipairs(loads[p] or NOTHING) do
-                        if G7.RG and G7.RG[p] and not G7.RG[ld[2]] then G7.rgthru(d, ld[2], dit) end
-                        for _, o in dit(d) do load_obj(o, ld[1], ld[2], nil, ld[3]) end
+                    local LREC, li = G7.LREC, loads[p]
+                    li = li and LREC[li + 3]
+                    while li do
+                        local f1, d1, s1 = LREC[li], LREC[li + 1], LREC[li + 2]
+                        if G7.RG and G7.RG[p] and not G7.RG[d1] then G7.rgthru(d, d1, dit) end
+                        for _, o in dit(d) do load_obj(o, f1, d1, nil, s1) end
+                        if li == loads[p] then break end
+                        li = LREC[li + 3]
                     end
-                    for _, st in ipairs(stores[p] or NOTHING) do
+                    local SREC, si = G7.SREC, stores[p]
+                    si = si and SREC[si + 2]
+                    while si do
+                        local st1, st2 = SREC[si], SREC[si + 1]
+                        if si == stores[p] then si = nil else si = SREC[si + 2] end
                         for _, o in dit(d) do
                             -- (a host object takes a store only when its kind is OPEN: a 'prim' raises, a 'members' one has
                             -- its declared members only, CART-1761)
                             local tn = TNAME[o]
-                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st[1] == '\1mt') and not (st[1] == '\1mt' and G7.MTT and G7.gemeta(p, o)) then edge(st[2], ofp(o, st[1])) end
+                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st1 == '\1mt') and not (st1 == '\1mt' and G7.MTT and G7.gemeta(p, o)) then edge(st2, ofp(o, st1)) end
                         end
                     end
                     G7.mtcopy(p)
@@ -1681,8 +1841,21 @@ local function build(store, opts)
                             if p == r[2] then for o in each(r[1]) do G7.copypair(x, o, r[3]) end end
                         end
                     end
-                    for _, cl in ipairs(calls[p] or NOTHING) do for _, o in dit(d) do bindcall(o, cl[1], cl[2], cl[3], cl[4]) end end
-                    for _, ce in ipairs(ARGERR[p] or NOTHING) do
+                    local CREC, ci = G7.CREC, calls[p]
+                    ci = ci and CREC[ci + 4]
+                    while ci do
+                        local a1, r1, s1, e1 = CREC[ci], CREC[ci + 1], CREC[ci + 2], CREC[ci + 3]
+                        if r1 == false then r1 = nil end; if s1 == false then s1 = nil end; if e1 == false then e1 = nil end
+                        if type(a1) == 'number' then local bp = G7.bindcallp; for _, o in dit(d) do bp(o, a1, r1, s1, e1) end
+                        else for _, o in dit(d) do bindcall(o, a1, r1, s1, e1) end end
+                        if ci == calls[p] then break end
+                        ci = CREC[ci + 4]
+                    end
+                    local AREC, ai = G7.AREC, ARGERR[p]
+                    ai = ai and AREC[ai + 1]
+                    while ai do
+                        local ce = AREC[ai]
+                        if ai == ARGERR[p] then ai = nil else ai = AREC[ai + 1] end
                         for _, o in dit(d) do local fpp = fnports[o]; if fpp and fpp.err then edge(fpp.err, ce) end end
                     end
                     for _, fl in ipairs(filters[p] or NOTHING) do
@@ -1993,14 +2166,27 @@ local function build(store, opts)
     -- (keyed by position AND callee name: a chained call starts where its inner call does — `load().run()` and
     -- `load()`, `parser:parse()[1]:root()` and `parser:parse()` — and by position alone the inner record overwrote
     -- the outer, so the outer, ambiguous call was never probed)
+    -- (by NUMBERS - call_at[file][line * 2^32 + col] the call starting there, false where several do; then
+    -- G7.CATM[file][pos][callee name] - the last of that name, as the string key's overwrite kept)
     local call_at = {}
+    G7.CATM = {}
     for _, c in ipairs(store.data.calls or NOTHING) do
         local at = c.at
         if at then
-            local k = callrec.file(c) .. ':' .. atr.sl(at) .. ':' .. atr.sc(at)
-            call_at[k .. '#' .. tostring(callrec.callee(c))] = c
-            -- (by position alone only where ONE call starts there)
-            if call_at[k] == nil then call_at[k] = c elseif call_at[k] ~= c then call_at[k] = false end
+            local file = callrec.file(c)
+            local pos = atr.sl(at) * 4294967296 + atr.sc(at)
+            local m = call_at[file]
+            if not m then m = {}; call_at[file] = m end
+            local e = m[pos]
+            if e == nil then m[pos] = c
+            elseif e ~= c then
+                local mm = G7.CATM[file]
+                if not mm then mm = {}; G7.CATM[file] = mm end
+                local byname = mm[pos]
+                if not byname then byname = {}; mm[pos] = byname; byname[tostring(callrec.callee(e))] = e end
+                byname[tostring(callrec.callee(c))] = c
+                m[pos] = false
+            end
         end
     end
     local req_at = {}
@@ -2560,7 +2746,15 @@ local function build(store, opts)
             for _, a in tsutil.inamed, args or EMPTY_NODE, -1 do argn[#argn + 1] = a end
             local cname = f and ((f:type() == 'method_index_expression' and f:field('method')[1])
                 or (f:type() == 'dot_index_expression' and f:field('field')[1]) or (f:type() == 'identifier' and f))
-            local c = f and (call_at[key_of(f) .. '#' .. (cname and txt(cname) or '')] or call_at[key_of(f)] or nil)
+            local c
+            if f then -- (call_at by numbers)
+                local l0, c0 = f:start()
+                local pos = l0 * 4294967296 + c0
+                local e = call_at[kfile]
+                if e then e = e[pos] end
+                if e then c = e
+                elseif e == false then c = G7.CATM[kfile][pos][cname and txt(cname) or ''] end
+            end
             local fname = f and txt(f) or ''
             -- (a CART-1707 builtin is the GLOBAL of that name: `local function load()` is the tree's own function)
             local function gbl()
@@ -3094,10 +3288,15 @@ local function build(store, opts)
             -- elements — its comparator or their __lt. (string.gsub's replacement function needs no route: its
             -- errors are the rule above, and it is handed only strings)
             for _, ap in ipairs(aps) do
-                local l = ARGERR[ap]
-                if not l then l = {}; ARGERR[ap] = l end
                 local ce = curerr()
-                l[#l + 1] = ce
+                do
+                    local AREC = G7.AREC
+                    local i = #AREC + 1
+                    AREC[i], AREC[i + 1] = ce, i
+                    local t = ARGERR[ap]
+                    if t then AREC[i + 1] = AREC[t + 1]; AREC[t + 1] = i end
+                    ARGERR[ap] = i
+                end
                 for o in each(ap) do local fpp = fnports[o]; if fpp and fpp.err then edge(fpp.err, ce) end end
             end
             if fname == 'tostring' and aps[1] then metacall(aps[1], '__tostring', { aps[1] }, res, curerr()) end
@@ -4216,6 +4415,32 @@ local function build(store, opts)
         end
     end
     local tainted, twork = {}, {}
+    -- (two bitsets behind the table interface - B1 true, B2 'r', negative ports in a side table; a plain table where
+    -- a consumer walks it: the dump, explain, expose / loc)
+    if not (opts.dump or opts.explain or G7.EXP.expose or G7.EXP.loc) then
+        local B1, B2, SIDE = {}, {}, {}
+        G7.TB1, G7.TB2 = B1, B2
+        tainted = setmetatable({}, {
+            __index = function (_, p)
+                if type(p) ~= 'number' or p < 0 then return SIDE[p] end
+                local w, m = rshift(p, 5), lshift(1, band(p, 31))
+                local x = B1[w]
+                if x and band(x, m) ~= 0 then return true end
+                x = B2[w]
+                if x and band(x, m) ~= 0 then return 'r' end
+                return nil
+            end,
+            __newindex = function (_, p, v)
+                if type(p) ~= 'number' or p < 0 then SIDE[p] = v; return end
+                local w, m = rshift(p, 5), lshift(1, band(p, 31))
+                if v == true then
+                    B1[w] = bor(B1[w] or 0, m)
+                    local x = B2[w]; if x then B2[w] = band(x, bnot(m)) end
+                elseif v == 'r' then B2[w] = bor(B2[w] or 0, m)
+                else error('flowtype: tainted takes true or \'r\'') end
+            end,
+        })
+    end
     -- ★ THE DRAIN POPS THE LOWEST PORT (a binary heap), CART-1824: it was a stack, and pushes come out of string-keyed
     -- walks (field names, copy keys, handler names) whose order varies by process — so which port tainted a port FIRST,
     -- the dump's taint.from, differed in 0.8 % of links between two identical runs. The taint SET does not depend on the
@@ -4280,7 +4505,7 @@ local function build(store, opts)
         for name in sorted(names) do
             for o in pairs(G7.ISG) do
                 for dst in pairs((rd[o] or NOTHING)[name] or NOTHING) do gntop(dst, name) end
-                for dst in pairs((G7.PARK[(rd[o] or NOTHING)[name] or false] or NOTHING)) do gntop(dst, name) end
+                do local pk = G7.PARK[(rd[o] or NOTHING)[name] or false]; if pk then for i = 1, pk.n do gntop(pk.ks[i], name) end end end
             end
         end
     end
@@ -4680,7 +4905,7 @@ local function build(store, opts)
         if G7.REG and G7.REG[p] then for top_ in pairs(G7.REG[p]) do if not G7.RESCT[top_] then G7.TREG = G7.TREG or {}; G7.TREG[top_] = true end end end
         for q in sit(succ[p]) do taint(q) end
         if fowner[p] then readers(fowner[p], fname[p], taint) end
-        for _, ld in ipairs(loads[p] or NOTHING) do taint(ld[2]) end
+        do local LREC, i = G7.LREC, loads[p]; i = i and LREC[i + 3]; while i do taint(LREC[i + 1]); if i == loads[p] then break end; i = LREC[i + 3] end end
         local mm = METAH[p]
         if mm and not ALLOW[mm] then
             local l = METAPEND[mm]
@@ -4739,8 +4964,11 @@ local function build(store, opts)
                 TCUR = p
             end
         end
-        for _, st in ipairs(stores[p] or NOTHING) do
-            local f = st[1]
+        local si = stores[p]
+        si = si and G7.SREC[si + 2]
+        while si do
+            local f, sv = G7.SREC[si], G7.SREC[si + 1]
+            if si == stores[p] then si = nil else si = G7.SREC[si + 2] end
             if not field_hit[f] then
                 if TFROM then TCUR = { p, 'a store of .' .. tostring(f) .. ' through it reaches that field of EVERY escaped object' } end
                 G7.fieldhit(f)
@@ -4749,7 +4977,7 @@ local function build(store, opts)
             -- (and what it stores ESCAPES: written into an object the solve no longer follows, it may be read — and a
             -- function called — wherever that object goes. `t.f = g` through a saturated t left g's parameters whole, and a
             -- call through a tainted H.f that ran g answered a whole exact, CART-1732)
-            for o in each(st[2]) do G7.escmore(o, 'stored-through-lost-base') end
+            for o in each(sv) do G7.escmore(o, 'stored-through-lost-base') end
         end
         -- (a KEYED COPY through a port the solve lost objects of: a lost TARGET may have received every field the source
         -- holds — the store rule, per field; a lost SOURCE may have held anything under any key, CART-1726)
@@ -4780,11 +5008,27 @@ local function build(store, opts)
         -- the repo. What the full rule had covered beyond _G was coincidence, now covered by the direct rules: the
         -- handler key (CART-1750) and the parked __call (CART-1751)
         if calls[p] and not G7.HNOCALL then
-            if not loadf then
-                loadf = {}
-                for _, l in pairs(loads) do for _, ld in ipairs(l) do loadf[ld[2]] = ld[1] end end
+            -- (a binary search over the load records, appended in result-port order - checked once, the table if not)
+            if G7.LDMONO == nil then
+                local LREC, last = G7.LREC, -math.huge
+                G7.LDMONO = true
+                for i = 1, #LREC, 4 do local d = LREC[i + 1]; if d <= last then G7.LDMONO = false; break end; last = d end
             end
-            local f = loadf[p]
+            if not G7.LDMONO and not loadf then
+                loadf = {}
+                local LREC = G7.LREC
+                for _, i0 in pairs(loads) do local i = LREC[i0 + 3]; while true do loadf[LREC[i + 1]] = LREC[i]; if i == i0 then break end; i = LREC[i + 3] end end
+            end
+            local f
+            if G7.LDMONO then
+                local LREC = G7.LREC
+                local lo, hi = 0, #LREC / 4 - 1
+                while lo <= hi do
+                    local mid = math.floor((lo + hi) / 2)
+                    local d = LREC[4 * mid + 2]
+                    if d == p then f = LREC[4 * mid + 1]; break elseif d < p then lo = mid + 1 else hi = mid - 1 end
+                end
+            else f = loadf[p] end
             if f and not fhit[f] then
                 fhit[f] = true
                 if TFROM then TCUR = { p, 'a call through it may reach any function stored as .' .. tostring(f) .. ': their parameters' } end
@@ -4816,7 +5060,14 @@ local function build(store, opts)
             for _, o in ipairs(esc) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end
             TCUR = p
         end
-        for _, cl in ipairs(not G7.HNOCALL and calls[p] or NOTHING) do
+        local ci = not G7.HNOCALL and calls[p] or nil
+        ci = ci and G7.CREC[ci + 4]
+        while ci do
+            local CREC = G7.CREC
+            local cl = { CREC[ci], CREC[ci + 1], CREC[ci + 2], CREC[ci + 3] }
+            if type(cl[1]) == 'number' then cl[1] = G7.argsat(cl[1]) end
+            for k = 2, 4 do if cl[k] == false then cl[k] = nil end end
+            if ci == calls[p] then ci = nil else ci = CREC[ci + 4] end
             -- (a call the solve lost HANDS ITS ARGUMENTS to whatever it may reach — any escaped function, whose stores
             -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
             -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
@@ -4829,7 +5080,7 @@ local function build(store, opts)
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end
             if cl[4] then taint(cl[4]) end -- (a callee the solve lost may raise anything)
         end
-        for _, ce in ipairs(ARGERR[p] or NOTHING) do taint(ce) end -- (a callback the solve lost may raise anything)
+        do local AREC, ai = G7.AREC, ARGERR[p]; ai = ai and AREC[ai + 1]; while ai do taint(AREC[ai]); if ai == ARGERR[p] then break end; ai = AREC[ai + 1] end end -- (a callback the solve lost may raise anything)
         for _, fl in ipairs(filters[p] or NOTHING) do taint(fl[1]) end
         for _, d in ipairs(gf_of[p] or NOTHING) do taint(d) end
         for _, mf in ipairs(mflows[p] or NOTHING) do taint(mf[2]) end
@@ -4861,9 +5112,11 @@ local function build(store, opts)
         TCUR = 'an access through a base that may hold an escaped table may run its escaped handler and raise (CART-1762/1769)'
         for _, ev in ipairs { { '__index', G7.LDL }, { '__newindex', G7.STL } } do
             if ALLOW[ev[1]] or meta_possible(ev[1]) then
-                for _, a in ipairs(ev[2]) do
-                    local ep = a[2]
-                    if not tainted[ep] and escbase(a[1]) then taint(ep); released = true end
+                local L = ev[2]
+                for j = 1, #L, 2 do
+                    local ep = L[j + 1]
+                    if ep == false then ep = nil end
+                    if not tainted[ep] and escbase(L[j]) then taint(ep); released = true end
                 end
             end
         end
@@ -5113,18 +5366,19 @@ local function build(store, opts)
             guarded = pr.guard ~= nil, partial = partial_hit and true or nil, nobj = nobj, c = pr.c }
     end
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
+    delta, inwl, wl = {}, {}, {} -- (the worklist's arrays are empty at the fixpoint, kept at their peak size; no solve follows)
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
     if G7.TR then -- (experiment `trace`: the solve as a bounded graph)
         local tr = G7.TR
         local fanin, maxset = {}, {}
         for nd, l in pairs(tr.IN) do local n = 0; for _ in pairs(l) do n = n + 1 end; fanin[nd] = n end
-        for p, n in pairs(cnt) do if not top[p] and n > 0 then local nd = G7.trnode(p); if (maxset[nd] or 0) < n then maxset[nd] = n end end end
+        for p, s in pairs(pts) do local n = type(s) == 'number' and 1 or cnt[p] or 0; if not top[p] and n > 0 then local nd = G7.trnode(p); if (maxset[nd] or 0) < n then maxset[nd] = n end end end
         R.trace = { edges = tr.E, fanin = fanin, maxset = maxset, sat = tr.SAT, nsat = tr.NSAT, replay = tr.REPLAY, seq = tr.seq }
     end
     if G7.EXP.expose or G7.EXP.loc then -- (experiment `expose`: the solver's tables for an instrument — names may change, not an API)
         R.internals = { top = top, pts = pts, each = each, obinfo = obinfo, tainted = tainted, probes = probes, succ = succ,
             escaped = escaped, ofield = ofield, fnports = fnports, protos = protos, tfrom = TFROM,
-            NW = NW, NOW = NOW, pinfo = pinfo, loc = G7.LOCP, rd = rd, NS = NS } -- (rd: object -> field -> the loads reading it) -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
+            NW = NW, NOW = NOW, pinfo = setmetatable({}, { __index = function (_, p) local o = p > NW and fowner[p]; if o then return { okey(o), fname[p] } end end }), loc = G7.LOCP, rd = rd, NS = NS } -- (rd: object -> field -> the loads reading it) -- (NW / NOW: the ports / objects the WALK made — numbered the same across solves of one tree)
     end
     -- (THE SUMMARY a placeholder solve reads off its heap, CART-1786: { results = { [k] = sources }, stores = { { at =
     -- param path, sources } }, calls = { { callee = source, args = { sources… } } } }. A SOURCE: { 'param', j, path },
@@ -5445,6 +5699,7 @@ local function build(store, opts)
         for p, sq in pairs(succ) do for q in sit(sq) do if top[q] then addp(q, p) end end end
         if TFROM then R.sat_preds = function (p) return pred[p] or {} end end -- (explain: a saturated port's predecessors)
         for x, l in pairs(loads) do
+            l = G7.ldlist(l) -- (the records as tables; reusing the loop variable: the builder is at Lua's 200-local limit)
             local os
             for _, ld in ipairs(l) do
                 local f, dst, strict = ld[1], ld[2], ld[3]
@@ -5484,7 +5739,8 @@ local function build(store, opts)
             R.origin_load = function (p)
                 if not R._loadof then
                     R._loadof = {}
-                    for x, l in pairs(loads) do for _, ld in ipairs(l) do R._loadof[ld[2]] = R._loadof[ld[2]] or { x, ld[1] } end end
+                    local LREC = G7.LREC
+                    for x, i0 in pairs(loads) do local i = LREC[i0 + 3]; while true do R._loadof[LREC[i + 1]] = R._loadof[LREC[i + 1]] or { x, LREC[i] }; if i == i0 then break end; i = LREC[i + 3] end end
                 end
                 local e = R._loadof[p]
                 if not e then return nil end
@@ -5648,8 +5904,13 @@ build = function (store, opts)
     if opts.ctx == false or opts.ctxfns or opts.dump then return build1(store, opts) end
     local R1 = build1(store, setmetatable({ keepsat = true, ctxsel = true }, { __index = opts }))
     if (R1.nctx or 0) == 0 then return R1 end
-    local R = build1(store, setmetatable({ ctxfns = R1.ctxfns, ctxcallee = R1.ctxcallee }, { __index = opts }))
-    R.stats.ms, R.stats.ctxfns = R.stats.ms + R1.stats.ms, R1.nctx
+    -- (the selection build's state released before the second build - only its selection is kept; its traces pin it,
+    -- so they are flushed: the editor's two-build peak -6 to -10% on self, CART-1843)
+    local ctxfns, ctxcallee, ms1, nctx = R1.ctxfns, R1.ctxcallee, R1.stats.ms, R1.nctx
+    R1 = nil
+    if jit and jit.flush then jit.flush() end; collectgarbage('collect')
+    local R = build1(store, setmetatable({ ctxfns = ctxfns, ctxcallee = ctxcallee }, { __index = opts }))
+    R.stats.ms, R.stats.ctxfns = R.stats.ms + ms1, nctx
     return R
 end
 
