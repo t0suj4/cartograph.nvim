@@ -446,6 +446,7 @@ local function build(store, opts)
             SATSNAP[p] = snap
         end
         if G7.TR then local tr = G7.TR; tr.seq = tr.seq + 1; local nd = G7.trnode(p); tr.SAT[nd] = tr.SAT[nd] or tr.seq; tr.NSAT[nd] = (tr.NSAT[nd] or 0) + 1 end
+        if p == G7.EXTCALL then G7.xheld(s) end
         top[p] = true; pts[p] = nil; delta[p] = nil
         if spread then push(p) end
     end
@@ -490,7 +491,7 @@ local function build(store, opts)
         return b
     end
     local function addobj(p, o)
-        if top[p] then if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end else G7.rheld(o, p) end; return end
+        if top[p] then if p == G7.EXTCALL then G7.XHB[o] = true end; if not (G7.RTOP and G7.RTOP[p]) then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or p end else G7.rheld(o, p) end; return end
         local s = pts[p]
         local n -- (cnt holds only a SET's count - a number in pts is one object)
         if s == nil then pts[p] = o; n = 1
@@ -522,7 +523,7 @@ local function build(store, opts)
     end
     -- the bitset d into q: word by word, what was new becomes q's delta
     local function addbits(q, d)
-        if top[q] then if not (G7.RTOP and G7.RTOP[q]) then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end else G7.rheld(d, q) end return end
+        if top[q] then if q == G7.EXTCALL then G7.xheld(d) end; if not (G7.RTOP and G7.RTOP[q]) then for o in bs_iter(d) do escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or q end end else G7.rheld(d, q) end return end
         local t = tobits(q)
         if t.nw < d.nw then bs_grow(t, d.nw) end
         local tb, db = t.bs, d.bs
@@ -564,7 +565,16 @@ local function build(store, opts)
     -- and for the dump's region roots — and whether it held a TABLE or a FUNCTION, G7.RHT[top]: a top that held only
     -- values of a type, the module NAMES a walk over package.loaded's keys collects, reflects nothing a store, a call or
     -- a hand-out could reach)
-    function G7.isrtop(q) return G7.RTOP ~= nil and G7.RTOP[q] == true end
+    -- (a top that stays its OWN port, not collapsed into ⊤: a region top, and the unknown-code sink G7.EXTCALL — what is
+    -- handed to load or a module outside the tree is recorded past CAP, G7.XHB, for the unknown-code rule: collapsed or
+    -- dropped by settop it reached that rule as nothing, on every corpus, CART-1850)
+    function G7.owntop(q) return q == G7.EXTCALL or G7.RTOP ~= nil and G7.RTOP[q] == true end
+    G7.XHB = {}
+    function G7.xheld(s)
+        if type(s) == 'number' then G7.XHB[s] = true
+        elseif s and s.bs then for o in bs_iter(s) do G7.XHB[o] = true end
+        elseif s then for o in pairs(s) do G7.XHB[o] = true end end
+    end
     G7.RHB, G7.RHT = {}, {}
     function G7.rheld(s, p)
         local h = G7.RHB[p]
@@ -575,10 +585,10 @@ local function build(store, opts)
     end
     function G7.resucc(p) -- p's saturated successors replaced by ⊤
         local s, T = succ[p], G7.TOPL
-        if type(s) == 'number' then if top[s] and s ~= T and not G7.isrtop(s) then succ[p] = T end; return end
+        if type(s) == 'number' then if top[s] and s ~= T and not G7.owntop(s) then succ[p] = T end; return end
         if s == nil then return end
         local dead
-        for q in pairs(s) do if top[q] and q ~= T and not G7.isrtop(q) then dead = dead or {}; dead[#dead + 1] = q end end
+        for q in pairs(s) do if top[q] and q ~= T and not G7.owntop(q) then dead = dead or {}; dead[#dead + 1] = q end end
         if dead then for i = 1, #dead do s[dead[i]] = nil end; s[T] = true end
     end
     -- a reader list's saturated readers are PARKED (G7.PARK[l]: a load's result port carries its own metadata — the
@@ -629,7 +639,7 @@ local function build(store, opts)
     end
     function G7.rereaders(l)
         local dead
-        for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS and not G7.isrtop(dst) then dead = dead or {}; dead[#dead + 1] = dst end end
+        for dst, v in pairs(l) do if top[dst] and dst ~= G7.TOPL and dst ~= G7.TOPS and not G7.owntop(dst) then dead = dead or {}; dead[#dead + 1] = dst end end
         if dead then
             local vals = {}
             for i = 1, #dead do
@@ -649,7 +659,7 @@ local function build(store, opts)
     local function edge(a, b) -- pts(b) ⊇ pts(a)
         if a == b then return end
         if G7.RG and G7.RG[a] and not G7.RG[b] then G7.rgflag(b) end
-        if G7.TOPL and top[b] and not G7.isrtop(b) then b = G7.TOPL; if a == b then return end end -- CART-1742
+        if G7.TOPL and top[b] and not G7.owntop(b) then b = G7.TOPL; if a == b then return end end -- CART-1742
         -- (a port's successors as its objects are: ONE is the port number itself, more a set — a set per source port was
         -- the census's second site, 0.64 M per run. The set is grown key by key, as before: its pairs ORDER is the
         -- propagation order, and a constructor would lay the hash out differently)
@@ -766,7 +776,7 @@ local function build(store, opts)
         if top[q] then if spread then settop(dst) end return end
         -- CART-1742: into ⊤, a field's objects are marked escaped ONCE: the first saturated reader stays
         -- registered on it (parked) and the list's ⊤ marker takes what it gains later
-        if G7.TOPL and top[dst] and not G7.isrtop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
+        if G7.TOPL and top[dst] and not G7.owntop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
         local sq = pts[q]
         local ts, tk = G7.TSRC, G7.TKIND
         if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
@@ -852,7 +862,7 @@ local function build(store, opts)
                 -- taken BEFORE the walk, a dst that saturates during it records nothing. w3: keys walked 483M -> 80M,
                 -- answer rows identical. opts.fedk = false walks every time)
                 local ks = okeys(o)
-                local fedtop = G7.FEDK and G7.TOPL and top[dst] and not G7.isrtop(dst)
+                local fedtop = G7.FEDK and G7.TOPL and top[dst] and not G7.owntop(dst)
                 if fedtop and G7.FEDK[o] == #ks then G7.FEDKN = G7.FEDKN + 1
                 else
                     for _, fk in ipairs(ks) do if fk ~= '{k}' and fk:byte(1) ~= 1 and not (named and named[fk]) then pull(dst, m[fk]) end end
@@ -4405,6 +4415,7 @@ local function build(store, opts)
         local q = {}
         local function skip(x) return x == EXT or G7.ISG[x] end -- (_G: every code reaches it, the contract)
         for o in each(G7.EXTCALL) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end
+        for o in sorted(G7.XHB) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end -- (past CAP, CART-1850)
         local i = 1
         while i <= #q do
             local o = q[i]; i = i + 1
@@ -4413,6 +4424,7 @@ local function build(store, opts)
             for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not skip(x) and not XESC[x] then XESC[x] = true; q[#q + 1] = x end end end
             for c in pairs(protos[o] or NOTHING) do if not skip(c) and not XESC[c] then XESC[c] = true; q[#q + 1] = c end end
         end
+        G7.XESCN = #q
     end
     local tainted, twork = {}, {}
     -- (two bitsets behind the table interface - B1 true, B2 'r', negative ports in a side table; a plain table where
@@ -5165,6 +5177,7 @@ local function build(store, opts)
     local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
         files = #files, ports = N, objects = NO, fedk_skips = G7.FEDKN }
     stats.vinstances = G7.VINSTN
+    stats.unknown_code = G7.XESCN -- (objects handed to unknown code, with their fields and prototypes: CART-1707 / 1850)
     -- (refl-scope: what the region taint inspected, and the capabilities that fell back — DIAGNOSTIC counts: which port a
     -- capability is first seen at depends on the drain order, string-keyed walks among it; which tops escape does not)
     stats.rcap = G7.RCAP

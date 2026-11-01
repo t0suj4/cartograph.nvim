@@ -768,6 +768,48 @@ test('flowdump: escaped_root tells outside-reachable from saturated, and outside
     ok(#D2.solution.taint.outside > 0, 'some tainted port runs back to the unknown-code seed')
 end)
 
+-- (CART-1850: what unknown code is handed is recorded past CAP — G7.EXTCALL is ONE port for every load and outside module,
+-- it saturated on every corpus, and settop dropped what it held: the unknown-code rule saw nothing, `a` rooted as a mere
+-- saturation and its fields untainted by that rule)
+test('flowdump: what is handed to unknown code keeps its unknown-code root after the sink passes CAP (CART-1850)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local SRC = table.concat({ '',
+        'local f = load(("return ..."):lower())',
+        'local a = { x = {} }',
+        'f(a)', 'f({})', 'f({})', 'f({})',
+        'local b = { y = {} }',
+        'f(b)',                                    -- (handed AFTER the sink passed CAP)
+        'return a.x, b.y' }, '\n') .. '\n'
+    local okd, D, RD = pcall(dump, SRC)
+    -- (and outside the dump, where a saturated port collapses into ⊤ and the sink must stay its own port; and with sets
+    -- as bitsets from the first object, so a delivery to the saturated sink is a bitset)
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local oks, R = pcall(flowtype.solve, store, { open = false })
+    local big = flowtype.BIG
+    flowtype.BIG = 1
+    store.ingest(ts.extract(root))
+    local okb, RB = pcall(flowtype.solve, store, { open = false })
+    flowtype.BIG = big
+    vim.fn.delete(root, 'rf')
+    flowtype.CAP = cap
+    assert(okd, D); assert(oks, R); assert(okb, RB)
+    -- (the eight, by the dump's labels: a, a.x, the three `{}`, b, b.y, and type:string)
+    eq(8, RD.stats.unknown_code, 'dump: every object handed reaches the unknown-code rule')
+    eq(8, R.stats.unknown_code, 'with the ⊤ node')
+    eq(8, RB.stats.unknown_code, 'with bitsets')
+    local id = {}
+    for _, s in ipairs(D.sites) do id[s.label] = s.id end
+    local cls = {}
+    for _, e in ipairs(D.solution.taint.escaped_root) do cls[e[1]] = e[2] end
+    local a, b = id['tbl:m.lua:8:10'], id['tbl:m.lua:13:10']
+    assert(a and b, 'a and b have sites: ' .. vim.inspect(vim.tbl_keys(id)))
+    eq('unknown-code', cls[a], 'a, handed before the sink saturated: ' .. vim.inspect(D.solution.taint.escaped_root))
+    eq('unknown-code', cls[b], 'b, handed after: ' .. vim.inspect(D.solution.taint.escaped_root))
+end)
+
 -- (CART-1783: the CART-1776 rule also for what escapes LATE — in the taint phase, past the rule's first check. Closed
 -- mode hits `[]`, and an escaped table's KEY set is ⊤: the outside may key it by any escaped object)
 test('flowdump: closed — a value escaping in the taint phase hits `[]`, and its key set is open (CART-1783)', function ()
