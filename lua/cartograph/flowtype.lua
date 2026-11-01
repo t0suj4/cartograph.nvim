@@ -792,6 +792,11 @@ local function build(store, opts)
             if seen[o] then return end
             seen[o] = true
         end
+        -- (★ A MEMBER OF UNKNOWN CODE IS UNKNOWN CODE, CART-1864: `require("notintree").f` is code the tree does not hold.
+        -- EXT's field ports hold only what the tree stored there, so `ext.f(t)` called nothing and t was never handed to
+        -- unknown code — a later t.k answered a wrong whole exact. A STORE into it needs nothing more: its __newindex
+        -- lookup reads EXT's `\1mt`, now EXT, and that call hands the value to unknown code)
+        if o == G7.EXT then addobj(dst, o) end
         local tn = TNAME[o]
         if tn then
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,

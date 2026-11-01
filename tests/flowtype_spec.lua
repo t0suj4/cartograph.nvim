@@ -3166,6 +3166,29 @@ test('flowtype: refl-scope — a region value handed to a lost builtin or a host
     ok(u and not u.partial and #u.targets == 1, 'an inspecting region escapes nothing: whole {B.m}: ' .. vim.inspect(u) .. vim.inspect(rcap))
 end)
 
+-- (CART-1864: a MEMBER of unknown code is unknown code. `require("notintree").f` read EXT's field port, which holds only
+-- what the tree stored there: `ext.f(t)` called nothing, t was never handed to unknown code, and t.k answered a wrong
+-- whole exact {B.m} — only `ext(t)` itself was a call of unknown code. A store into it hands the value over too)
+test('flowtype: a member of unknown code is unknown code: calling it or storing into it hands the value over (CART-1864)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function v_of(src)
+        local root = tree({ ['m.lua'] = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local ext = require("notintree")', 'local t = { k = setmetatable({}, { __index = B }) }', src,
+            'local s = t.k', 'local function use(p) return p:m() end', 'print(use(s))' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    for _, src in ipairs({ 'ext(t)', 'ext.f(t)', 'ext:f(t)', 'local f = ext.f; f(t)', 'ext.g.h(t)', 'ext.k = t' }) do
+        local v = v_of(src)
+        ok(v and v.partial, src .. ': the module may write t.k: partial: ' .. vim.inspect(v))
+    end
+    local w = v_of('print(ext.f)')
+    ok(w and not w.partial and #w.targets == 1, 'only READ from it, t is not handed: whole {B.m}: ' .. vim.inspect(w))
+end)
+
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
 -- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
 -- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
@@ -3306,8 +3329,10 @@ test('flowtype: a dynamic _G read sees the named global its literal key names (C
             end
         end
     end
-    eq('m.lua::g@0 whole', callee(3), 'the literal through a local: Foo alone')
-    eq('m.lua::g@1 whole', callee(5), 'through a parameter: only the literal its caller passed')
+    -- (+nonfn since CART-1864: the dynamic read also holds EXT, "a global the host defines", and a member of unknown
+    -- code is unknown code — the one function is still Foo's g alone. Known literals naming no host global: CART-1865)
+    eq('m.lua::g@0 whole+nonfn', callee(3), 'the literal through a local: Foo alone')
+    eq('m.lua::g@1 whole+nonfn', callee(5), 'through a parameter: only the literal its caller passed')
 end)
 
 -- ★ A HOST RECORD'S FIELDS (CART-1827): `debug.getinfo(1, 'S').source` is a string — LuaLS's `---@class debuginfo` /
