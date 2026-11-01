@@ -570,6 +570,23 @@ local function build(store, opts)
     -- dropped by settop it reached that rule as nothing, on every corpus, CART-1850)
     function G7.owntop(q) return q == G7.EXTCALL or G7.RTOP ~= nil and G7.RTOP[q] == true end
     G7.XHB = {}
+    -- (CART-1859: the ENTRY POINTS' sites. A walked call's first result port -> 'file:line:col' of the call, recorded where
+    -- callc registers it, so a call the solve later finds to be unknown code's still names where it was made; and every
+    -- argument port handed over — to unknown code (a call of EXT, setfenv of an EXT function, load's arguments), to a
+    -- lost call, a lost builtin, a host `any` — with its kind and site)
+    G7.RESCALL, G7.HANDOUTS, G7.HOSEEN = {}, {}, {}
+    function G7.handout(kind, site, a)
+        if not a then return end
+        local m = G7.HOSEEN[kind]
+        if not m then m = {}; G7.HOSEEN[kind] = m end
+        local m2 = m[site or false]
+        if not m2 then m2 = {}; m[site or false] = m2 end
+        if m2[a] then return end
+        m2[a] = true
+        local H = G7.HANDOUTS
+        H[#H + 1] = kind; H[#H + 1] = site or false; H[#H + 1] = a -- (strided: w3 records 1.37M)
+    end
+    function G7.callsite(res) local r = type(res) == 'table' and res[1] or res; return r and G7.RESCALL[r] or nil end
     function G7.xheld(s)
         if type(s) == 'number' then G7.XHB[s] = true
         elseif s and s.bs then for o in bs_iter(s) do G7.XHB[o] = true end
@@ -1025,7 +1042,7 @@ local function build(store, opts)
         end
         if args.fenv then
             -- (setfenv's function: its reads see the environment; unknown code is handed it)
-            if o == G7.EXT then edge(args.fenv, G7.EXTCALL)
+            if o == G7.EXT then G7.handout('setfenv', G7.callsite(res), args.fenv); edge(args.fenv, G7.EXTCALL)
             elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
             return
         end
@@ -1076,7 +1093,8 @@ local function build(store, opts)
         if o == G7.EXT and G7.EXTCALL then
             -- (calling UNKNOWN code: its results are unknown, what it is handed it may call or write — CART-1707)
             if type(res) == 'table' then for _, r in ipairs(res) do addobj(r, G7.EXT) end elseif res then addobj(res, G7.EXT) end
-            for _, a in ipairs(args) do edge(a, G7.EXTCALL) end
+            local cs = G7.callsite(res)
+            for _, a in ipairs(args) do G7.handout('call', cs, a); edge(a, G7.EXTCALL) end
             return
         end
         local fp = fnports[o]
@@ -1170,6 +1188,7 @@ local function build(store, opts)
         bindcall(g, { op, kp }, dst, nil, G7.lerget(dst))
     end
     local function callc(callee, args, res, site, cerr)
+        if G7.WSITE and res then local r = type(res) == 'table' and res[1] or res; if r and not G7.RESCALL[r] then G7.RESCALL[r] = G7.WSITE end end
         do
             local CREC = G7.CREC
             local i = #CREC + 1
@@ -2860,7 +2879,7 @@ local function build(store, opts)
             end
             if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
                 G7.ANYLOAD = true -- (code from a source the tree does not hold: it may touch every global, CART-1796)
-                for _, a in ipairs(argn) do edge(expr(a), G7.EXTCALL) end
+                for _, a in ipairs(argn) do local ap = expr(a); G7.handout(fname, key_of(n), ap); edge(ap, G7.EXTCALL) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
                 if want then return out end
@@ -2887,7 +2906,7 @@ local function build(store, opts)
                 if fa:type() ~= 'number' then
                     local fp = expr(fa)
                     -- (lvl: the environment the readings of a LEVEL apply in, if fp ends empty — CART-1840)
-                    G7.FENV[#G7.FENV + 1] = { port = fp, env = env, lvl = G7.ENV }
+                    G7.FENV[#G7.FENV + 1] = { port = fp, env = env, lvl = G7.ENV, site = key_of(n) }
                     G7.SETFENVS[#G7.SETFENVS + 1] = { fn = G7.cur(), port = fp }
                     return fp
                 elseif txt(fa) == '1' and (pf or G7.CHUNK) then G7.FENV[#G7.FENV + 1] = { id = pf and pf.id or G7.CHUNK, env = env }
@@ -3751,6 +3770,10 @@ local function build(store, opts)
             expr = function (x) local m = G7.M; G7.M = 0; local a, b = e0(x); G7.M = m; return a, b end
             callv = function (x, w) local m = G7.M; G7.M = 0; local a, b = c0(x, w); G7.M = m; return a, b end
         end
+        do -- (CART-1859: the call being walked, for callc to record)
+            local c1 = callv
+            callv = function (x, w) local s0 = G7.WSITE; G7.WSITE = key_of(x); local a, b = c1(x, w); G7.WSITE = s0; return a, b end
+        end
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
         if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv = rw0, rf0, rk0, re0, rc0 end
@@ -4048,7 +4071,7 @@ local function build(store, opts)
     if jsfinish then jsfinish() end
     G7.pkgnamed_apply() -- (package.loaded["<module>"] read by a literal name: that module — after the walk, CART-1813)
     for _, fe in ipairs(G7.FENV) do
-        if fe.id then G7.fenv(fe.id, fe.env) else callc(fe.port, { fenv = fe.env }, new()) end
+        if fe.id then G7.fenv(fe.id, fe.env) else local r = new(); G7.RESCALL[r] = fe.site; callc(fe.port, { fenv = fe.env }, r) end -- (its site: CART-1859)
     end
     -- (the context instances: one per resolved call site of a selected function; a site it cannot instance — the
     -- function was never walked — binds the shared ports as before)
@@ -4767,13 +4790,15 @@ local function build(store, opts)
     TCUR = 'a builtin reached by value with no model: a lost call (CART-1791)'
     for _, e in ipairs(G7.NATLOST) do
         for _, r in ipairs(type(e[1]) == 'table' and e[1] or { e[1] }) do taint(r) end
-        for _, ap in ipairs(e[2]) do for o in each(ap) do G7.escmore(o, 'builtin-alias-argument') end end
+        local cs = G7.callsite(e[1])
+        for _, ap in ipairs(e[2]) do G7.handout('builtin-lost', cs, ap); for o in each(ap) do G7.escmore(o, 'builtin-alias-argument') end end
         if e[3] then taint(e[3]) end
     end
     TCUR = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
     for _, e in ipairs(G7.ANYT) do
         taint(e[1])
-        for _, ap in ipairs(e[2]) do for o in each(ap) do G7.escmore(o, 'any-result-argument') end end
+        local cs = G7.callsite(e[1])
+        for _, ap in ipairs(e[2]) do G7.handout('host-any', cs, ap); for o in each(ap) do G7.escmore(o, 'any-result-argument') end end
     end
     TCUR = 'a host summary\'s unknown source: a closure it returns, a path past its depth, a value from outside its file'
     for _, p in ipairs(G7.SUMTAINT) do taint(p) end
@@ -5093,7 +5118,13 @@ local function build(store, opts)
             -- reach escaped objects: the arguments escape too. A call bound during the solve, not at the walk, is cut
             -- before it binds: `put(y)` through a callee port left queued never wrote y's table, CART-1706 / 1715)
             if TFROM then TCUR = { p, 'a call through it hands its arguments to whatever it may reach: they escape' } end
+            -- (CART-1859: an entry point, by why its callee was lost — it may hold unknown code's EXT, it saturated, or it
+            -- was tainted)
+            local lk = 'lost-call:tainted'
+            if top[p] then lk = 'lost-call:saturated' else for o in each(p) do if o == G7.EXT then lk = 'lost-call:ext'; break end end end
+            local cs = G7.callsite(cl[2])
             for _, ap in ipairs(cl[1]) do
+                G7.handout(lk, cs, ap)
                 for o in each(ap) do G7.escmore(o, 'lost-call-argument') end
                 if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then G7.tpush(ap) end end
             end
@@ -5390,6 +5421,29 @@ local function build(store, opts)
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     delta, inwl, wl = {}, {}, {} -- (the worklist's arrays are empty at the fixpoint, kept at their peak size; no solve follows)
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
+    -- (CART-1859: every argument handed over — kind 'call' / 'setfenv' / 'load' / 'loadstring' / 'loadfile' / 'dofile'
+    -- (unknown code), 'lost-call:ext' / 'lost-call:saturated' / 'lost-call:tainted', 'builtin-lost', 'host-any' — the site
+    -- 'file:line:col' of the call (nil where the solve made the call itself: unknown code calling back, a handler), and
+    -- what the port holds at the fixpoint, labelled; `top` where it saturated and no longer lists its objects)
+    -- Built when first read: the recording is all a solve pays for.
+    setmetatable(R, { __index = function (t, k)
+        if k ~= 'handouts' then return nil end
+        local H, l = G7.HANDOUTS, {}
+        for i = 1, #H, 3 do
+            local held = {}
+            for o in each(H[i + 2]) do held[#held + 1] = tostring(obinfo[o] or o) end
+            table.sort(held)
+            l[#l + 1] = { kind = H[i], site = H[i + 1] or nil, held = held, top = top[H[i + 2]] or nil, port = H[i + 2] }
+        end
+        table.sort(l, function (x, y)
+            if (x.site or '') ~= (y.site or '') then return (x.site or '') < (y.site or '') end
+            if x.kind ~= y.kind then return x.kind < y.kind end
+            return x.port < y.port
+        end)
+        for _, h in ipairs(l) do h.port = nil end
+        rawset(t, k, l)
+        return l
+    end })
     if G7.TR then -- (experiment `trace`: the solve as a bounded graph)
         local tr = G7.TR
         local fanin, maxset = {}, {}

@@ -3189,6 +3189,53 @@ test('flowtype: a member of unknown code is unknown code: calling it or storing 
     ok(w and not w.partial and #w.targets == 1, 'only READ from it, t is not handed: whole {B.m}: ' .. vim.inspect(w))
 end)
 
+-- (CART-1859, the entry points' first piece: every argument handed over — to unknown code, a lost builtin, a host `any`
+-- call — names the call it was handed at. A call the solve finds to be unknown code's only later (a member of an
+-- unmapped module, load's result) had no site at all: attribution fell back to the files of the objects handed)
+test('flowtype: R.handouts names the site and kind of every value handed over (CART-1859)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local t, u, v, w, x = {}, {}, {}, {}, {}',
+        'ext.f(t)',
+        'local g = load(io.read())',
+        'g(u)',
+        'load(io.read(), "x", "t", v)',
+        'local cw = coroutine.wrap',
+        'cw(w)',
+        'print(vim.fn.get(x, 1))',
+        'local function own(p) return p end',
+        'own({})',
+        'local z = {}',
+        't.cb(z)',
+        'local env = {}',
+        'setfenv(g, env)',
+        'local q = {}',
+        't.h = ext.f',
+        't.h(q)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    store.data.profile = 'nvim'
+    local R = flowtype.solve(store, { open = false })
+    vim.fn.delete(root, 'rf')
+    local function has(kind, site, label)
+        for _, h in ipairs(R.handouts) do
+            if h.kind == kind and h.site == site and vim.tbl_contains(h.held, label) then return true end
+        end
+        return false
+    end
+    local dump = vim.inspect(R.handouts)
+    ok(has('call', 'm.lua:2:0', 'tbl:m.lua:1:22'), 'a member of an unmapped module, called: t at its call: ' .. dump)
+    ok(has('call', 'm.lua:4:0', 'tbl:m.lua:1:26'), 'load\'s result, called: u at its call: ' .. dump)
+    ok(has('load', 'm.lua:3:10', 'type:any'), 'load\'s own argument: ' .. dump)
+    ok(has('load', 'm.lua:5:0', 'tbl:m.lua:1:30'), 'load\'s env argument: ' .. dump)
+    ok(has('builtin-lost', 'm.lua:7:0', 'tbl:m.lua:1:34'), 'a builtin reached by value with no model: ' .. dump)
+    ok(has('host-any', 'm.lua:8:6', 'tbl:m.lua:1:38'), 'a host function\'s `any` result: ' .. dump)
+    ok(has('lost-call:tainted', 'm.lua:12:0', 'tbl:m.lua:11:10'), 'a call through a field unknown code may write: ' .. dump)
+    ok(has('setfenv', 'm.lua:14:0', 'tbl:m.lua:13:12'), 'the environment set on unknown code: ' .. dump)
+    ok(has('lost-call:ext', 'm.lua:17:0', 'tbl:m.lua:15:10'), 'a lost callee that may hold unknown code: ' .. dump)
+    for _, h in ipairs(R.handouts) do ok(h.site ~= 'm.lua:10:0', 'the tree\'s own function is handed nothing: ' .. vim.inspect(h)) end
+end)
+
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
 -- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
 -- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
