@@ -4787,6 +4787,10 @@ local function build(store, opts)
     if G7.RTOP then
         TCUR = 'saturated (past CAP) in the reflection region'
         G7.REG, G7.RCAP, G7.RCAPD, G7.LOSTARG, G7.RESCT, G7.HSKIP = {}, { inspect = 0, mutate = 0, call = 0, handout = 0 }, {}, {}, {}, {}
+        -- (a builtin reached by value with no model and a host function's `any` result are LOST calls too: their
+        -- arguments are hand-outs. Their rules above escaped them by each(ap), which a region top's port does not
+        -- list — a module the region handed to `w(mod)` stayed unescaped, CART-1856)
+        for _, l in ipairs({ G7.NATLOST, G7.ANYT }) do for _, e in ipairs(l) do for _, ap in ipairs(e[2]) do G7.LOSTARG[ap] = true end end end
         -- (may an operand from top_'s holdings dispatch handler mm? The closure of what it held over cells and keys,
         -- cached per top; true where an object's metatable slot is saturated or tainted, or a metatable it lists holds
         -- anything under mm or under a dynamic key)

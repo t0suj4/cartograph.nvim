@@ -3131,6 +3131,41 @@ test('flowtype: refl-scope — an operator over region values is no call where n
     ok(w and w.partial, 'a reflected object with __concat: the call may run it, M.f escapes: ' .. vim.inspect(w))
 end)
 
+-- (CART-1856: a region value handed to a LOST call — a builtin reached by value with no model, a host function's
+-- declared `any` result — is a hand-out, as an argument of a call the solve lost is. The two rules escaped their
+-- arguments by each(ap), empty for a region top: nothing escaped, no capability fired, and ma.k stayed a whole {B.m})
+test('flowtype: refl-scope — a region value handed to a lost builtin or a host `any` call escapes what it held (CART-1856)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(call, exp, profile)
+        local SRC = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'require("ma").k = setmetatable({}, { __index = B })', 'local w = coroutine.wrap',
+            'for _, mod in pairs(package.loaded) do ' .. call .. ' end',
+            'local s = require("ma").k', 'print(s:m())' }, '\n') .. '\n'
+        local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nreturn M\n',
+            ['lua/mb.lua'] = 'return { x = 1 }\n', ['lua/mc.lua'] = 'return { y = 2 }\n' })
+        store.ingest(ts.extract(root))
+        store.data.profile = profile
+        local cap = flowtype.CAP
+        flowtype.CAP = 2
+        local ok_, R = pcall(flowtype.solve, store, { open = false, exp = exp })
+        flowtype.CAP = cap
+        vim.fn.delete(root, 'rf')
+        assert(ok_, R)
+        local callrec = require 'cartograph.callrec'
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 's:m' then return R.verdict(c), R.stats.rcap end end
+    end
+    for _, k in ipairs({ { 'w(mod)' }, { 'vim.fn.get(mod, "k")', 'nvim' } }) do
+        local v0 = run(k[1], 'pkg-modules', k[2])
+        ok(v0 and v0.partial, k[1] .. ': without the scope the saturated region escapes: partial: ' .. vim.inspect(v0))
+        local v, rcap = run(k[1], 'pkg-modules,refl-scope', k[2])
+        ok(v and v.partial, k[1] .. ': the lost call may write ma.k: partial: ' .. vim.inspect(v))
+        ok(rcap and rcap.handout >= 1, k[1] .. ': the hand-out is a capability the region used: ' .. vim.inspect(rcap))
+    end
+    -- (and a region that only inspects: no capability, ma.k whole)
+    local u, rcap = run('print(type(mod))', 'pkg-modules,refl-scope')
+    ok(u and not u.partial and #u.targets == 1, 'an inspecting region escapes nothing: whole {B.m}: ' .. vim.inspect(u) .. vim.inspect(rcap))
+end)
+
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
 -- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
 -- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
