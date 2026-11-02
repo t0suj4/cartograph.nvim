@@ -27,7 +27,8 @@
 --     — `vim.tbl_map(f, t)` handing t's elements to f is not followed; UNKNOWN code (EXT) may write any field of what
 --     it is handed and calls the functions among it with EXT — but not the globals table, which every code reaches —
 --     unless an ENTRY CONTRACT the user declared for that module or site says less (M.contracts, CART-1861: every
---     answer it makes whole stands on it, R.assumes);
+--     answer it makes whole stands on it, R.assumes) — a site's contract holds at its call even where the call is lost,
+--     its callee read from a field unknown code may write, but not past CAP (CART-1872);
 --   - globals are named: a global read — an identifier, or a NAMED load off the globals table, `local G = _G; G.q`
 --     (CART-1715) — sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
@@ -5322,10 +5323,24 @@ local function build(store, opts)
             local lk = 'lost-call:tainted'
             if top[p] then lk = 'lost-call:saturated' else for o in each(p) do if o == G7.EXT or G7.XC[o] then lk = 'lost-call:ext'; break end end end
             local cs = G7.callsite(cl[2])
+            -- (CART-1872: a SITE CONTRACT HOLDS AT A LOST CALL too — the default a contract means: the call at its site
+            -- writes nothing it is handed, whatever its callee port holds. Its arguments go to the contract's code alone
+            -- and escape nothing; a function among them is called with unknown arguments unless no-callback. The callee
+            -- may still be anything — its results and its errors stay tainted. It had handed them to every escaped
+            -- function past the contract: on self no per-site contract could win an answer, 1,935 sites contracted won 0).
+            -- Not past CAP: a SATURATED callee is the analysis's own loss — any tree function it lost, not unknown code —
+            -- and a contract lapses there, as its callback sink does (self: its 324 sites contracted won 1)
+            local c = cs and lk ~= 'lost-call:saturated' and G7.sitecon(cs)
+            if c then G7.cmet(c, cs) end
             for _, ap in ipairs(cl[1]) do
-                G7.handout(lk, cs, ap)
-                for o in each(ap) do G7.escmore(o, 'lost-call-argument') end
-                if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then G7.tpush(ap) end end
+                if c then
+                    G7.handout('contract:' .. c.rec.id, cs, ap)
+                    if not c.nocb then for o in each(ap) do local fpp = fnports[o]; if fpp then G7.tparams(fpp) end end end
+                else
+                    G7.handout(lk, cs, ap)
+                    for o in each(ap) do G7.escmore(o, 'lost-call-argument') end
+                    if G7.LOSTARG and not G7.LOSTARG[ap] then G7.LOSTARG[ap] = true; if G7.REG[ap] then G7.tpush(ap) end end
+                end
             end
             TCUR = p
             if type(cl[2]) == 'table' then for _, r in ipairs(cl[2]) do taint(r) end else taint(cl[2]) end

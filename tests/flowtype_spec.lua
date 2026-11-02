@@ -3285,6 +3285,69 @@ test('flowtype: a handler the walk runs names its own access as the hand-out sit
         'x stays unknown code\'s at the `+`: ' .. vim.inspect(Rc.handouts))
 end)
 
+-- (CART-1872: a SITE CONTRACT HOLDS AT A LOST CALL. `t.cb(z)` calls through a field of t, which unknown code holds and
+-- may write: the call is lost, and it had handed z to every escaped function whatever the contract at its site said —
+-- on self, contracting every hand-out site won 0 answers. The contract now governs it: z goes to the contract's code
+-- alone; a function among the arguments is called back unless no-callback)
+test('flowtype: a site contract holds at a lost call (CART-1872)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local t = {}',
+        'ext.f(t)',
+        'local z = { k = setmetatable({}, { __index = A }) }',
+        't.cb(z)',
+        'local r = z.k:m()',
+        'local w = { k = setmetatable({}, { __index = A }) }',
+        'local function h(p) return p.k:m() end',
+        'h(w)',
+        't.cb2(h)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local function con(cls) return { { id = 'cb', site = 'm.lua:7:0', clauses = cls, src = 'test' }, { id = 'cb2', site = 'm.lua:12:0', clauses = cls, src = 'test' } } end
+    local R0 = flowtype.solve(store, { open = false })
+    local R = flowtype.solve(store, { open = false, contracts = con({ 'no-write', 'no-callback' }) })
+    local Rcb = flowtype.solve(store, { open = false, contracts = con({ 'no-write' }) })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local v0, v = R0.verdict(call('z.k:m')), R.verdict(call('z.k:m'))
+    ok(v0 and v0.partial, 'no contract: z is handed to whatever t.cb may hold: partial')
+    ok(v and not v.partial and v.kind == 'exact' and table.concat(v.targets, ',') == 'm.lua::A.m@2', 'both lost calls under contract: whole {A.m}: ' .. vim.inspect(v))
+    eq(R.assumes(call('z.k:m')), { 'cb', 'cb2' }, 'z.k:m stands on both contracts')
+    local kinds = {}
+    for _, h in ipairs(R.handouts) do if h.site == 'm.lua:7:0' then kinds[h.kind] = true end end
+    ok(kinds['contract:cb'] and not kinds['lost-call:tainted'], 'the lost call\'s hand-out is the contract\'s: ' .. vim.inspect(kinds))
+    local led = {}
+    for _, e in ipairs(R.entry_contracts) do led[e.id] = e end
+    eq(led['cb'].sites, { 'm.lua:7:0' }, 'the contract met its lost call')
+    -- (no-write alone: the contract's code may call h back with anything — p.k:m is partial, and so, through h, is z.k:m)
+    ok(Rcb.verdict(call('p.k:m')).partial, 'h called back with unknown arguments: p.k:m partial')
+    -- (past CAP the contract lapses: a SATURATED callee is the analysis's own loss — any tree function — not unknown code)
+    root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local t = {}',
+        'ext.f(t)',
+        'local g = t.cb',
+        'g = function() end',
+        'g = function() end',
+        'g = function() end',
+        'local y = {}',
+        'g(y)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local okk, Rs = pcall(flowtype.solve, store, { open = false, contracts = { { id = 'g', site = 'm.lua:8:0', clauses = { 'no-write', 'no-callback' }, src = 'test' } } })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    ok(okk, tostring(Rs))
+    kinds = {}
+    for _, h in ipairs(Rs.handouts) do if h.site == 'm.lua:8:0' then kinds[h.kind] = true end end
+    ok(kinds['lost-call:saturated'] and not kinds['contract:g'], 'a saturated callee hands y over past the contract: ' .. vim.inspect(kinds))
+end)
+
 -- (CART-1860: the entry-points report's attribution — a partial answer's taint walked back to its seed, and the seed's
 -- object to the hand-out that let it go: the call that handed it to unknown code, the lost builtin that took it. The
 -- seeds had ended at a reason string, which names no site)

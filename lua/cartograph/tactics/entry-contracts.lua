@@ -8,10 +8,12 @@
 -- `contracts` = a Lua file returning a list of records (applied to the whole tree).
 -- An answer stands on EVERY contract of a site its objects were handed at (one handed to lpeg and to ext.g needs both):
 -- the taint is overdetermined (flowpath FLOW-0123), so one contract alone can win nothing.
--- ⚠ A SITE CONTRACT DOES NOT HOLD AT A LOST CALL: a call whose callee port is tainted hands its arguments to every escaped
--- function whatever its contract says (the hand-out `lost-call:*` beside `contract:<id>`). On self that is every call
--- on unknown code (1,995 sites): the callee reads a field of a handed object, or unknown code's own `[]` port past CAP
--- (CART-1871). CART-1870 removed one source, unknown code's value escaping; corpus rows did not move.
+-- A SITE CONTRACT HOLDS AT A LOST CALL too (CART-1872), the default it means: the call at its site writes nothing it
+-- is handed WHATEVER its callee is — tree code unknown code stored in the field it is read from included; its results
+-- and errors stay unknown. Not past CAP: a saturated callee (`lost-call:saturated`) is the analysis's own loss, and the
+-- contract lapses there. ⚠ What it can win on self: contracting all 4,410 unknown-code sites wins 1 answer, all 42,770
+-- hand-out sites 77 (1,271 -> 1,194 partial) — most partiality is the analysis's own (saturation, sinf), which no
+-- contract reaches.
 -- params: mode = closed | open (default closed), contracts = a file, top = rows in the value (default 30).
 -- CLAIM: the solve ran; the value is the ledger.
 
