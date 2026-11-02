@@ -4439,6 +4439,9 @@ local function build(store, opts)
     -- it, set its metatable, keep it — closed over its fields and prototypes. Its field reads are tainted below, and
     -- it is prototype-incomplete; a function among them is called with EXT (G7.EXTCALL's call)
     local XESC = {}
+    -- (explain / dump: the object each one was reached THROUGH — a field's owner, a prototype's child — so an answer
+    -- traced to this rule names the object handed over, and that the hand-out's site: R.entry_of, CART-1860)
+    G7.XPAR = ESCAT and {} or nil
     do
         local q = {}
         local function skip(x) return x == EXT or G7.ISG[x] end -- (_G: every code reaches it, the contract)
@@ -4449,8 +4452,8 @@ local function build(store, opts)
             local o = q[i]; i = i + 1
             if not escaped[o] then escaped[o] = true; if ESCAT then ESCAT[o] = ESCAT[o] or G7.EXTCALL end end
             G7.EROOTC[o] = 'unknown-code' -- (outside code holds it: the root that no refinement removes)
-            for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not skip(x) and not XESC[x] then XESC[x] = true; q[#q + 1] = x end end end
-            for c in pairs(protos[o] or NOTHING) do if not skip(c) and not XESC[c] then XESC[c] = true; q[#q + 1] = c end end
+            for _, fp in pairs(ofield[o] or NOTHING) do for x in each(fp) do if not skip(x) and not XESC[x] then XESC[x] = true; q[#q + 1] = x; if G7.XPAR then G7.XPAR[x] = o end end end end
+            for c in pairs(protos[o] or NOTHING) do if not skip(c) and not XESC[c] then XESC[c] = true; q[#q + 1] = c; if G7.XPAR then G7.XPAR[c] = o end end end
         end
         G7.XESCN = #q
     end
@@ -4554,6 +4557,13 @@ local function build(store, opts)
     -- seed's reason — so a partial answer can be walked back to its seed: R.taint_path)
     local TFROM = (opts.explain or opts.dump) and {} or nil
     G7.TSTEP = TFROM and {} or nil -- (port -> the drain pop that first tainted it: G7.tkey's tie rule)
+    -- (and the OBJECT a seed fired for, where the port is no field of it — a reader of what unknown code was handed, of
+    -- what escaped: G7.TOBJC while the rule runs, R.entry_of's way from the seed back to a hand-out, CART-1860)
+    G7.TOBJ, G7.TOBJC = TFROM and {} or nil, nil
+    -- (the hand-out { kind, site } that released an object escaping LATE — a lost builtin's or a host `any` call's
+    -- argument: G7.HOCUR while the rule runs. A lost call's release links its taint to the callee port, so the walk
+    -- goes on to why the callee was lost)
+    G7.ESCHO, G7.HOCUR = TFROM and {} or nil, nil
     local TCUR
     -- (refl-scope, CART-1817 stage 2: a REGION taint, seeded at a region top — G7.REG[p], the set of region tops whose
     -- holdings the port may hold. It is its own mark beside the ordinary taint (tainted[p] 'r': region only, reads as
@@ -4574,9 +4584,9 @@ local function build(store, opts)
         elseif not t then tainted[p] = 'r'; push = true end
         if push then
             G7.tpush(p)
-            if TFROM and (not t or t == 'r' and G7.TMODE == true) then TFROM[p] = TCUR; if G7.STEP then G7.TSTEP[p] = G7.STEP end end
+            if TFROM and (not t or t == 'r' and G7.TMODE == true) then TFROM[p] = TCUR; G7.TOBJ[p] = G7.TOBJC; if G7.STEP then G7.TSTEP[p] = G7.STEP end end
         elseif TFROM and G7.STEP and G7.TSTEP[p] == G7.STEP and TFROM[p] ~= TCUR and G7.tkey(TCUR) < G7.tkey(TFROM[p]) then
-            TFROM[p] = TCUR -- (the same pop reached it twice: the smaller reason, whatever the walk order)
+            TFROM[p] = TCUR; G7.TOBJ[p] = G7.TOBJC -- (the same pop reached it twice: the smaller reason, whatever the walk order)
         end
     end
     -- (the ports whose objects leave with an escaped function: its returns and its error port, CART-1753/1826)
@@ -4636,7 +4646,9 @@ local function build(store, opts)
     function G7.escreaders(o)
         if not G7.DYNHIT then return end
         local l = rd[o] and rd[o]['[]']
+        local c = G7.TOBJC; G7.TOBJC = o
         if l then for dst in pairs(l) do taint(dst) end end
+        G7.TOBJC = c
     end
     -- (a function's parameters AND its vararg port: a lost call's arguments past the named parameters land in `...`,
     -- CART-1738 — 35 of vimruntime's 2,152 escaped functions kept `...` whole)
@@ -4725,7 +4737,9 @@ local function build(store, opts)
             end
         end
         if TNAME[o] or o == EXT then return end
+        local c = G7.TOBJC; G7.TOBJC = o
         for dst in pairs(rd[o] and rd[o]['[]'] or NOTHING) do taint(dst) end
+        G7.TOBJC = c
         taint(ofp(o, '{k}'))
     end
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
@@ -4735,6 +4749,7 @@ local function build(store, opts)
         local q, i = { o0 }, 1
         escaped[o0] = true
         G7.EROOTC[o0] = 'escmore:' .. (why or '?')
+        if G7.ESCHO then G7.ESCHO[o0] = G7.HOCUR end
         -- (the tainted port whose rule released it, for the dump's pescport, CART-1824)
         if G7.ESCREL then G7.ESCREL[o0] = type(TCUR) == 'number' and TCUR or (type(TCUR) == 'table' and TCUR[1]) or nil end
         -- (what escapes LATE is written by the outside too: the CART-1776 rule, fired here as well, CART-1783 — in OPEN
@@ -4787,18 +4802,24 @@ local function build(store, opts)
             end
         end
     end
-    TCUR = 'a builtin reached by value with no model: a lost call (CART-1791)'
+    G7.WHYNAT = 'a builtin reached by value with no model: a lost call (CART-1791)'
+    TCUR = G7.WHYNAT
     for _, e in ipairs(G7.NATLOST) do
         for _, r in ipairs(type(e[1]) == 'table' and e[1] or { e[1] }) do taint(r) end
         local cs = G7.callsite(e[1])
+        if TFROM then G7.HOCUR = { 'builtin-lost', cs } end
         for _, ap in ipairs(e[2]) do G7.handout('builtin-lost', cs, ap); for o in each(ap) do G7.escmore(o, 'builtin-alias-argument') end end
+        G7.HOCUR = nil
         if e[3] then taint(e[3]) end
     end
-    TCUR = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
+    G7.WHYANY = 'a host function\'s declared `any` result: it may return what it was handed (CART-1790)'
+    TCUR = G7.WHYANY
     for _, e in ipairs(G7.ANYT) do
         taint(e[1])
         local cs = G7.callsite(e[1])
+        if TFROM then G7.HOCUR = { 'host-any', cs } end
         for _, ap in ipairs(e[2]) do G7.handout('host-any', cs, ap); for o in each(ap) do G7.escmore(o, 'any-result-argument') end end
+        G7.HOCUR = nil
     end
     TCUR = 'a host summary\'s unknown source: a closure it returns, a path past its depth, a value from outside its file'
     for _, p in ipairs(G7.SUMTAINT) do taint(p) end
@@ -4880,12 +4901,15 @@ local function build(store, opts)
     if not G7.EXP['sinf-untainted'] then for r in pairs(sinf) do taint(r) end end
     TCUR = 'self seeded from its method declaration: the host may call it with another object'
     for r in pairs(G7.SSEED) do taint(r) end
-    TCUR = 'handed to unknown code (load, a module outside the tree): it may write any field'
+    G7.WHYX = 'handed to unknown code (load, a module outside the tree): it may write any field'
+    TCUR = G7.WHYX
     for o in pairs(XESC) do
         if G7.NOESC[o] then goto nextx end -- (a builtin, a library: unknown code does not patch them — C2, CART-1791)
         PINC[o] = PINC[o] or G7.EXTCALL
         for _, f in ipairs(okeys(o)) do taint(ofield[o][f]) end -- (in one order, CART-1834)
+        G7.TOBJC = o
         for f, l in sorted(rd[o] or NOTHING) do if f ~= NS then for dst in pairs(l) do taint(dst) end end end
+        G7.TOBJC = nil
         ::nextx::
     end
     TCUR = 'O2: a data field of what outside code reaches from the exports — it may write it (open mode, CART-1685)'
@@ -5639,6 +5663,109 @@ local function build(store, opts)
                 else p = w end
             end
             return out
+        end
+        -- ★ AN ANSWER'S FIRST CAUSE AS AN ENTRY POINT (CART-1860): a partial verdict's taint walked back to its seed, and
+        -- from the seed's object to how that left the analysis — handed to unknown code (the hand-out rows that held the
+        -- object it was reached through), released by a lost builtin or a host `any` call (that hand-out), saturated
+        -- (the port), or else the escape class of the object (G7.EROOTC: `saturated`, `fuel`, …): { cause, sites =
+        -- { 'kinds site' … } | nil, at = a label, why = the seed's reason }.
+        -- The FIRST ARRIVAL, not the cause: the taint is overdetermined (flowpath FLOW-0123: past one escape the world
+        -- rules hit every escaped object), so no row says what a contract on that entry would win
+        local UCK = { call = true, setfenv = true, load = true, loadstring = true, loadfile = true, dofile = true, ['lost-call:ext'] = true }
+        local xheld, parof
+        local function xbuild() -- (object -> site -> the unknown-code hand-out kinds there whose port held it)
+            if xheld then return end
+            xheld = {}
+            local H = G7.HANDOUTS
+            for i = 1, #H, 3 do
+                if UCK[H[i]] and not top[H[i + 2]] then
+                    local st = H[i + 1] or '-'
+                    for x in each(H[i + 2]) do
+                        local m = xheld[x]; if not m then m = {}; xheld[x] = m end
+                        local ks = m[st]; if not ks then ks = {}; m[st] = ks end
+                        ks[H[i]] = true
+                    end
+                end
+            end
+        end
+        local function xkey(st, ks) -- ('call+lost-call:ext site': one site, every kind recorded there)
+            local l = {}
+            for k in pairs(ks) do l[#l + 1] = k end
+            table.sort(l)
+            return table.concat(l, '+') .. ' ' .. st
+        end
+        -- (the unknown-code hand-outs that held o's ROOT in what unknown code was handed: the way back is the closure's
+        -- spanning tree, in its walk order — ONE WITNESS ROUTE, not every one: on WoW w3's fat escaped objects it sends
+        -- 332 of 551 partial answers to AceDB's CallbackDummy, one of the many roots reaching them)
+        local function xsites(o)
+            while G7.XPAR and G7.XPAR[o] do o = G7.XPAR[o] end
+            xbuild()
+            local l = {}
+            for st, ks in pairs(xheld[o] or NOTHING) do l[#l + 1] = xkey(st, ks) end
+            table.sort(l)
+            return #l > 0 and l or nil, tostring(obinfo[o] or o)
+        end
+        local function ofport(q) -- (the object a seed's port stands for: the rule's object, a field's owner, a function
+            -- — whose parameter it is: what calls it passes the value IN)
+            if G7.TOBJ[q] then return G7.TOBJ[q] end
+            if fowner[q] then return fowner[q] end
+            if not parof then
+                parof = {}
+                for o, f in pairs(fnports) do
+                    for _, pp in ipairs(f.params or NOTHING) do parof[pp] = o end
+                    if f.vararg then parof[f.vararg] = o end
+                end
+            end
+            return parof[q], parof[q] and 'in'
+        end
+        -- (per unknown-code hand-out 'kind site': how many objects unknown code was handed through it, closed over their
+        -- fields and prototypes — each object counted under the root it was reached from)
+        R.xclosure = function ()
+            xbuild()
+            local per, out = {}, {}
+            for x in pairs(XESC) do
+                local r = x
+                while G7.XPAR[r] do r = G7.XPAR[r] end
+                per[r] = (per[r] or 0) + 1
+            end
+            for r, n in pairs(per) do for st, ks in pairs(xheld[r] or NOTHING) do local k = xkey(st, ks); out[k] = (out[k] or 0) + n end end
+            return out
+        end
+        R.entry_of = function (v)
+            if not (v and v.partial) then return nil end
+            local q, why, o, dir = v.ptport, nil, nil, 'out'
+            if q then
+                local seen = {}
+                while not seen[q] do
+                    seen[q] = true
+                    local w = TFROM[q]
+                    if type(w) == 'string' then why = w; break
+                    elseif type(w) == 'table' then q = w[1]
+                    elseif w then q = w else break end
+                end
+                if why == G7.WHYNAT or why == G7.WHYANY then
+                    local k = why == G7.WHYNAT and 'builtin-lost' or 'host-any'
+                    return { cause = k, sites = { k .. ' ' .. (G7.callsite(q) or '-') }, at = label(q), why = why }
+                end
+                if top[q] then return { cause = 'saturated', at = label(q), why = why } end
+                local d
+                o, d = ofport(q)
+                dir = d or dir
+            else o, why = v.pesc, 'an escaped receiver lacks the member' end
+            if not o then return { cause = why or '?', at = q and label(q), why = why } end
+            if why == G7.WHYX then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, at = at, why = why, dir = dir } end
+            local seen, w = {}, nil
+            while o and not seen[o] do -- (its carriers, to the object that escaped first)
+                seen[o] = true
+                w = ESCAT and ESCAT[o]
+                if type(w) == 'table' then o = w[1] else break end
+            end
+            -- (what unknown code holds: its hand-outs, also where saturation reached it first — the root no refinement
+            -- of the solve removes, G7.EROOTC)
+            if w == G7.EXTCALL or G7.EROOTC[o] == 'unknown-code' then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, at = at, why = why, dir = dir } end
+            local ho = G7.ESCHO[o]
+            if ho then return { cause = ho[1], sites = { ho[1] .. ' ' .. (ho[2] or '-') }, at = tostring(obinfo[o] or o), why = why, dir = dir } end
+            return { cause = G7.EROOTC[o] or why or '?', at = tostring(obinfo[o] or o), why = why }
         end
     end
     -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,

@@ -3236,6 +3236,131 @@ test('flowtype: R.handouts names the site and kind of every value handed over (C
     for _, h in ipairs(R.handouts) do ok(h.site ~= 'm.lua:10:0', 'the tree\'s own function is handed nothing: ' .. vim.inspect(h)) end
 end)
 
+-- (CART-1860: the entry-points report's attribution — a partial answer's taint walked back to its seed, and the seed's
+-- object to the hand-out that let it go: the call that handed it to unknown code, the lost builtin that took it. The
+-- seeds had ended at a reason string, which names no site)
+test('flowtype: R.entry_of names the hand-out a partial answer first traces to (CART-1860)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local t = { k = setmetatable({}, { __index = A }) }',
+        'ext.f(t)',
+        'local r1 = t.k:m()',
+        'local function cb(p) return p:m() end',
+        'cb(setmetatable({}, { __index = A }))',
+        'local cw = coroutine.wrap',
+        'cw(cb)',
+        'local w = { k = setmetatable({}, { __index = A }) }',
+        'cw(w)',
+        'local r2 = w.k:m()',
+        'local C, D = {}, {}',
+        'function C.n(self) return 3 end',
+        'function D.n(self) return 4 end',
+        'local own = setmetatable({}, { __index = C })',
+        'local r3 = own:n()',
+        'local kk = io.read()',
+        'local r4 = t[kk]:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function at(R, full)
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return R.verdict(c) end end
+    end
+    local R0 = flowtype.solve(store, { open = false })
+    local R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    for _, full in ipairs({ 't.k:m', 'p:m', 'w.k:m', 'own:n' }) do
+        local v0, v = at(R0, full), at(R, full)
+        ok(v ~= nil, full .. ' has an answer')
+        eq(v and v.partial or false, v0 and v0.partial or false, full .. ': partial with explain off as on')
+    end
+    local function entry(full) local e = R.entry_of(at(R, full)); return e, vim.inspect(e) end
+    local e, d = entry('t.k:m')
+    ok(e and e.cause == 'unknown-code' and e.dir == 'out' and vim.deep_equal(e.sites, { 'call m.lua:5:0' }), 'a field unknown code may write: the call that handed t over: ' .. d)
+    e, d = entry('p:m')
+    ok(e and e.cause == 'builtin-lost' and e.dir == 'in' and vim.deep_equal(e.sites, { 'builtin-lost m.lua:10:0' }), 'a parameter of a function a lost builtin took: its call, passing IN: ' .. d)
+    e, d = entry('w.k:m')
+    ok(e and e.cause == 'builtin-lost' and e.dir == 'out' and vim.deep_equal(e.sites, { 'builtin-lost m.lua:12:0' }), 'a field of what a lost builtin took: its call: ' .. d)
+    e, d = entry('t[kk]:m')
+    ok(e and e.cause == 'unknown-code' and vim.deep_equal(e.sites, { 'call m.lua:5:0' }), 'a dynamic read of what unknown code holds — the outside writes any field of what escaped: the call: ' .. d)
+    eq(R.entry_of(at(R, 'own:n')), nil, 'a whole answer has no entry')
+    local cl = R.xclosure()
+    ok((cl['call m.lua:5:0'] or 0) >= 3, 't, its k and k\'s metatable: ' .. vim.inspect(cl))
+    -- (a chain that ends at a SATURATED port: the analysis's own loss, named by the port — no entry site)
+    root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local function id(x) return x end',
+        'id({}); id({}); id({})',
+        'local s = id({}) or setmetatable({}, { __index = A })',
+        'local r = s:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    R = flowtype.solve(store, { open = false, explain = true })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    e, d = entry('s:m')
+    ok(e and e.cause == 'saturated' and e.sites == nil and tostring(e.at):match('^a:m%.lua::id@3:1') ~= nil, 'saturated past CAP: the port: ' .. d)
+    -- (an object saturation reached FIRST and unknown code was handed after: its hand-out — the root no refinement of
+    -- the solve removes)
+    root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local function id(x) return x end',
+        'id({}); id({})',
+        'local o = { k = setmetatable({}, { __index = A }) }',
+        'id(o)',
+        'ext.f(o)',
+        'local kk = io.read()',
+        'local r = o[kk]:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    flowtype.CAP = 2
+    R = flowtype.solve(store, { open = false, explain = true })
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    e, d = entry('o[kk]:m')
+    ok(e and e.cause == 'unknown-code' and vim.deep_equal(e.sites, { 'call m.lua:8:0' }), 'saturated first, then handed to unknown code: the call: ' .. d)
+    -- (a lost builtin's RESULT read by the answer — vimruntime's `pcall(require, 'string.buffer')`: the call's site)
+    root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local okk, lib = pcall(require, "notintree2")',
+        'local u = lib or setmetatable({}, { __index = A })',
+        'local r = u:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    e, d = entry('u:m')
+    ok(e and e.cause == 'builtin-lost' and vim.deep_equal(e.sites, { 'builtin-lost m.lua:3:17' }), 'a lost builtin\'s result: its call: ' .. d)
+    -- (a host function's `any` result: what it was handed escapes, and the result is tainted — each names the call)
+    root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local hh = { k = setmetatable({}, { __index = A }) }',
+        'local y = vim.fn.get(hh, 1)',
+        'local r = hh.k:m()',
+        'local bb = setmetatable({}, { __index = A })',
+        'local y2 = vim.fn.get({ bb }, 1)',
+        'local u = y2 or setmetatable({}, { __index = A })',
+        'local r2 = u:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    store.data.profile = 'nvim'
+    R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    e, d = entry('hh.k:m')
+    ok(e and e.cause == 'host-any' and e.dir == 'out' and vim.deep_equal(e.sites, { 'host-any m.lua:4:10' }), 'a field of what a host `any` call was handed: its call: ' .. d)
+    e, d = entry('u:m')
+    ok(e and e.cause == 'host-any' and vim.deep_equal(e.sites, { 'host-any m.lua:7:11' }), 'a host `any` result: its call: ' .. d)
+end)
+
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
 -- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
 -- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
