@@ -25,7 +25,9 @@
 --   - a profile-typed function (vim.*, string.*) writes nothing it is handed, and calls a function it is handed only
 --     where a route models it (table.sort's comparator, __tostring; any such call's ERRORS reach the caller, CART-1708)
 --     — `vim.tbl_map(f, t)` handing t's elements to f is not followed; UNKNOWN code (EXT) may write any field of what
---     it is handed and calls the functions among it with EXT — but not the globals table, which every code reaches;
+--     it is handed and calls the functions among it with EXT — but not the globals table, which every code reaches —
+--     unless an ENTRY CONTRACT the user declared for that module or site says less (M.contracts, CART-1861: every
+--     answer it makes whole stands on it, R.assumes);
 --   - globals are named: a global read — an identifier, or a NAMED load off the globals table, `local G = _G; G.q`
 --     (CART-1715) — sees `_G.q = v`, never a dynamic-key `_G[k] = v`, and a read by computed
 --     name `_G[k]` sees dynamic-key writes and EXT, never the named globals (CART-1707: either widening made every
@@ -127,6 +129,109 @@ function M.experiments(opts)
     local x = opts and opts.exp
     if type(x) == 'string' then list(x) elseif type(x) == 'table' then for k, v in pairs(x) do if type(k) == 'number' then add(v, true) else add(k, v) end end end
     return out
+end
+-- ★ ENTRY-POINT CONTRACTS (CART-1861, arc CART-1858): a DECLARED promise about unknown code at one entry point, in
+-- CART-1071's assumption shape (dir = suppress, basis = declared: `src` is required — a contract hides findings, so it
+-- travels with a citation). It names the unknown code by the MODULE a require the tree cannot map loads (`module`:
+-- the require's literal name; what that module returns, and what its members return, is its code) or by the SITE that
+-- hands values over (`site`: `file:line:col`, column 0-based — a row of the entry-points report), and says what that
+-- code does with what it is handed:
+--   no-write     it writes no field of it, sets no metatable on it and keeps none of it: what it is handed does not
+--                escape. It may still call a FUNCTION it is handed directly, with unknown arguments
+--   no-callback  ... and calls none of it (only with no-write: what unknown code keeps escapes, and an escaped function
+--                is called by the escaped-function rule whatever this one promises)
+-- Where from: opts.contracts (the whole tree), and the scoped key `entry_contracts` (config.at by the file of the
+-- require or the site: the most specific scope's list). What a contract does not say stays unknown — the call's
+-- result is EXT still (what it returns, CART-1867). R.contracts is the LEDGER (every contract in force, and where it
+-- met the tree); R.cites(c) the contracts a whole answer STANDS ON (dropping one alone changes it).
+M.CLAUSES = {
+    ['no-write'] = 'writes no field of what it is handed, sets no metatable on it, keeps none of it',
+    ['no-callback'] = 'calls no function it is handed',
+}
+M.CFIELDS = { id = true, says = true, src = true, module = true, site = true, clauses = true }
+function M.contract_check(c, where)
+    local function bad(msg) error(('flowtype: entry contract %s (%s): %s'):format(type(c) == 'table' and tostring(c.id) or '?', where or 'opts.contracts', msg), 0) end
+    if type(c) ~= 'table' then bad('not a table') end
+    for k in pairs(c) do if not M.CFIELDS[k] then bad(('unknown field %q (known: clauses, id, module, says, site, src)'):format(tostring(k))) end end
+    if type(c.id) ~= 'string' or c.id == '' then bad('`id` must name it') end
+    if type(c.src) ~= 'string' or c.src:match('^%s*$') then bad('`src` is required: a contract hides findings, so it cites where the promise comes from') end
+    if (c.module ~= nil) == (c.site ~= nil) then bad('exactly one of `module` (a require name) and `site` (file:line:col)') end
+    if c.module ~= nil and (type(c.module) ~= 'string' or c.module == '') then bad('`module` is a require\'s literal name') end
+    if c.site == '-' then bad('site `-` is a hand-out the solve made itself: it has no site to key on (CART-1868)') end
+    if c.site ~= nil and (type(c.site) ~= 'string' or not c.site:match('^.+:%d+:%d+$')) then bad('`site` is file:line:col, column 0-based, as the entry-points report prints it') end
+    if type(c.clauses) ~= 'table' or #c.clauses == 0 then bad('`clauses` lists what it promises: no-write [, no-callback]') end
+    local has = {}
+    for _, k in ipairs(c.clauses) do
+        if not M.CLAUSES[k] then bad(('unknown clause %q (known: no-callback, no-write)'):format(tostring(k))) end
+        has[k] = true
+    end
+    if not has['no-write'] then bad('no-callback needs no-write: what unknown code keeps escapes, and the escaped-function rule calls it') end
+    return has
+end
+--- the contracts in force for `store` under `opts`: { at = fn(file) -> { mod = { [name] = c }, site = { [site] = c } },
+--- all = { c … } (sorted by id), key = a string for M.of's cache }; each c = { rec, where, nocb }. Errors on a bad
+--- record, two records under one id, or two scopes that disagree on a file's list.
+function M.contracts(store, opts)
+    opts = opts or {}
+    local cfg = require 'cartograph.config'
+    local drop = opts.drop_contracts or {}
+    local byid, all = {}, {}
+    local function admit(c, where)
+        local has = M.contract_check(c, where)
+        local o = byid[c.id]
+        if o and not vim.deep_equal(o.rec, c) then error(('flowtype: two entry contracts named %q (%s, %s)'):format(c.id, o.where, where), 0) end
+        if not o then
+            o = { rec = c, where = where, nocb = has['no-callback'] or false }
+            byid[c.id] = o
+            all[#all + 1] = o
+        end
+        return o
+    end
+    local tree = {}
+    for _, c in ipairs(opts.contracts or {}) do tree[#tree + 1] = admit(c, 'opts.contracts') end
+    local scoped = false
+    if type(cfg.scoped) == 'table' then
+        for _, e in ipairs(cfg.scoped_entries()) do
+            local l = e.values.entry_contracts
+            if l ~= nil then scoped = true; for _, c in ipairs(l) do admit(c, 'scope ' .. tostring(e.name)) end end
+        end
+    end
+    if cfg.entry_contracts ~= nil then scoped = true; for _, c in ipairs(cfg.entry_contracts) do admit(c, 'setup') end end
+    table.sort(all, function (a, b) return a.rec.id < b.rec.id end)
+    local memo = {}
+    local root = store and store.data and store.data.root
+    local function at(file)
+        local m = memo[file or false]
+        if m then return m end
+        m = { mod = {}, site = {} }
+        local l = {}
+        for _, o in ipairs(tree) do l[#l + 1] = o end
+        if scoped and file then
+            local p = (root and file:sub(1, 1) ~= '/') and (root .. '/' .. file) or file
+            local v, prov = cfg.at(p, 'entry_contracts')
+            if prov and prov.source == 'ambiguous' then
+                error(('flowtype: scopes disagree on entry_contracts for %s: %s'):format(file, (vim.inspect(prov.entries):gsub('%s+', ' '))), 0)
+            end
+            for _, c in ipairs(v or {}) do l[#l + 1] = byid[c.id] end
+        end
+        for _, o in ipairs(l) do
+            if not drop[o.rec.id] then
+                if o.rec.module then m.mod[o.rec.module] = o
+                elseif o.rec.site:match('^(.+):%d+:%d+$') == file then m.site[o.rec.site] = o end
+            end
+        end
+        memo[file or false] = m
+        return m
+    end
+    local key = ''
+    if #all > 0 then
+        local ids, dl = {}, {}
+        for _, o in ipairs(all) do ids[#ids + 1] = (vim.inspect(o.rec):gsub('%s+', ' ')) end
+        for k in pairs(drop) do dl[#dl + 1] = k end
+        table.sort(dl)
+        key = '+ec:' .. table.concat(ids, ';') .. (scoped and ('@' .. (vim.inspect(cfg.scoped):gsub('%s+', ' '))) or '') .. '-' .. table.concat(dl, ',')
+    end
+    return { at = at, all = all, key = key }
 end
 -- (a binary operator's metamethod — run with both operands when either carries it, CART-1702; `a > b` is `b < a`)
 local METAOP = { ['+'] = '__add', ['-'] = '__sub', ['*'] = '__mul', ['/'] = '__div', ['%'] = '__mod', ['^'] = '__pow',
@@ -813,7 +918,7 @@ local function build(store, opts)
         -- EXT's field ports hold only what the tree stored there, so `ext.f(t)` called nothing and t was never handed to
         -- unknown code — a later t.k answered a wrong whole exact. A STORE into it needs nothing more: its __newindex
         -- lookup reads EXT's `\1mt`, now EXT, and that call hands the value to unknown code)
-        if o == G7.EXT then addobj(dst, o) end
+        if o == G7.EXT or G7.XC[o] then addobj(dst, o) end
         local tn = TNAME[o]
         if tn then
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
@@ -1042,7 +1147,11 @@ local function build(store, opts)
         end
         if args.fenv then
             -- (setfenv's function: its reads see the environment; unknown code is handed it)
-            if o == G7.EXT then G7.handout('setfenv', G7.callsite(res), args.fenv); edge(args.fenv, G7.EXTCALL)
+            if o == G7.EXT or G7.XC[o] then
+                local cs = G7.callsite(res)
+                local c = G7.XC[o] or G7.sitecon(cs)
+                if c then G7.handout('contract:' .. c.rec.id, cs, args.fenv); G7.cmet(c, cs or false) -- (a contract: it writes nothing it is handed, CART-1861)
+                else G7.handout('setfenv', cs, args.fenv); edge(args.fenv, G7.EXTCALL) end
             elseif fnports[o] then G7.fenv(fnports[o].id, args.fenv) end
             return
         end
@@ -1090,10 +1199,17 @@ local function build(store, opts)
             end
             return
         end
-        if o == G7.EXT and G7.EXTCALL then
-            -- (calling UNKNOWN code: its results are unknown, what it is handed it may call or write — CART-1707)
-            if type(res) == 'table' then for _, r in ipairs(res) do addobj(r, G7.EXT) end elseif res then addobj(res, G7.EXT) end
+        if (o == G7.EXT or G7.XC[o]) and G7.EXTCALL then
+            -- (calling UNKNOWN code: its results are unknown, what it is handed it may call or write — CART-1707. A
+            -- module contract's EXT returns its own: what the module returns is its code too)
+            if type(res) == 'table' then for _, r in ipairs(res) do addobj(r, o) end elseif res then addobj(res, o) end
             local cs = G7.callsite(res)
+            local c = G7.XC[o] or G7.sitecon(cs)
+            if c then -- (an entry CONTRACT, CART-1861: nothing it is handed escapes; a function among it is called, unless no-callback)
+                G7.cmet(c, cs or false)
+                for _, a in ipairs(args) do G7.handout('contract:' .. c.rec.id, cs, a); if not c.nocb then filter(a, G7.cbsink(), G7.isfn) end end
+                return
+            end
             for _, a in ipairs(args) do G7.handout('call', cs, a); edge(a, G7.EXTCALL) end
             return
         end
@@ -1134,7 +1250,7 @@ local function build(store, opts)
             if inst then o = inst end
         end
         local fp = fnports[o]
-        if not fp or G7.NATIVE[o] or (G7.PH and G7.PH[o]) or (o == G7.EXT and G7.EXTCALL) then return bindcall(o, G7.argsat(off), res, nil, cerr) end
+        if not fp or G7.NATIVE[o] or (G7.PH and G7.PH[o]) or ((o == G7.EXT or G7.XC[o]) and G7.EXTCALL) then return bindcall(o, G7.argsat(off), res, nil, cerr) end
         local AP = G7.APOOL
         local n, sp = AP[off], AP[off + 1]
         local ps = fp.params
@@ -1236,7 +1352,7 @@ local function build(store, opts)
     -- for __newindex. G7.mtcopy: a copy source's metatable port gained an object, or saturated)
     function G7.uncopyable(s0)
         local mp = ofield[s0] and ofield[s0]['\1mt']
-        return s0 == G7.EXT or TNAME[s0] or (mp and (pts[mp] ~= nil or top[mp]))
+        return s0 == G7.EXT or G7.XC[s0] or TNAME[s0] or (mp and (pts[mp] ~= nil or top[mp]))
     end
     function G7.mtcopy(p)
         local cp = fname[p] == '\1mt' and G7.CPAIR[fowner[p]]
@@ -1251,13 +1367,13 @@ local function build(store, opts)
         return t
     end
     function G7.copypair(s0, o, v)
-        if s0 == o or TNAME[o] or o == G7.EXT then return end
+        if s0 == o or TNAME[o] or o == G7.EXT or G7.XC[o] then return end
         local m = G7.CPAIR[s0]
         if not m then m = {}; G7.CPAIR[s0] = m end
         if m[o] then return end
         m[o] = v
         if G7.uncopyable(s0) then edge(v, ofp(o, '[]')) end
-        if s0 == G7.EXT or TNAME[s0] then return end
+        if s0 == G7.EXT or G7.XC[s0] or TNAME[s0] then return end
         for _, f in ipairs(okeys(s0)) do if f:byte(1) ~= 1 then edge(ofield[s0][f], ofp(o, f)) end end -- (the target's fields made in ONE order: a port's number is its creation order, CART-1834)
     end
     function G7.copyf(dst, src, v)
@@ -1540,6 +1656,23 @@ local function build(store, opts)
     end
     local EXT = newobj('external')
     G7.EXT = EXT
+    -- (ENTRY CONTRACTS, CART-1861 — M.contracts above. G7.XC: the EXT a MODULE contract's require returns, one per
+    -- contract -> it; each is unknown code everywhere EXT is, apart from what its contract promises. Empty without a
+    -- module contract: the solve is unchanged. G7.CMET: contract id -> { [site] = hand-outs } — where it met the tree)
+    G7.CON, G7.XC, G7.XCOF, G7.CMET = M.contracts(store, opts), {}, {}, {}
+    function G7.extc(c)
+        local o = G7.XCOF[c.rec.id]
+        if not o then o = newobj('external:' .. c.rec.module); G7.XCOF[c.rec.id] = o; G7.XC[o] = c end
+        G7.cmet(c, nil)
+        return o
+    end
+    function G7.sitecon(cs) local f = cs and cs:match('^(.+):%d+:%d+$'); return f and G7.CON.at(f).site[cs] or nil end
+    function G7.cmet(c, cs)
+        local m = G7.CMET[c.rec.id]
+        if not m then m = {}; G7.CMET[c.rec.id] = m end
+        if cs ~= nil then m[cs or '-'] = (m[cs or '-'] or 0) + 1 end
+    end
+    function G7.hasxc(p) for o in pairs(G7.XC) do if has(p, o) then return true end end return false end
     local PSIGS = {}
     -- ★ THE HOST KINDS (CART-1761; the user: the host is described in a PROFILE, not by a blanket contract). What a host
     -- type IS: 'prim' — a store raises, it has no fields (string, number, a function type); 'open' — an ordinary object,
@@ -2187,6 +2320,14 @@ local function build(store, opts)
         addobj(xa, EXT)
         G7.XRES = new()
         callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, G7.XRES)
+        -- (CART-1861: what a no-write contract's code is handed — the FUNCTIONS among it, which it may call with unknown
+        -- arguments as EXTCALL's call does; nothing reaching it escapes. Made at the first such hand-out. Past CAP it
+        -- escapes what it held, as any port: the contract lapses there, soundly)
+        function G7.cbsink()
+            if not G7.CBCALL then G7.CBCALL = new(); callc(G7.CBCALL, { xa, xa, xa, xa, spread = 4 }, G7.XRES) end
+            return G7.CBCALL
+        end
+        function G7.isfn(o) return fnports[o] ~= nil end
     end
     -- ── the graph's facts ───────────────────────────────────────────────────────────────────────────
     local fn_at = {}
@@ -2816,7 +2957,10 @@ local function build(store, opts)
                 -- port, and `require("io").zz = a` stored into nothing, flowpath's l02 / l36-l39 / l42, CART-1811)
                 if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
                 local xp = new()
-                if not (s0 and G7.profmod(txt(s0))) then addobj(xp, EXT) end
+                if not (s0 and G7.profmod(txt(s0))) then
+                    local c = s0 and G7.CON.at(file).mod[txt(s0)] -- (a MODULE contract: its own EXT, CART-1861)
+                    addobj(xp, c and G7.extc(c) or EXT)
+                end
                 return xp
             end
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
@@ -2879,7 +3023,13 @@ local function build(store, opts)
             end
             if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
                 G7.ANYLOAD = true -- (code from a source the tree does not hold: it may touch every global, CART-1796)
-                for _, a in ipairs(argn) do local ap = expr(a); G7.handout(fname, key_of(n), ap); edge(ap, G7.EXTCALL) end
+                local c = G7.sitecon(key_of(n)) -- (a SITE contract on the load, CART-1861)
+                if c then G7.cmet(c, key_of(n)) end
+                for _, a in ipairs(argn) do
+                    local ap = expr(a)
+                    if c then G7.handout('contract:' .. c.rec.id, key_of(n), ap); if not c.nocb then filter(ap, G7.cbsink(), G7.isfn) end
+                    else G7.handout(fname, key_of(n), ap); edge(ap, G7.EXTCALL) end
+                end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
                 if want then return out end
@@ -3552,7 +3702,7 @@ local function build(store, opts)
                 -- takes b itself. Through the filter an ESCAPED a had tainted it: `s.label and extend(lbls, …) or lbls`
                 -- made flow.lua's wire's lbls top, two refusals, CART-1813)
                 if op == 'and' then
-                    local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT end); edge(b, r); G7.ANDB[r] = b
+                    local r = new(); filter(a, r, function (o) return TNAME[o] == 'boolean' or o == G7.EXT or G7.XC[o] ~= nil end); edge(b, r); G7.ANDB[r] = b
                     if G7.REC and G7.W then G7.ANDF[#G7.ANDF + 1] = { a, r, G7.cur() } end -- (CART-1832: its left flow, emitted after the solve)
                     return r
                 end
@@ -4042,7 +4192,7 @@ local function build(store, opts)
                     if k:byte(1) ~= 1 and k ~= '[]' and k ~= '{k}' then
                         G7.HOSTM[ns and (ns .. '#' .. k) or k] = fp
                         if ns and depth < 2 then
-                            for t in each(fp) do if not fnports[t] and not TNAME[t] and t ~= EXT then bind(t, ns .. '.' .. k, depth + 1) end end
+                            for t in each(fp) do if not fnports[t] and not TNAME[t] and t ~= EXT and not G7.XC[t] then bind(t, ns .. '.' .. k, depth + 1) end end
                         end
                     end
                 end
@@ -4238,7 +4388,7 @@ local function build(store, opts)
             if sp and pts[sp] == nil and not top[sp] then
                 SS.empty = SS.empty + 1
                 local objs = {}
-                if not top[bp] then for c in each(bp) do if not fnports[c] and c ~= EXT then for _, x in ipairs(heirsof(c)) do objs[#objs + 1] = x end end end end
+                if not top[bp] then for c in each(bp) do if not fnports[c] and c ~= EXT and not G7.XC[c] then for _, x in ipairs(heirsof(c)) do objs[#objs + 1] = x end end end end
                 if #objs == 0 and not top[bp] and pts[bp] == nil then
                     local so = STAND[bp]
                     if not so then
@@ -4287,7 +4437,7 @@ local function build(store, opts)
         G7.REACH = {}
         do
             local q, R = {}, G7.REACH
-            local function reach(o) if not R[o] and o ~= EXT and not G7.ISG[o] and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
+            local function reach(o) if not R[o] and o ~= EXT and not G7.XC[o] and not G7.ISG[o] and not TNAME[o] then R[o] = true; q[#q + 1] = o end end
             -- (the string library is a root for CALLS only: outside code does not patch it, C2, so what is read through it
             -- is not data the outside may have written)
             for _, mp in ipairs(modports) do for o in each(mp) do reach(o) end end
@@ -4444,7 +4594,7 @@ local function build(store, opts)
     G7.XPAR = ESCAT and {} or nil
     do
         local q = {}
-        local function skip(x) return x == EXT or G7.ISG[x] end -- (_G: every code reaches it, the contract)
+        local function skip(x) return x == EXT or G7.XC[x] or G7.ISG[x] end -- (_G: every code reaches it, the contract)
         for o in each(G7.EXTCALL) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end
         for o in sorted(G7.XHB) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end -- (past CAP, CART-1850)
         local i = 1
@@ -4736,7 +4886,7 @@ local function build(store, opts)
                 if not (fn or G7.protofn(o, f, {}) or G7.shadowed(o, f)) then taint(fp) end
             end
         end
-        if TNAME[o] or o == EXT then return end
+        if TNAME[o] or o == EXT or G7.XC[o] then return end
         local c = G7.TOBJC; G7.TOBJC = o
         for dst in pairs(rd[o] and rd[o]['[]'] or NOTHING) do taint(dst) end
         G7.TOBJC = c
@@ -4745,7 +4895,7 @@ local function build(store, opts)
     -- (an object that escapes DURING the taint — a lost call's argument — with its fields and prototypes, the rules
     -- that already fired applied to it: a store of .f through a tainted base, a call reaching any escaped function)
     function G7.escmore(o0, why)
-        if escaped[o0] or o0 == EXT or G7.ISG[o0] or G7.NOESC[o0] then return end
+        if escaped[o0] or o0 == EXT or G7.XC[o0] or G7.ISG[o0] or G7.NOESC[o0] then return end
         local q, i = { o0 }, 1
         escaped[o0] = true
         G7.EROOTC[o0] = 'escmore:' .. (why or '?')
@@ -4776,13 +4926,13 @@ local function build(store, opts)
                 local fp = m[fk]
                 if escf then local l = escf[fk]; if not l then l = {}; escf[fk] = l end; l[#l + 1] = fp end
                 if field_hit[fk] then TCUR = why_('the outside may write any field of what escaped'); taint(fp) end
-                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
+                for x in each(fp) do if not escaped[x] and x ~= EXT and not G7.XC[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
             end
             for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; if ESCAT then ESCAT[c] = ESCAT[c] or { o } end; q[#q + 1] = c end end
             local fpp = fnports[o]
             if fpp then -- (escret, as above: an escaped function's returns and what it raises escape with it, CART-1753/1826)
                 for _, r in pairs(G7.escouts(fpp)) do
-                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.XC[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; if ESCAT then ESCAT[x] = ESCAT[x] or { o } end; q[#q + 1] = x end end
                 end
             end
             if fpp and params_hit then TCUR = why_('an escaped function may be called with anything: its parameters'); G7.tparams(fpp) end
@@ -5145,7 +5295,7 @@ local function build(store, opts)
             -- (CART-1859: an entry point, by why its callee was lost — it may hold unknown code's EXT, it saturated, or it
             -- was tainted)
             local lk = 'lost-call:tainted'
-            if top[p] then lk = 'lost-call:saturated' else for o in each(p) do if o == G7.EXT then lk = 'lost-call:ext'; break end end end
+            if top[p] then lk = 'lost-call:saturated' else for o in each(p) do if o == G7.EXT or G7.XC[o] then lk = 'lost-call:ext'; break end end end
             local cs = G7.callsite(cl[2])
             for _, ap in ipairs(cl[1]) do
                 G7.handout(lk, cs, ap)
@@ -5180,7 +5330,7 @@ local function build(store, opts)
         -- CART-1769 (a listed escaped object, and stores). The accesses in walk order: G7.LDL / G7.STL)
         local function escbase(x)
             if tainted[x] then return true end
-            for o in each(x) do if escaped[o] and not TNAME[o] and not fnports[o] and o ~= EXT and not G7.ISG[o] then return true end end
+            for o in each(x) do if escaped[o] and not TNAME[o] and not fnports[o] and o ~= EXT and not G7.XC[o] and not G7.ISG[o] then return true end end
             return false
         end
         -- (each rule its OWN reason: they had tainted with a stale TCUR — the last drained port or seed — so the first
@@ -5207,7 +5357,7 @@ local function build(store, opts)
                 if eb then
                     -- (not a NATIVE: it never escapes, so escmore leaves it unmarked and `released` re-ran the drain forever —
                     -- a string-library native as a key hung vimruntime's solve, CART-1793)
-                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.ISG[o] and not G7.NOESC[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
+                    for o in each(kp) do if not escaped[o] and o ~= EXT and not G7.XC[o] and not G7.ISG[o] and not G7.NOESC[o] then G7.escmore(o, 'dynamic-load-key'); released = true end end
                 end
             end
         end
@@ -5270,7 +5420,7 @@ local function build(store, opts)
         seen[o] = true
         local p = ofield[o] and ofield[o]['[]']
         if p and tainted[p] then partial_hit = partial_hit or p end
-        if p then for x in each(p) do if fnports[x] or x == EXT then return true end end end
+        if p then for x in each(p) do if fnports[x] or x == EXT or G7.XC[x] then return true end end end
         for c in pairs(protos[o] or NOTHING) do if dynfn(c, seen) then return true end end
         return false
     end
@@ -5304,7 +5454,7 @@ local function build(store, opts)
         local anyunk, anyobj = false, false
         for _, r in ipairs(g.recvs) do
             if tainted[r] then partial_hit = partial_hit or r end
-            if top[r] or has(r, EXT) then anyunk = true end
+            if top[r] or has(r, EXT) or G7.hasxc(r) then anyunk = true end
             if pts[r] ~= nil then anyobj = true end
         end
         if anyunk then kind = 'unknown'
@@ -5348,7 +5498,7 @@ local function build(store, opts)
             end
             local fns, unknown, ids = {}, sat, {}
             for x in pairs(out) do
-                if x == EXT then unknown = true
+                if x == EXT or G7.XC[x] then unknown = true
                 elseif fnports[x] then
                     -- (one id, many objects: a context instance's nested function is a new object under the original's id —
                     -- the answer is one target, CART-1842)
@@ -5445,6 +5595,22 @@ local function build(store, opts)
     stats.ms = (vim.uv.hrtime() - t0) / 1e6
     delta, inwl, wl = {}, {}, {} -- (the worklist's arrays are empty at the fixpoint, kept at their peak size; no solve follows)
     local R = { verdict = function (c) return verdicts[c] end, stats = stats, probes = probe_out, selfseed = G7.SSTAT, exp = G7.EXP }
+    -- (ENTRY CONTRACTS, CART-1861: the LEDGER — every contract in force, CART-1071's record with where it was declared
+    -- and where it met the tree: `sites` the hand-outs it governed ('-' a call the solve made), `met` false where no
+    -- require or site in the tree is its — a contract that suppresses nothing, stale or misspelled)
+    do
+        local l = {}
+        for _, c in ipairs(G7.CON.all) do
+            local m = G7.CMET[c.rec.id]
+            local sites = {}
+            for st in pairs(m or NOTHING) do sites[#sites + 1] = st end
+            table.sort(sites)
+            l[#l + 1] = { id = c.rec.id, says = c.rec.says, src = c.rec.src, module = c.rec.module, site = c.rec.site,
+                clauses = c.rec.clauses, where = c.where, dir = 'suppress', basis = 'declared', met = m ~= nil, sites = sites,
+                dropped = (opts.drop_contracts or NOTHING)[c.rec.id] or nil }
+        end
+        R.entry_contracts = l
+    end
     -- (CART-1859: every argument handed over — kind 'call' / 'setfenv' / 'load' / 'loadstring' / 'loadfile' / 'dofile'
     -- (unknown code), 'lost-call:ext' / 'lost-call:saturated' / 'lost-call:tainted', 'builtin-lost', 'host-any' — the site
     -- 'file:line:col' of the call (nil where the solve made the call itself: unknown code calling back, a handler), and
@@ -5511,7 +5677,7 @@ local function build(store, opts)
             end
             describe = function (o, depth, seen)
                 if PH[o] then return phsrc(o) end
-                if o == G7.EXT then return { 'unknown', 'ext' } end
+                if o == G7.EXT or G7.XC[o] then return { 'unknown', 'ext' } end
                 if TNAME[o] then return { 'type', TNAME[o] } end
                 if fnports[o] then return { 'fn', fnports[o].id } end
                 local key = tostring(obinfo[o] or o)
@@ -5779,7 +5945,7 @@ local function build(store, opts)
             if tainted[ap] then return nil, 'partial' end
             local out, ids = {}, {}
             for o in each(ap) do
-                if o == EXT then return nil, 'external' end
+                if o == EXT or G7.XC[o] then return nil, 'external' end
                 out[#out + 1] = tostring(obinfo[o] or o); ids[#ids + 1] = o
             end
             return out, ids
@@ -5817,7 +5983,7 @@ local function build(store, opts)
             local level = {}
             R.state_level = level -- (0: the root's OWN object; deeper: reached through fields — the root is then only the first found)
             -- (a TYPE object — every string is one `type:string` — and a function are no mutable tables: never state)
-            local function add_port(p, root, lv) for o in each(p) do if o ~= EXT and not TNAME[o] and not fnports[o] and not state[o] then state[o] = root; level[o] = lv or 0; q[#q + 1] = o end end end
+            local function add_port(p, root, lv) for o in each(p) do if o ~= EXT and not G7.XC[o] and not TNAME[o] and not fnports[o] and not state[o] then state[o] = root; level[o] = lv or 0; q[#q + 1] = o end end end
             for _, r in ipairs(ROOTS) do for name, p in pairs(r.scope) do add_port(p, 'var:' .. r.file .. ':' .. name) end end
             for key, p in pairs(named) do if key:match('^g:') or key:match('^mod:') then add_port(p, key) end end
             local h = 1
@@ -6060,7 +6226,7 @@ local function build(store, opts)
         -- function)
         for _, af in ipairs(G7.ANDF) do
             if not top[af[1]] then
-                for o in each(af[1]) do if TNAME[o] == 'boolean' or o == G7.EXT then G7.REC.ins(af[3], { 'new', af[2], o }) end end
+                for o in each(af[1]) do if TNAME[o] == 'boolean' or o == G7.EXT or G7.XC[o] then G7.REC.ins(af[3], { 'new', af[2], o }) end end
             end
         end
         local FD = require 'cartograph.flowdump'
@@ -6118,6 +6284,42 @@ build = function (store, opts)
 end
 
 --- the analysis over `store`'s graph, cached per graph generation (and per `open`)
+-- R.assumes(c) -> { contract id … } | nil: the entry contracts (CART-1861) a WHOLE answer stands on — dropping that one
+-- alone makes it partial, unknown, or another answer. EXACT, by leaving each met contract out and solving again with the
+-- caller's opts (a contract changes the solve, not only the taint: a callback it forbids would have been called with
+-- EXT); the first call costs one solve per met contract, and nothing of them is kept but the citations
+local function cites(R, store, opts)
+    local CI
+    function R.assumes(c)
+        if not CI then
+            CI = {}
+            local function same(a, b)
+                if not b or b.partial or a.kind ~= b.kind or a.type ~= b.type then return false end
+                return table.concat(a.targets or NOTHING, '\0') == table.concat(b.targets or NOTHING, '\0')
+            end
+            for _, e in ipairs(R.entry_contracts) do
+                if e.met and not e.dropped then
+                    local o2, d = {}, {}
+                    for k, v in pairs(opts or NOTHING) do o2[k] = v end
+                    for k in pairs(o2.drop_contracts or NOTHING) do d[k] = true end
+                    d[e.id] = true
+                    o2.drop_contracts = d
+                    local R2 = build(store, o2)
+                    for _, cc in ipairs(store.data.calls) do
+                        local v = R.verdict(cc)
+                        if v and not v.partial and v.kind ~= 'unknown' and not same(v, R2.verdict(cc)) then
+                            local t = CI[cc]; if not t then t = {}; CI[cc] = t end
+                            t[#t + 1] = e.id
+                        end
+                    end
+                end
+            end
+        end
+        return CI[c]
+    end
+    return R
+end
+
 function M.of(store, opts)
     local key = ((opts and opts.open == false) and 'closed' or 'open') .. ((opts and opts.spread) and '+spread' or '')
         .. ((opts and opts.exclude) and ('-' .. opts.exclude) or '') .. ((opts and opts.ctx == false) and '-noctx' or '')
@@ -6127,17 +6329,19 @@ function M.of(store, opts)
         table.sort(ks)
         if #ks > 0 then key = key .. '+exp:' .. table.concat(ks, ',') end
     end
+    key = key .. M.contracts(store, opts).key -- (the entry contracts in force: a config edit is a different solve)
     local c = store._flowtype
     -- (the generation AND the graph itself: a fresh ingest may restart the generation count)
     if c and c.gen == store.generation and c.data == store.data and c[key] then return c[key] end
     if not c or c.gen ~= store.generation or c.data ~= store.data then
         c = { gen = store.generation, data = store.data }; store._flowtype = c
     end
-    c[key] = build(store, opts)
+    c[key] = cites(build(store, opts), store, opts)
     return c[key]
 end
 
+
 -- (one solve, uncached — for an instrument that varies opts.order)
-function M.solve(store, opts) return build(store, opts) end
+function M.solve(store, opts) return cites(build(store, opts), store, opts) end
 
 return M

@@ -92,6 +92,12 @@ M.pins = nil
 --   tactic_overrides     { ['<tactic>'] = { use = 'sha256:<project file>', over = 'sha256:<built-in>' } }: run the
 --                        project's .cartograph/tactics/<tactic>.lua INSTEAD of the built-in one. Your explicit choice,
 --                        for that exact pair of texts — either side changing voids it (the refusal prints the entry)
+--   entry_contracts      { { id, module = '<require name>' | site = 'file:line:col', clauses = { 'no-write' [,
+--                        'no-callback'] }, src = '<where the promise comes from>', says? } … }: declared promises about
+--                        the UNKNOWN CODE a file under that scope hands values to (flowtype M.contracts, CART-1861) —
+--                        what it is handed does not escape there; every answer it makes whole stands on it
+--                        (R.assumes), and `toolbelt.lua run entry-contracts <root>` is the ledger. A bad record, or two
+--                        scopes that disagree on a file's list, is an error, never ignored
 M.scoped = nil
 
 -- registry auto-discovery (Greenspun detection): verbs that register

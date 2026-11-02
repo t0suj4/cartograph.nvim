@@ -3361,6 +3361,173 @@ test('flowtype: R.entry_of names the hand-out a partial answer first traces to (
     ok(e and e.cause == 'host-any' and vim.deep_equal(e.sites, { 'host-any m.lua:7:11' }), 'a host `any` result: its call: ' .. d)
 end)
 
+-- (CART-1861: ENTRY CONTRACTS — a declared promise about the unknown code at one entry point, by the MODULE a require
+-- the tree cannot map loads or by the SITE that hands values over. What it is handed does not escape there; the answers
+-- it makes whole cite it, R.assumes, exactly: dropping that contract alone changes the answer)
+test('flowtype: an entry contract makes whole what unknown code was handed, and every answer it makes whole cites it (CART-1861)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local lpeg = require("lpeg")',
+        'local ju = require("jit.util")',
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local C, D = {}, {}',
+        'function C.n(self) return 3 end',
+        'function D.n(self) return 4 end',
+        'local E, F = {}, {}',
+        'function E.o(self) return 5 end',
+        'function F.o(self) return 6 end',
+        'local G, H = {}, {}',
+        'function G.p(self) return 7 end',
+        'function H.p(self) return 8 end',
+        'local t = { k = setmetatable({}, { __index = A }) }',
+        'lpeg.match(t)',
+        'local r1 = t.k:m()',
+        'local u = { k = setmetatable({}, { __index = C }) }',
+        'ext.f(u)',
+        'local r2 = u.k:n()',
+        'local w = { k = setmetatable({}, { __index = E }) }',
+        'lpeg.match(w)',
+        'ext.g(w)',
+        'local r3 = w.k:o()',
+        'local v = { k = setmetatable({}, { __index = G }) }',
+        'ju.funcinfo(v)',
+        'local r4 = v.k:p()',
+        'local I, J = {}, {}',
+        'function I.z(self) return 9 end',
+        'function J.z(self) return 10 end',
+        'local function cb(q) return q:z() end',
+        'cb(setmetatable({}, { __index = I }))',
+        'lpeg.Cmt(cb)',
+        'local K, L = {}, {}',
+        'function K.y(self) return 11 end',
+        'function L.y(self) return 12 end',
+        'local env = { k = setmetatable({}, { __index = K }) }',
+        'setfenv(ext.h, env)',
+        'local r6 = env.k:y()',
+        'local pat = lpeg.P("a")',
+        'local r7 = pat:m()',
+        'local M1, M2 = {}, {}',
+        'function M1.x(self) return 13 end',
+        'function M2.x(self) return 14 end',
+        'local function rd(q) return q:x() end',
+        'rd(setmetatable({}, { __index = M1 }))',
+        'load(rd)',
+        'ju.funcinfo(lpeg)',
+        'local mix = (os.time() > 0) and lpeg.P("b") or setmetatable({}, { __index = A })',
+        'local r8 = mix:m()',
+        'local holder = (os.time() > 0) and { m = lpeg.match } or setmetatable({}, { __index = A })',
+        'local r9 = holder:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local LPEG = { id = 'lpeg-reads', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'the lpeg manual' }
+    local ALL = {
+        LPEG,
+        { id = 'ext-f', site = 'm.lua:19:0', clauses = { 'no-write', 'no-callback' }, src = 'a test' },
+        { id = 'ext-g', site = 'm.lua:23:0', clauses = { 'no-write' }, src = 'a test' },
+        { id = 'fenv', site = 'm.lua:38:0', clauses = { 'no-write' }, src = 'a test' },
+        { id = 'ld', site = 'm.lua:47:0', clauses = { 'no-write', 'no-callback' }, src = 'a test' },
+        { id = 'nowhere', site = 'm.lua:99:0', clauses = { 'no-write' }, src = 'a test' },
+    }
+    local R0 = flowtype.solve(store, { open = false })
+    local R = flowtype.solve(store, { open = false, contracts = ALL })
+    local Rcb = flowtype.solve(store, { open = false, contracts = { { id = 'lpeg-calls', module = 'lpeg', clauses = { 'no-write' }, src = 'the lpeg manual' } } })
+    for _, full in ipairs({ 't.k:m', 'u.k:n', 'w.k:o', 'v.k:p', 'env.k:y' }) do
+        local v = R0.verdict(call(full))
+        ok(v and v.partial, full .. ' is partial without a contract: ' .. vim.inspect(v))
+    end
+    local function whole(Rx, full) local v = Rx.verdict(call(full)); return v ~= nil and not v.partial, vim.inspect(v) end
+    -- (lpeg's own value is handed to jit.util too: like EXT it is no object unknown code can write — it does not escape)
+    local w, d = whole(R, 't.k:m'); ok(w, 'handed only to lpeg, under its module contract: whole ' .. d)
+    eq(R.assumes(call('t.k:m')), { 'lpeg-reads' }, 't.k:m stands on lpeg\'s contract alone')
+    w, d = whole(R, 'u.k:n'); ok(w, 'handed only at a site under contract: whole ' .. d)
+    -- (and it stands on lpeg's and the load's too: without either, a callback it is handed is called with EXT and returns
+    -- it, EXT escapes, and every member of EXT — ext.f among them — is a callee the solve lost: the call at the site
+    -- hands u over whatever its contract says. Overdetermined, as the taint is: flowpath FLOW-0123)
+    eq(R.assumes(call('u.k:n')), { 'ext-f', 'ld', 'lpeg-reads' }, 'u.k:n stands on its site\'s contract, and on lpeg\'s and the load\'s')
+    w, d = whole(R, 'w.k:o'); ok(w, 'handed to lpeg and at a site, both under contract: whole ' .. d)
+    eq(R.assumes(call('w.k:o')), { 'ext-g', 'ld', 'lpeg-reads' }, 'w.k:o stands on both its contracts (and the load\'s)')
+    w, d = whole(R, 'env.k:y'); ok(w, 'the environment setfenv handed at a site under contract: whole ' .. d)
+    eq(R.assumes(call('env.k:y')), { 'fenv' }, 'env.k:y stands on the setfenv site\'s contract')
+    eq(R.verdict(call('q:x')) and R.verdict(call('q:x')).kind, 'exact', 'a load under no-callback does not call its reader')
+    eq(R0.verdict(call('q:x')), nil, 'without it the reader is called with unknown arguments')
+    eq(R.assumes(call('q:x')), { 'ld' }, 'q:x stands on the load site\'s contract')
+    eq(R.verdict(call('pat:m')), nil, 'what lpeg returns is lpeg\'s code: unknown, its contract says nothing of it')
+    eq(R.verdict(call('mix:m')), nil, 'a receiver that may hold lpeg\'s value is unknown, beside a tree object')
+    eq(R.verdict(call('holder:m')), nil, 'a member that may be lpeg\'s value is an unknown target')
+    ok(R.verdict(call('v.k:p')).partial, 'jit.util has no contract: v.k:p stays partial')
+    eq(R.assumes(call('v.k:p')), nil, 'a partial answer cites nothing')
+    -- (no-callback both ways: lpeg may call cb with unknown arguments unless its contract says it does not)
+    eq(R.verdict(call('q:z')) and R.verdict(call('q:z')).kind, 'exact', 'no-callback: cb is called only by the tree')
+    eq(Rcb.verdict(call('q:z')), nil, 'no-write alone: lpeg calls cb, q may be unknown code\'s value')
+    w = whole(Rcb, 't.k:m'); ok(w, 'no-write alone still keeps t from escaping')
+    -- (the LEDGER: every contract in force, where it met the tree; one that met nothing is listed, unmet)
+    local led = {}
+    for _, e in ipairs(R.entry_contracts) do led[e.id] = e end
+    -- (and m.lua:23:0, ext.g: unknown code holds lpeg's value — jit.util was handed it — so what unknown code returns may
+    -- be it, and each callee there is governed by its own contract)
+    eq(led['lpeg-reads'].sites, { 'm.lua:16:0', 'm.lua:22:0', 'm.lua:23:0', 'm.lua:33:0', 'm.lua:40:12', 'm.lua:41:11', 'm.lua:49:32', 'm.lua:50:11', 'm.lua:52:11' },
+        'lpeg\'s contract met its calls, a method of its value\'s among them')
+    eq(led['ext-f'].sites, { 'm.lua:19:0' }, 'the site contract met its site')
+    ok(led['nowhere'].met == false and #led['nowhere'].sites == 0, 'a contract no site of the tree is listed, unmet')
+    ok(led['lpeg-reads'].dir == 'suppress' and led['lpeg-reads'].basis == 'declared' and led['lpeg-reads'].src == 'the lpeg manual', 'CART-1071\'s record: ' .. vim.inspect(led['lpeg-reads']))
+    -- (the hand-outs a contract governed are its rows, not unknown code's)
+    local kinds = {}
+    for _, h in ipairs(R.handouts) do if h.site == 'm.lua:19:0' then kinds[h.kind] = true end end
+    ok(kinds['contract:ext-f'] and not kinds['call'], 'the site\'s hand-out is the contract\'s: ' .. vim.inspect(kinds))
+    -- (M.of keys its cache on the contracts in force)
+    local Ra, Rb = flowtype.of(store, { open = false }), flowtype.of(store, { open = false, contracts = { LPEG } })
+    ok(Ra ~= Rb and Ra.verdict(call('t.k:m')).partial and not Rb.verdict(call('t.k:m')).partial, 'another contract set is another solve')
+    -- (a contract is refused, never ignored, when it is not one)
+    local function refused(c, pat)
+        local okk, err = pcall(flowtype.solve, store, { open = false, contracts = { c } })
+        ok(not okk and tostring(err):find(pat, 1, true) ~= nil, pat .. ': ' .. tostring(err))
+    end
+    refused({ id = 'x', module = 'lpeg', clauses = { 'no-write' } }, '`src` is required')
+    refused({ id = 'x', module = 'lpeg', clauses = { 'no-callback' }, src = 's' }, 'no-callback needs no-write')
+    refused({ id = 'x', module = 'lpeg', clauses = { 'no-read' }, src = 's' }, 'unknown clause "no-read"')
+    refused({ id = 'x', site = '-', clauses = { 'no-write' }, src = 's' }, 'CART-1868')
+    refused({ id = 'x', module = 'lpeg', site = 'm.lua:1:0', clauses = { 'no-write' }, src = 's' }, 'exactly one of')
+    refused({ id = 'x', module = 'lpeg', clauses = { 'no-write' }, src = 's', dir = 'produce' }, 'unknown field "dir"')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1861: the scoped key `entry_contracts` — a contract holds for the files of its scope only)
+test('flowtype: entry_contracts in scoped config hold in their scope (CART-1861)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local body = function (P, Q, m) return table.concat({
+        'local lpeg = require("lpeg")',
+        ('local %s, %s = {}, {}'):format(P, Q),
+        ('function %s.%s(self) return 1 end'):format(P, m),
+        ('function %s.%s(self) return 2 end'):format(Q, m),
+        ('local t = { k = setmetatable({}, { __index = %s }) }'):format(P),
+        'lpeg.match(t)',
+        ('local r = t.k:%s()'):format(m) }, '\n') .. '\n' end
+    local root = tree({ ['sub/s.lua'] = body('A', 'B', 'm'), ['o.lua'] = body('C', 'D', 'n') })
+    store.ingest(ts.extract(root))
+    local cfg = require 'cartograph.config'
+    local saved = cfg.scoped
+    cfg.scoped = { [root .. '/sub'] = { entry_contracts = { { id = 'lpeg-reads', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'the lpeg manual' } } } }
+    local okk, R = pcall(flowtype.solve, store, { open = false })
+    cfg.scoped = saved
+    ok(okk, tostring(R))
+    local callrec = require 'cartograph.callrec'
+    local function v(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return R.verdict(c), c end end end
+    local vm, cm = v('t.k:m')
+    local vn = v('t.k:n')
+    ok(vm and not vm.partial, 'in the scope: whole ' .. vim.inspect(vm))
+    ok(vn and vn.partial, 'outside it: partial ' .. vim.inspect(vn))
+    eq(R.entry_contracts[1].where, 'scope dir:' .. vim.fn.fnamemodify(root, ':p'):gsub('/+$', '') .. '/sub', 'the ledger names the scope')
+    cfg.scoped = { [root .. '/sub'] = { entry_contracts = { { id = 'lpeg-reads', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'the lpeg manual' } } } }
+    local okc, Rc = pcall(flowtype.solve, store, { open = false })
+    eq(okc and Rc.assumes(cm), { 'lpeg-reads' }, 'and it is cited')
+    cfg.scoped = saved
+    vim.fn.delete(root, 'rf')
+end)
+
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's
 -- `_G[LIBSTUB_MAJOR] = LibStub`, Altoholic's `_G[v]` over a list of frame names. Its reads were the contract's named
 -- global: LibStub listed nothing, `LibStub(...)` called no function, and the answer through it was a WHOLE {B.m})
