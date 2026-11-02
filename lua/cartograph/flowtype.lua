@@ -4757,6 +4757,12 @@ local function build(store, opts)
     -- store of `.f` anywhere tainted every namespace's f — w3: 317 whole exact answers partial, CART-1707)
     for o in pairs(G7.ISG) do escaped[o] = nil end
     for o in pairs(G7.NOESC) do escaped[o] = nil end -- (a builtin's native object, a library object: CART-1791)
+    -- (nor does UNKNOWN CODE'S VALUE, EXT or a module contract's: a saturated port that held it, a callback handed out
+    -- that returns what it is called with, had made it escape. A member of it is it already, and what it was handed is
+    -- XESC; escaped, the world rule tainted every read of a member of unknown code, and every call on it was lost as
+    -- well — it handed its arguments over past a site contract (CART-1870). The taint phase's escmore excludes it too)
+    escaped[EXT] = nil
+    for o in pairs(G7.XC) do escaped[o] = nil end
     -- (THE ROOT CLASS of each escaped object, CART-1782: what escaped in the solve went through a saturated port; fuel and
     -- unknown code were classed where they escaped. A field, prototype or return escaping WITH an object takes its
     -- carrier's class, and one the taint phase releases (G7.escmore) the rule's. The dump's taint.escaped_root)
@@ -4767,9 +4773,9 @@ local function build(store, opts)
             local o = esc[i]; i = i + 1
             local m = ofield[o] or NOTHING
             for _, fk in ipairs(okeys(o)) do -- (field NAMES in one order: pairs over strings is the process's hash order, CART-1834)
-                for x in each(m[fk]) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                for x in each(m[fk]) do if not escaped[x] and x ~= EXT and not G7.XC[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
             end
-            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
+            for c in pairs(protos[o] or NOTHING) do if not escaped[c] and c ~= EXT and not G7.XC[c] and not G7.ISG[c] and not G7.NOESC[c] then escaped[c] = true; G7.EROOTC[c] = G7.EROOTC[o]; esc[#esc + 1] = c; if ESCAT then ESCAT[c] = { o } end end end
             -- (ESCRET, the dual of the params rule: what an escaped function RETURNS escapes. A lost call may have
             -- called it, and its result port, tainted, holds only escaped objects. `local r = h()` through a lost h
             -- that was mk returned mk's table, whose method r.go then ran unseen; the old `.f` rule had covered it by
@@ -4778,7 +4784,7 @@ local function build(store, opts)
             local fpp = fnports[o]
             if fpp then
                 for _, r in pairs(G7.escouts(fpp)) do
-                    for x in each(r) do if not escaped[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
+                    for x in each(r) do if not escaped[x] and x ~= EXT and not G7.XC[x] and not G7.ISG[x] and not G7.NOESC[x] then escaped[x] = true; G7.EROOTC[x] = G7.EROOTC[o]; esc[#esc + 1] = x; if ESCAT then ESCAT[x] = { o } end end end
                 end
             end
         end

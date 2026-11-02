@@ -3444,12 +3444,11 @@ test('flowtype: an entry contract makes whole what unknown code was handed, and 
     local w, d = whole(R, 't.k:m'); ok(w, 'handed only to lpeg, under its module contract: whole ' .. d)
     eq(R.assumes(call('t.k:m')), { 'lpeg-reads' }, 't.k:m stands on lpeg\'s contract alone')
     w, d = whole(R, 'u.k:n'); ok(w, 'handed only at a site under contract: whole ' .. d)
-    -- (and it stands on lpeg's and the load's too: without either, a callback it is handed is called with EXT and returns
-    -- it, EXT escapes, and every member of EXT — ext.f among them — is a callee the solve lost: the call at the site
-    -- hands u over whatever its contract says. Overdetermined, as the taint is: flowpath FLOW-0123)
-    eq(R.assumes(call('u.k:n')), { 'ext-f', 'ld', 'lpeg-reads' }, 'u.k:n stands on its site\'s contract, and on lpeg\'s and the load\'s')
+    -- (on its site's alone: a callback handed out elsewhere that returns what unknown code called it with no longer makes
+    -- EXT escape — every member of EXT a callee the solve lost, the call at the site handing u over all the same, CART-1870)
+    eq(R.assumes(call('u.k:n')), { 'ext-f' }, 'u.k:n stands on its site\'s contract alone')
     w, d = whole(R, 'w.k:o'); ok(w, 'handed to lpeg and at a site, both under contract: whole ' .. d)
-    eq(R.assumes(call('w.k:o')), { 'ext-g', 'ld', 'lpeg-reads' }, 'w.k:o stands on both its contracts (and the load\'s)')
+    eq(R.assumes(call('w.k:o')), { 'ext-g', 'lpeg-reads' }, 'w.k:o stands on both its contracts')
     w, d = whole(R, 'env.k:y'); ok(w, 'the environment setfenv handed at a site under contract: whole ' .. d)
     eq(R.assumes(call('env.k:y')), { 'fenv' }, 'env.k:y stands on the setfenv site\'s contract')
     eq(R.verdict(call('q:x')) and R.verdict(call('q:x')).kind, 'exact', 'a load under no-callback does not call its reader')
@@ -3526,6 +3525,47 @@ test('flowtype: entry_contracts in scoped config hold in their scope (CART-1861)
     eq(okc and Rc.assumes(cm), { 'lpeg-reads' }, 'and it is cited')
     cfg.scoped = saved
     vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1870: UNKNOWN CODE'S VALUE NEVER ESCAPES — EXT, or a module contract's. Escaped, the world rule tainted every
+-- read of a member of it: every call on unknown code was also a lost call, which hands its arguments over, so a site
+-- contract stood on every route that let EXT escape. One fixture per route; each answer cites its own contract alone)
+test('flowtype: unknown code\'s value does not escape, whatever route reaches it (CART-1870)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local HEAD = { 'local ext = require("notintree")', 'local lpeg = require("lpeg")', 'local A, B = {}, {}',
+        'function A.m(self) return 1 end', 'function B.m(self) return 2 end', 'local u = { k = setmetatable({}, { __index = A }) }' }
+    local ROUTES = {
+        { 'a callback handed out returns what it is called with', 'ext.f(u)', 'local r = u.k:m()', 'ext.on(function (x) return x end)',
+            'local C, D = {}, {}', 'function C.n(self) return 3 end', 'function D.n(self) return 4 end',
+            'local t = setmetatable({}, { __index = C })', 'ext.slot = t', 'local r2 = t:n()' },
+        { 'a field of what unknown code is handed', 'ext.f(u)', 'local r = u.k:m()', 'ext.k({ e = ext })' },
+        { 'a prototype of what unknown code is handed', 'ext.f(u)', 'local r = u.k:m()', 'ext.k(setmetatable({}, { __index = ext }))' },
+        { 'a saturated port', 'ext.f(u)', 'local r = u.k:m()', 'local s = ext', 's = {}', 's = {}', 's = {}' },
+        { 'a module contract\'s value, a field of what other unknown code is handed', 'lpeg.match(u)', 'local r = u.k:m()', 'ext.k({ l = lpeg })' },
+        { 'a module contract\'s value in a saturated port', 'lpeg.match(u)', 'local r = u.k:m()', 'local s = lpeg', 's = {}', 's = {}', 's = {}' },
+    }
+    local callrec = require 'cartograph.callrec'
+    for i, rt in ipairs(ROUTES) do
+        local lines = vim.list_extend(vim.deepcopy(HEAD), vim.list_slice(rt, 2))
+        local root = tree({ ['m.lua'] = table.concat(lines, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+        local con = i >= 5 and { id = 'c', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'a test' }
+            or { id = 'c', site = 'm.lua:6:0', clauses = { 'no-write', 'no-callback' }, src = 'a test' }
+        local cap = flowtype.CAP
+        if i == 4 or i == 6 then flowtype.CAP = 2 end -- (s's port saturates, holding unknown code's value)
+        local R0 = flowtype.solve(store, { open = false })
+        local R = flowtype.solve(store, { open = false, contracts = { con } })
+        flowtype.CAP = cap
+        ok(R0.verdict(call('u.k:m')).partial, rt[1] .. ': u.k:m is partial without the contract')
+        local v = R.verdict(call('u.k:m'))
+        ok(v and v.kind == 'exact' and not v.partial, rt[1] .. ': whole under its contract ' .. vim.inspect(v))
+        eq(R.assumes(call('u.k:m')), { 'c' }, rt[1] .. ': it cites its contract')
+        for _, h in ipairs(R0.handouts) do ok(h.kind ~= 'lost-call:ext', rt[1] .. ': no call on unknown code is lost: ' .. vim.inspect(h)) end
+        -- (what the tree STORES into unknown code is handed over by the store, not by EXT escaping)
+        if call('t:n') then ok(R.verdict(call('t:n')).partial, rt[1] .. ': t, stored into unknown code, stays partial') end
+        vim.fn.delete(root, 'rf')
+    end
 end)
 
 -- (CART-1820, flowpath FLOW-0040: a name a LITERAL-keyed dynamic _G step reaches is no strict global — LibStub's

@@ -6,9 +6,10 @@
 -- it suppresses nothing, and is stale or misspelled.
 -- Contracts come from the scoped key `entry_contracts` (config.lua) and, to TRY some before declaring them, from
 -- `contracts` = a Lua file returning a list of records (applied to the whole tree).
--- ⚠ AN ANSWER CAN STAND ON A CONTRACT FAR FROM IT: overdetermined, as the taint is (flowpath FLOW-0123) — an
--- uncontracted callback that returns unknown code's value lets that value escape, every member of it becomes a callee
--- the solve lost, and a call under a SITE contract then hands its arguments over all the same. `stands` counts both.
+-- An answer stands on EVERY contract of a site its objects were handed at (one handed to lpeg and to ext.g needs both):
+-- the taint is overdetermined (flowpath FLOW-0123), so one contract alone can win nothing. (Until CART-1870 it also
+-- stood on contracts far from it: unknown code's value escaped — through a saturated port, a callback returning it —
+-- every call on unknown code was lost too, and a site contract's call handed its arguments over all the same.)
 -- params: mode = closed | open (default closed), contracts = a file, top = rows in the value (default 30).
 -- CLAIM: the solve ran; the value is the ledger.
 
