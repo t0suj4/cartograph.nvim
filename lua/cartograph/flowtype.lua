@@ -2620,6 +2620,12 @@ local function build(store, opts)
         -- CONTEXT instance walks the original node, at the file's own positions)
         local kfile = (clone and not isctx) and ('clone:' .. file) or file
         local function key_of(n) local l, c = n:start(); return kfile .. ':' .. l .. ':' .. c end
+        -- (CART-1868: a HANDLER the walk runs — an operator's, a store's __newindex, a generic for's iterator — is a call
+        -- with no call node of its own: it is keyed at its OPERATOR TOKEN (`+`, the field after `.`, `[`, `in`), a position
+        -- no call's key — the call's START — can share. It had no site (self 3,881 hand-outs to unknown code, the report's
+        -- `-`), or inside a call's arguments THAT call's — `f(a + b)` cited f, and a contract on f governed a's handler.
+        -- Returns the site it replaces)
+        local function at(nd) local s0 = G7.WSITE; if nd then G7.WSITE = key_of(nd) end; return s0 end
         -- (an access, at the FILE's positions: a snippet instance's positions are its own, so it records none)
         local function acc(kind, node, f, base, obj, range, key)
             if not ACC or (clone and (not isctx or clone.noacc)) or not node or G7.HOSTWALK then return end
@@ -2779,20 +2785,22 @@ local function build(store, opts)
         -- (a store to a bare GLOBAL name IS `_G.x = v`: it runs the environment's __newindex where the raw field may be
         -- absent — the walk had kept the value in _G.x while setmetatable(_G, { __newindex = P }) sent it to P, a wrong
         -- whole answer, CART-1806. The read side loads through _G already: G7.gread)
-        local function gstore(name, v)
+        local function gstore(name, v, nd)
             local p, glob = lookup(name)
             edge(v, p)
-            if glob then local kp = new(); addobj(kp, STR); metastore(G7.GPORT, name, kp, v, curerr()) end
+            if glob then local kp = new(); addobj(kp, STR); local s0 = at(nd); metastore(G7.GPORT, name, kp, v, curerr()); G7.WSITE = s0 end
         end
         local function assign(target, v, rhs)
             local t = target:type()
-            if t == 'identifier' then gstore(txt(target), v)
+            if t == 'identifier' then gstore(txt(target), v, target)
             elseif t == 'dot_index_expression' then
                 local base = expr(target:field('table')[1])
                 acc('write', target:field('field')[1], txt(target:field('field')[1]), base)
                 storec(base, txt(target:field('field')[1]), v)
                 local kp = new(); addobj(kp, STR)
+                local s0 = at(target:field('field')[1])
                 metastore(base, txt(target:field('field')[1]), kp, v, curerr())
+                G7.WSITE = s0
             elseif t == 'bracket_index_expression' then
                 local base, kn = expr(target:field('table')[1]), target:field('field')[1]
                 acc_key('write', kn, base, target)
@@ -2816,7 +2824,10 @@ local function build(store, opts)
                 local kp = G7.KP0 or (kn and expr(kn)) or new()
                 G7.KP0 = nil
                 if kn then storec(base, '{k}', kp) end
+                local lb; for _, x in tsutil.inext, target, -1 do if not x:named() and txt(x) == '[' then lb = x; break end end
+                local s0 = at(lb)
                 metastore(base, keyname(kn), kp, v, curerr())
+                G7.WSITE = s0
             end
         end
         local function func(n)
@@ -3684,13 +3695,13 @@ local function build(store, opts)
                 if ACC and op == '#' and x then acc('array', x, nil, xp) end
                 local res = new()
                 -- (`#x` runs __len, `-x` __unm, with the operand twice — CART-1702)
-                if xp and (op == '#' or op == '-') then metacall(xp, op == '#' and '__len' or '__unm', { xp, xp }, res, curerr()) end
+                if xp and (op == '#' or op == '-') then local s0 = at(n); metacall(xp, op == '#' and '__len' or '__unm', { xp, xp }, res, curerr()); G7.WSITE = s0 end
                 return res
             end
             if t == 'binary_expression' then
-                local op, l, r -- (one pass over the children: the operator token and both operands)
+                local op, l, r, opn -- (one pass over the children: the operator token and both operands)
                 for _, x in tsutil.inext, n, -1 do
-                    if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end
+                    if not x:named() then op = txt(x); opn = x elseif not l then l = x elseif not r then r = x end
                 end
                 local a, b = expr(l), expr(r)
                 -- (`a and b` is a only where a is FALSY — nil or false: a table, a function, a string never is. Its left
@@ -3722,8 +3733,10 @@ local function build(store, opts)
                 if mm then
                     local args = (op == '>' or op == '>=') and { b, a } or { a, b }
                     local hr = new()
+                    local s0 = at(opn)
                     metacall(a, mm, args, hr, curerr())
                     metacall(b, mm, args, hr, curerr())
+                    G7.WSITE = s0
                     -- (`a <= b` with no __le runs `not __lt(b, a)` — 5.1, LuaJIT, nvim, 5.4 with LUA_COMPAT_LT_LE — so the
                     -- swapped __lt runs too: `a >= b`, `not __lt(a, b)`. In the IR the same `op __lt` — CART-1798)
                     if op == '<=' or op == '>=' then
@@ -3784,7 +3797,7 @@ local function build(store, opts)
                 else
                     local fp = func(n)
                     if nm then
-                        if nm:type() == 'identifier' then gstore(txt(nm), fp)
+                        if nm:type() == 'identifier' then gstore(txt(nm), fp, nm)
                         else
                             local o, last = nm:named_child(0), nm:named_child(nm:named_child_count() - 1)
                             if o and last then
@@ -3794,7 +3807,9 @@ local function build(store, opts)
                                 -- (`function t.f() end` IS `t.f = function … end`: it runs t's __newindex like any store,
                                 -- CART-1769 — the walk had skipped the handler, and its error)
                                 local kp = new(); addobj(kp, STR)
+                                local s0 = at(last)
                                 metastore(base, txt(last), kp, fp, curerr())
+                                G7.WSITE = s0
                                 if G7.MSELF and not clone and nm:type() == 'method_index_expression' then
                                     G7.MSELF[#G7.MSELF + 1] = { G7.LASTFP.params[1], base, G7.LASTFP.id }
                                 end
@@ -3866,7 +3881,10 @@ local function build(store, opts)
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
                         -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
+                        local kin; for _, x in tsutil.inext, cl, -1 do if not x:named() and txt(x) == 'in' then kin = x; break end end
+                        local s0 = at(kin)
                         G7.callany(trip[1], { trip[2] or new(), ctl }, V, ctl, curerr())
+                        G7.WSITE = s0
                     end
                 elseif cl then
                     for _, x in tsutil.inamed, cl, -1 do
@@ -3889,6 +3907,11 @@ local function build(store, opts)
                     if xt == 'block' or xt:find('statement', 1, true) then stmt(x) else expr(x) end
                 end
             end
+        end
+        do -- (CART-1859: the call being walked, for callc to record — before an instance's walk returns below: a CONTEXT
+            -- instance's calls had no site, CART-1868)
+            local c1 = callv
+            callv = function (x, w) local s0 = G7.WSITE; G7.WSITE = key_of(x); local a, b = c1(x, w); G7.WSITE = s0; return a, b end
         end
         if isctx then
             -- (the instance: the function node at its own position, walked inside its definition's scopes)
@@ -3919,10 +3942,6 @@ local function build(store, opts)
             local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)
             expr = function (x) local m = G7.M; G7.M = 0; local a, b = e0(x); G7.M = m; return a, b end
             callv = function (x, w) local m = G7.M; G7.M = 0; local a, b = c0(x, w); G7.M = m; return a, b end
-        end
-        do -- (CART-1859: the call being walked, for callc to record)
-            local c1 = callv
-            callv = function (x, w) local s0 = G7.WSITE; G7.WSITE = key_of(x); local a, b = c1(x, w); G7.WSITE = s0; return a, b end
         end
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
@@ -5619,7 +5638,8 @@ local function build(store, opts)
     end
     -- (CART-1859: every argument handed over — kind 'call' / 'setfenv' / 'load' / 'loadstring' / 'loadfile' / 'dofile'
     -- (unknown code), 'lost-call:ext' / 'lost-call:saturated' / 'lost-call:tainted', 'builtin-lost', 'host-any' — the site
-    -- 'file:line:col' of the call (nil where the solve made the call itself: unknown code calling back, a handler), and
+    -- 'file:line:col' of the call — a handler the walk runs at its operator token, CART-1868 (nil where the solve made the
+    -- call itself: unknown code calling back, `__gc`), and
     -- what the port holds at the fixpoint, labelled; `top` where it saturated and no longer lists its objects)
     -- Built when first read: the recording is all a solve pays for.
     setmetatable(R, { __index = function (t, k)

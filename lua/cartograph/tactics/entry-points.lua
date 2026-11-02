@@ -4,7 +4,9 @@
 -- answer's taint walked back to its seed, the seed's object to the hand-out that let it go). Beside them, how many
 -- partial answers trace to the analysis's OWN losses instead (saturation past CAP, sinf, …): a contract on an entry
 -- cannot reach those.
--- A row: `kinds site` (kinds joined by `+`, site `file:line:col` 0-based, `-` where the solve made the call itself),
+-- A row: `kinds site` (kinds joined by `+`, site `file:line:col` 0-based — a handler the walk runs, an operator's or a
+-- store's `__newindex` or a generic for's iterator, at its operator token, CART-1868 — `-` where the solve made the call
+-- itself: unknown code calling back, `__gc`),
 -- answers = the partial answers listing it, sole = those listing ONLY it, in = those where outside code passes a value
 -- IN (calls a tree function it was handed), closure = the objects unknown code was handed there, closed over fields and
 -- prototypes (unknown-code sites only). Every unknown-code site is a row, also one no answer traces to.

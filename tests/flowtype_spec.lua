@@ -3236,6 +3236,55 @@ test('flowtype: R.handouts names the site and kind of every value handed over (C
     for _, h in ipairs(R.handouts) do ok(h.site ~= 'm.lua:10:0', 'the tree\'s own function is handed nothing: ' .. vim.inspect(h)) end
 end)
 
+-- (CART-1868: a HANDLER the walk runs — an operator's, a store's __newindex, `#`'s __len, a generic for's iterator — had
+-- no site, or inside a call's arguments that call's: `ext.g(t + x)` handed x to __add's handler AT ext.g's call, and a
+-- contract on ext.g governed it. Each is keyed at its operator token; a closed function's instance names its calls too)
+test('flowtype: a handler the walk runs names its own access as the hand-out site (CART-1868)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local mt = { __add = ext.add, __newindex = ext.set, __len = ext.len }',
+        'local t, u, v, w, x = setmetatable({}, mt), {}, {}, {}, {}',
+        'local s = t + u',
+        't.k = v',
+        't[1] = w',
+        'local n = #t',
+        'function t.fn() end',
+        'for _ in ext.iter, t do end',
+        'ext.g(t + x)',
+        'local function it(st, c) require("notintree").h(st); return nil end',
+        'for _ in it, {} do end',
+        'setmetatable(_G, { __newindex = ext.gset })',
+        'gy = {}' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false })
+    local Rc = flowtype.solve(store, { open = false, contracts = { { id = 'g', site = 'm.lua:9:0', clauses = { 'no-write' }, src = 'test' } } })
+    vim.fn.delete(root, 'rf')
+    local function has(R_, kind, site, label)
+        for _, h in ipairs(R_.handouts) do
+            if h.kind == kind and h.site == site and vim.tbl_contains(h.held, label) then return true end
+        end
+        return false
+    end
+    local dump = vim.inspect(R.handouts)
+    ok(has(R, 'call', 'm.lua:3:12', 'tbl:m.lua:2:44'), 'u, handed to __add: at the `+`: ' .. dump)
+    ok(has(R, 'call', 'm.lua:4:2', 'tbl:m.lua:2:48'), 'v, handed to __newindex: at the field stored: ' .. dump)
+    ok(has(R, 'call', 'm.lua:5:1', 'tbl:m.lua:2:52'), 'w, through a computed key: at the `[`: ' .. dump)
+    ok(has(R, 'call', 'm.lua:6:10', 'tbl:m.lua:2:35'), 't, handed to __len: at the `#`: ' .. dump)
+    ok(has(R, 'call', 'm.lua:7:11', 'm.lua::t.fn@7'), 'a function declared into t: at its name: ' .. dump)
+    ok(has(R, 'call', 'm.lua:8:6', 'tbl:m.lua:2:35'), 'a generic for over unknown code\'s iterator: at the `in`: ' .. dump)
+    ok(has(R, 'call', 'm.lua:9:8', 'tbl:m.lua:2:56') and not has(R, 'call', 'm.lua:9:0', 'tbl:m.lua:2:56'),
+        'x, handed to __add inside ext.g\'s arguments: at the `+`, not at ext.g\'s call: ' .. dump)
+    ok(has(R, 'call', 'm.lua:10:25', 'tbl:m.lua:11:13'), 'a closed iterator\'s instance names its call: ' .. dump)
+    ok(has(R, 'call', 'm.lua:13:0', 'tbl:m.lua:13:5'), 'a global stored through _G\'s __newindex: at its name: ' .. dump)
+    for _, h in ipairs(R.handouts) do
+        if not h.site then ok(#h.held == 1 and h.held[1] == 'external', 'site-less: unknown code calling back alone: ' .. vim.inspect(h)) end
+    end
+    -- (a contract on ext.g's call governs what ext.g is handed — not what __add's handler is)
+    ok(not has(Rc, 'contract:g', 'm.lua:9:0', 'tbl:m.lua:2:56') and has(Rc, 'call', 'm.lua:9:8', 'tbl:m.lua:2:56'),
+        'x stays unknown code\'s at the `+`: ' .. vim.inspect(Rc.handouts))
+end)
+
 -- (CART-1860: the entry-points report's attribution — a partial answer's taint walked back to its seed, and the seed's
 -- object to the hand-out that let it go: the call that handed it to unknown code, the lost builtin that took it. The
 -- seeds had ended at a reason string, which names no site)
