@@ -7,9 +7,11 @@
 -- Contracts come from the scoped key `entry_contracts` (config.lua) and, to TRY some before declaring them, from
 -- `contracts` = a Lua file returning a list of records (applied to the whole tree).
 -- An answer stands on EVERY contract of a site its objects were handed at (one handed to lpeg and to ext.g needs both):
--- the taint is overdetermined (flowpath FLOW-0123), so one contract alone can win nothing. (Until CART-1870 it also
--- stood on contracts far from it: unknown code's value escaped — through a saturated port, a callback returning it —
--- every call on unknown code was lost too, and a site contract's call handed its arguments over all the same.)
+-- the taint is overdetermined (flowpath FLOW-0123), so one contract alone can win nothing.
+-- ⚠ A SITE CONTRACT DOES NOT HOLD AT A LOST CALL: a call whose callee port is tainted hands its arguments to every escaped
+-- function whatever its contract says (the hand-out `lost-call:*` beside `contract:<id>`). On self that is every call
+-- on unknown code (1,995 sites): the callee reads a field of a handed object, or unknown code's own `[]` port past CAP
+-- (CART-1871). CART-1870 removed one source, unknown code's value escaping; corpus rows did not move.
 -- params: mode = closed | open (default closed), contracts = a file, top = rows in the value (default 30).
 -- CLAIM: the solve ran; the value is the ledger.
 
