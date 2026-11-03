@@ -3571,6 +3571,7 @@ test('flowtype: an entry contract makes whole what unknown code was handed, and 
     eq(R.verdict(call('holder:m')), nil, 'a member that may be lpeg\'s value is an unknown target')
     ok(R.verdict(call('v.k:p')).partial, 'jit.util has no contract: v.k:p stays partial')
     eq(R.assumes(call('v.k:p')), nil, 'a partial answer cites nothing')
+    for _, cc in ipairs(store.data.calls) do eq(R.costs(cc), nil, 'under CAP no contract here costs an answer: ' .. tostring(callrec.full(cc))) end
     -- (no-callback both ways: lpeg may call cb with unknown arguments unless its contract says it does not)
     eq(R.verdict(call('q:z')) and R.verdict(call('q:z')).kind, 'exact', 'no-callback: cb is called only by the tree')
     eq(Rcb.verdict(call('q:z')), nil, 'no-write alone: lpeg calls cb, q may be unknown code\'s value')
@@ -3604,6 +3605,83 @@ test('flowtype: an entry contract makes whole what unknown code was handed, and 
     refused({ id = 'x', module = 'lpeg', site = 'm.lua:1:0', clauses = { 'no-write' }, src = 's' }, 'exactly one of')
     refused({ id = 'x', module = 'lpeg', clauses = { 'no-write' }, src = 's', dir = 'produce' }, 'unknown field "dir"')
     vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1875: WHAT A CONTRACT COSTS. Past CAP a contract moves saturation both ways (CART-1874): the unknown-code hub
+-- holds what unknown code is handed — 5 functions here, past CAP 4. lpeg's no-callback contract keeps its 3 off it,
+-- the hub falls under CAP, and unknown code now calls s's setter with EXT: `s.k:m()`, partial without the contract, has
+-- no verdict under it. R.costs lists it under the contract — beside R.assumes, from the same drop-one solves)
+test('flowtype: an answer less known under a contract than without it lists the contract it costs (CART-1875)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local lpeg = require("lpeg")',
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local s = { k = setmetatable({}, { __index = A }) }',
+        'ext.h(function (q) s.k = q end)',
+        'lpeg.Cmt(function () return 1 end)',
+        'lpeg.Cmt(function () return 2 end)',
+        'lpeg.Cmt(function () return 3 end)',
+        'ext.h(function () return 4 end)',
+        'local function use() return s.k:m() end',
+        'local t = { k = setmetatable({}, { __index = B }) }',
+        'lpeg.match(t)',
+        'local function use2() return t.k:m() end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local LPEG = { id = 'lpeg-reads', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'the lpeg manual' }
+    local cap = flowtype.CAP
+    flowtype.CAP = 4 -- (R.costs solves again on its first call: the cap holds until then)
+    local okk, err = pcall(function ()
+        local R0 = flowtype.solve(store, { open = false })
+        local R = flowtype.solve(store, { open = false, contracts = { LPEG } })
+        local v0 = R0.verdict(call('s.k:m'))
+        ok(v0 and v0.partial and v0.kind == 'exact', 'without the contract the hub is past CAP: s.k:m partial ' .. vim.inspect(v0))
+        eq(R.verdict(call('s.k:m')), nil, 'under it the hub is not, and unknown code calls the setter with EXT')
+        eq(R.costs(call('s.k:m')), { 'lpeg-reads' }, 'the answer it lost is listed under the contract')
+        eq(R.assumes(call('s.k:m')), nil, 'and stands on nothing')
+        local v = R.verdict(call('t.k:m'))
+        ok(v and not v.partial, 'what was handed only to lpeg is whole under its contract ' .. vim.inspect(v))
+        eq(R.assumes(call('t.k:m')), { 'lpeg-reads' }, 'and stands on it')
+        eq(R.costs(call('t.k:m')), nil, 'an answer the contract made whole is no cost')
+        eq(R0.costs(call('s.k:m')), nil, 'no contract, no cost')
+    end)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(okk, err)
+    -- (a WHOLE answer it costs: under the contract the hub calls `keep` with EXT, `keep`'s parameter — 4 tables and EXT
+    -- — passes CAP 4 and escapes x: x.k:m, whole without the contract, is partial under it)
+    root = tree({ ['m.lua'] = table.concat({
+        'local lpeg = require("lpeg")',
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'lpeg.Cmt(function () return 1 end)',
+        'lpeg.Cmt(function () return 2 end)',
+        'lpeg.Cmt(function () return 3 end)',
+        'ext.h(function () return 4 end)',
+        'local function keep(q) local y = q end',
+        'local x = { k = setmetatable({}, { __index = A }) }',
+        'keep(x); keep({}); keep({}); keep({})',
+        'ext.h(keep)',
+        'local function use() return x.k:m() end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    flowtype.CAP = 4
+    okk, err = pcall(function ()
+        local R0 = flowtype.solve(store, { open = false })
+        local R = flowtype.solve(store, { open = false, contracts = { LPEG } })
+        local v0, v = R0.verdict(call('x.k:m')), R.verdict(call('x.k:m'))
+        ok(v0 and not v0.partial, 'without the contract x.k:m is whole ' .. vim.inspect(v0))
+        ok(v and v.partial, 'under it x escaped through keep\'s saturated parameter: partial ' .. vim.inspect(v))
+        eq(R.costs(call('x.k:m')), { 'lpeg-reads' }, 'a whole answer made partial is a cost too')
+    end)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(okk, err)
 end)
 
 -- (CART-1861: the scoped key `entry_contracts` — a contract holds for the files of its scope only)

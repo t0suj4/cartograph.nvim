@@ -144,12 +144,16 @@ end
 -- Where from: opts.contracts (the whole tree), and the scoped key `entry_contracts` (config.at by the file of the
 -- require or the site: the most specific scope's list). What a contract does not say stays unknown — the call's
 -- result is EXT still (what it returns, CART-1867). R.contracts is the LEDGER (every contract in force, and where it
--- met the tree); R.cites(c) the contracts a whole answer STANDS ON (dropping one alone changes it).
+-- met the tree); R.assumes(c) the contracts a whole answer STANDS ON (dropping one alone changes it), R.costs(c) the
+-- contracts an answer is LESS KNOWN under (dropping one alone makes it more known: whole > partial > none).
 -- ⚠ PAST CAP A CONTRACT IS NOT ONLY SUPPRESSION (CART-1874): what it keeps from escaping changes which ports pass CAP,
--- both ways. On self, string.buffer's module contract saturates 348 ports and un-saturates 136: 10 partial answers lose
--- their verdict (a receiver saturated: unknown), 11 gain one, and with every site contracted as well one whole answer
--- turns partial (an object escaped through a newly saturated port). Site contracts made no answer worse on vr / self /
--- w3 (CART-1863), measured, not guaranteed. The ledger lists only what a contract makes whole (CART-1875).
+-- both ways — the unknown-code hub holds what unknown code is handed, and a contract that keeps one hand-out off it can
+-- keep it under CAP, so unknown code then calls the functions it holds with EXT. On self, string.buffer's module
+-- contract saturates 348 ports and un-saturates 136: 10 partial answers lose their verdict (a receiver saturated:
+-- unknown), 11 gain one, and with every site contracted as well one whole answer turns partial (an object escaped
+-- through a newly saturated port). R.costs lists a loss under a contract only where dropping THAT ONE alone undoes it
+-- (CART-1875): a loss two contracts cause together is under neither, as a gain is (FLOW-0123); and a partial GAIN
+-- (no verdict -> partial) is in neither list.
 M.CLAUSES = {
     ['no-write'] = 'writes no field of what it is handed, sets no metatable on it, keeps none of it',
     ['no-callback'] = 'calls no function it is handed',
@@ -6333,12 +6337,16 @@ end
 -- R.assumes(c) -> { contract id … } | nil: the entry contracts (CART-1861) a WHOLE answer stands on — dropping that one
 -- alone makes it partial, unknown, or another answer. EXACT, by leaving each met contract out and solving again with the
 -- caller's opts (a contract changes the solve, not only the taint: a callback it forbids would have been called with
--- EXT); the first call costs one solve per met contract, and nothing of them is kept but the citations
+-- EXT); the first call costs one solve per met contract, and nothing of them is kept but the citations.
+-- R.costs(c) -> { contract id … } | nil: from the same solves, the contracts a call's answer is LESS KNOWN under —
+-- dropping that one alone makes it more known (whole > partial > no verdict). Past CAP a contract moves saturation both
+-- ways, and this is what it took (CART-1875, CART-1874)
 local function cites(R, store, opts)
-    local CI
-    function R.assumes(c)
+    local CI, CO
+    local function rank(v) return not v and 0 or v.partial and 1 or 2 end
+    local function run()
         if not CI then
-            CI = {}
+            CI, CO = {}, {}
             local function same(a, b)
                 if not b or b.partial or a.kind ~= b.kind or a.type ~= b.type then return false end
                 return table.concat(a.targets or NOTHING, '\0') == table.concat(b.targets or NOTHING, '\0')
@@ -6352,17 +6360,23 @@ local function cites(R, store, opts)
                     o2.drop_contracts = d
                     local R2 = build(store, o2)
                     for _, cc in ipairs(store.data.calls) do
-                        local v = R.verdict(cc)
-                        if v and not v.partial and v.kind ~= 'unknown' and not same(v, R2.verdict(cc)) then
+                        local v, v2 = R.verdict(cc), R2.verdict(cc)
+                        if v and not v.partial and v.kind ~= 'unknown' and not same(v, v2) then
                             local t = CI[cc]; if not t then t = {}; CI[cc] = t end
+                            t[#t + 1] = e.id
+                        end
+                        -- (every call, an answer without a verdict too: what a contract costs is mostly that)
+                        if rank(v) < rank(v2) then
+                            local t = CO[cc]; if not t then t = {}; CO[cc] = t end
                             t[#t + 1] = e.id
                         end
                     end
                 end
             end
         end
-        return CI[c]
     end
+    function R.assumes(c) run(); return CI[c] end
+    function R.costs(c) run(); return CO[c] end
     return R
 end
 
