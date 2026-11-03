@@ -145,6 +145,11 @@ end
 -- require or the site: the most specific scope's list). What a contract does not say stays unknown — the call's
 -- result is EXT still (what it returns, CART-1867). R.contracts is the LEDGER (every contract in force, and where it
 -- met the tree); R.cites(c) the contracts a whole answer STANDS ON (dropping one alone changes it).
+-- ⚠ PAST CAP A CONTRACT IS NOT ONLY SUPPRESSION (CART-1874): what it keeps from escaping changes which ports pass CAP,
+-- both ways. On self, string.buffer's module contract saturates 348 ports and un-saturates 136: 10 partial answers lose
+-- their verdict (a receiver saturated: unknown), 11 gain one, and with every site contracted as well one whole answer
+-- turns partial (an object escaped through a newly saturated port). Site contracts made no answer worse on vr / self /
+-- w3 (CART-1863), measured, not guaranteed. The ledger lists only what a contract makes whole (CART-1875).
 M.CLAUSES = {
     ['no-write'] = 'writes no field of what it is handed, sets no metatable on it, keeps none of it',
     ['no-callback'] = 'calls no function it is handed',

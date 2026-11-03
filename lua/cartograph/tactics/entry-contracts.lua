@@ -14,6 +14,8 @@
 -- contract lapses there. ⚠ What it can win on self: contracting all 4,410 unknown-code sites wins 1 answer, all 42,770
 -- hand-out sites 77 (1,271 -> 1,194 partial) — most partiality is the analysis's own (saturation, sinf), which no
 -- contract reaches.
+-- ⚠ ONLY GAINS ARE LISTED: past CAP a contract also moves saturation (CART-1874), and an answer it makes LESS known is
+-- in no column here — self's string.buffer module contract turns 10 partial answers unknown (CART-1875).
 -- params: mode = closed | open (default closed), contracts = a file, top = rows in the value (default 30).
 -- CLAIM: the solve ran; the value is the ledger.
 
