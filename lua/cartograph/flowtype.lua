@@ -147,9 +147,10 @@ end
 -- met the tree); R.assumes(c) the contracts a whole answer STANDS ON (dropping one alone changes it), R.costs(c) the
 -- contracts an answer is LESS KNOWN under (dropping one alone makes it more known: whole > partial > none).
 -- ⚠ PAST CAP A CONTRACT IS NOT ONLY SUPPRESSION (CART-1874): what it keeps from escaping changes which ports pass CAP,
--- both ways — the unknown-code hub holds what unknown code is handed, and a contract that keeps one hand-out off it can
--- keep it under CAP, so unknown code then calls the functions it holds with EXT. On self, string.buffer's module
--- contract saturates 348 ports and un-saturates 136: 10 partial answers lose their verdict (a receiver saturated:
+-- both ways. In the specs (CART-1875) it is the unknown-code hub: it holds what unknown code is handed, and a contract
+-- that keeps one hand-out off it can keep it under CAP, so unknown code then calls the functions it holds with EXT. Not
+-- on self: the hub is past CAP there with and without the contract, and how self's answers move is unmeasured
+-- (CART-1874). On self, string.buffer's module contract saturates 348 ports and un-saturates 136: 10 partial answers lose their verdict (a receiver saturated:
 -- unknown), 11 gain one, and with every site contracted as well one whole answer turns partial (an object escaped
 -- through a newly saturated port). R.costs lists a loss under a contract only where dropping THAT ONE alone undoes it
 -- (CART-1875): a loss two contracts cause together is under neither, as a gain is (FLOW-0123); and a partial GAIN
