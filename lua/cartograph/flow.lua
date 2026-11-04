@@ -285,7 +285,25 @@ M.ASSIGN_TOK = { ['='] = true, [':='] = true, ['+='] = true, ['-='] = true,
 local ASSIGN_TOK = M.ASSIGN_TOK
 local ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, augmented_assignment_expression = true,
-    variable_assignment = true }
+    variable_assignment = true,
+    -- ★ THE COMPOUND FORMS THAT HAVE A NODE TYPE OF THEIR OWN (CART-0433): python `a += b`, ruby `a += b`, rust
+    -- `a += b` — each one grammar's alone (language.inspect), each `{left, operator, right}`. Absent here, the target
+    -- was NEVER A DEF: `def={} use={a,b}`, so a loop accumulator had no definition and an earlier one flowed past it.
+    augmented_assignment = true, operator_assignment = true, compound_assignment_expr = true }
+-- ★ A COMPOUND ASSIGNMENT READS ITS TARGET (CART-0433). `a += b` is `a = a + b`, but the read rides on the OPERATOR,
+-- so no use-position `a` exists and the rmw rule (a use-position hit on a name already def'd) never fired: js / c /
+-- cpp / java / php / bash / zig recorded `def={a} use={b} rmw={}`. A target under a compound operator is def'd AND
+-- recorded in rmw — the slot the contract keeps for exactly this read (a def name is not also a use).
+local CMPD = {} -- the def-position value for a compound target: a def that is also read
+local function compound_op(node, src)
+    for _, c in tsutil.inext, node, -1 do
+        if not c:named() then
+            local tk = vim.treesitter.get_node_text(c, src)
+            if tk ~= '=' and tk ~= ':=' and ASSIGN_TOK[tk] then return true end
+        end
+    end
+    return false
+end
 local DECL = { init_declarator = true, variable_declarator = true }
 -- LEAF identifiers to count. NB `variable_name` (php `$x`) is a WRAPPER around
 -- an inner `name` — count the inner name only (df does), else `$x` AND `x`
@@ -453,7 +471,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         -- `unbraced_ch2`/`ch3`, which is exactly the intersection the grid exists for.
         local bodyc = (stop_body and ctrlset and ctrlset[t])
             and M.body_children(node, ctrlset, clauseset) or nil
-        local asgleft, decld, k, declist, rngskip, bindset, bindskip, flatskip
+        local asgleft, decld, k, declist, rngskip, bindset, bindskip, flatskip, cmpd
         local nsn = nskip and nskip[t] and node:field(nskip[t])[1]
         -- ★★ A DESTRUCTURING PATTERN DECIDES DEF-POSITION FOR ITS OWN CHILDREN (CART-0358),
         -- and it does so UNCONDITIONALLY — this branch is first, and it ignores the incoming
@@ -522,6 +540,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         elseif ASSIGN[t] then
             asgleft = node:field('left')[1] or node:field('name')[1] or node:child(0)
             k = 1
+            cmpd = compound_op(node, src)
         elseif DECL[t] then
             decld = node:field('declarator')[1] or node:field('name')[1]; k = 3
         elseif t == 'let_declaration' then
@@ -552,7 +571,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
             local past = false
             for _, c in tsutil.inext, node, -1 do
                 if not c:named() then
-                    if ASSIGN_TOK[txt(c, src)] then past = true end
+                    local tk = txt(c, src)
+                    if ASSIGN_TOK[tk] then past = true; if tk ~= '=' and tk ~= ':=' then cmpd = true end end
                 elseif past then
                     flatskip = flatskip or {}
                     flatskip[c:id()] = true
@@ -583,7 +603,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
             -- declaration def its name (init_declarator only exists WITH `=`).
             declist = node:field('declarator'); k = 7
         else
-            k = defpos and WRAP[t] or false
+            -- (a wrapper passes def-position on; a COMPOUND target's stays compound, CART-0433)
+            k = defpos and WRAP[t] and (defpos == CMPD and CMPD or true) or false
         end
         for _, c in tsutil.inamed, node, -1 do
             local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
@@ -624,10 +645,10 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
               if SUSPEND[ct] then sus = true end -- fused suspension detection
               local cdefpos
               if k == 10 then cdefpos = bindset[c:id()] or false -- pattern/import binder
-              elseif k == 1 then cdefpos = same(c, asgleft)
+              elseif k == 1 then cdefpos = same(c, asgleft) and (cmpd and CMPD or true)
               elseif k == 3 then cdefpos = same(c, decld)
-              elseif k == 4 then cdefpos = (ct == 'variable_list'
-                  or ct == 'identifier') and not (flatskip and flatskip[c:id()])
+              elseif k == 4 then cdefpos = ((ct == 'variable_list' or ct == 'identifier')
+                  and not (flatskip and flatskip[c:id()])) and (cmpd and CMPD or true) or false
               elseif k == 5 then cdefpos = (ct == 'variable_name')
               elseif k == 6 then cdefpos = (ct == 'variable_name')
               elseif k == 7 then
@@ -642,6 +663,10 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
                   local nm = txt(c, src)
                   if cdefpos then
                       if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
+                      -- a COMPOUND target is read too (`a += b`): the read half, in rmw (CART-0433)
+                      if cdefpos == CMPD and not rmwseen[nm] and not useen[nm] then
+                          rmwseen[nm] = true; rmw[#rmw + 1] = nm
+                      end
                   elseif dseen[nm] then
                       -- use-position but ALREADY a def in this statement = a
                       -- read-modify-write (`a = a + …`). The df contract drops it

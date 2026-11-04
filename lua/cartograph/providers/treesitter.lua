@@ -6011,7 +6011,11 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             if nt == 'assignment_statement' or nt == 'assignment'
                 or nt == 'assignment_expression'
                 or nt == 'augmented_assignment_expression'
-                or nt == 'variable_assignment' then -- bash x=… (name field)
+                or nt == 'variable_assignment' -- bash x=… (name field)
+                -- python / ruby / rust COMPOUND assignment (`a += b`): its target is a DEF too — flow's du got this in
+                -- CART-0433, and this independent builder must say the same or dfparity reads the fix as a mismatch
+                or nt == 'augmented_assignment' or nt == 'operator_assignment'
+                or nt == 'compound_assignment_expr' then
                 asgleft = n:field('left')[1] or n:field('name')[1]
                     or n:child(0)
                 dfk = 1

@@ -172,8 +172,9 @@ M.EXPECTED = {
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
     -- misses (flow-over-collects), df leaks closure names (df-over-collects),
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
+    -- (recalib 2026-11-04, v280 CART-0433: flow-over-collects 1988 -> 1987 — a compound target now def'd on both sides)
     rust = { ['binding-as-use'] = 363, ['df-over-collects'] = 1980,
-        ['flow-over-collects'] = 1988 },
+        ['flow-over-collects'] = 1987 },
     python = { ['df-over-collects'] = 4, ['flow-over-collects'] = 1 }, -- closure-leak/dedup, + ONE js file (django-oscar ships oscar/ui.js): `for (var level in …)` now DEFS `level`
     -- recalib 2026-08-07 (CART-0308, flow's nested-fn stop became per-language):
     -- 0 -> 2, both at active_support/deprecation/constant_accessor.rb:9 and both the
@@ -208,7 +209,7 @@ M.EXPECTED = {
     -- is to read the sample. flow-over-collects / partition-mismatch / line-skew are all
     -- UNMOVED, so the single mover stays attributable — which is why the `for..in` binder
     -- (CART-0393) and the loop modifiers (CART-0394) were filed rather than folded in here.
-    ruby = { ['df-over-collects'] = 59, ['flow-over-collects'] = 48, ['line-skew'] = 22, ['partition-mismatch'] = 5 }, -- recalib 2026-08-15 (v135 UNBRACED BODY, CART-0414): a ruby
+    ruby = { ['df-over-collects'] = 59, ['flow-over-collects'] = 52, ['line-skew'] = 22, ['partition-mismatch'] = 5 }, -- recalib 2026-11-04 (v280, CART-0433): +4 flow-over-collects, all `x += k unless c` — the modifier head (CART-1889) reads its condition's x as its own row, while the legacy df folds the statement and its shadow rule drops a use of a name the statement now DEFINES. Same class as before, four more instances of it. Prior: -- recalib 2026-08-15 (v135 UNBRACED BODY, CART-0414): a ruby
     -- MODIFIER (`x unless c`) has a `body` field, so the head's du walk now stops
     -- there — which also removed a DOUBLE EMISSION of any block attached to the
     -- modified statement (rows 7745->7734, every dropped row a duplicate). The

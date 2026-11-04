@@ -390,9 +390,10 @@ M.EXPECTED = {
     -- declaration MODIFIER with no initialiser (`static String str;`). No new class either.
     -- (re-pinned 2026-11-04: STALE ON STOCK — 1379 -> 1364, nine classes moved since August, none by CART-0404's
     -- expr change, which reads cpp identically before and after; the bash-shaped classes are gone from this corpus)
-    cpp = { total = 1364, ['missing:preproc_def'] = 855, ['missing:declaration'] = 469,
-        ['missing:preproc_function_def'] = 22, ['binder:if_statement'] = 6, ['binder:compound_statement'] = 5,
-        ['binder:for_statement'] = 2, ['missing:expression_statement'] = 2, ['binder:declaration'] = 1,
+    -- (CART-0433, 2026-11-04: a compound target is read on both sides — 1364 -> 1361, every move a fall)
+    cpp = { total = 1361, ['missing:preproc_def'] = 855, ['missing:declaration'] = 469,
+        ['missing:preproc_function_def'] = 22, ['binder:if_statement'] = 6, ['binder:compound_statement'] = 3,
+        ['binder:for_statement'] = 1, ['missing:expression_statement'] = 2, ['binder:declaration'] = 1,
         ['binder:pipeline'] = 1, ['missing:if_statement'] = 1 },
     -- ★ pinned from the FINAL state, not a mid-arc reading: my first attempt wrote 41,
     -- measured after the reference-declarator fix and BEFORE the modifier one, and the pin
@@ -424,7 +425,8 @@ M.EXPECTED = {
     -- every .hs subject is refused, no haskell expression spec — so the matrix reads `--` below COVERAGE_FLOOR and
     -- this zero is never compared. Kept as the recorded number, not as a gate)
     haskell = { total = 0 },
-    jquery = { total = 22, ['binder:expression_statement'] = 18, ['binder:variable_declaration'] = 3,
+    -- (CART-0433: `i += 1`-shaped rows no longer read as binders — 22 -> 7)
+    jquery = { total = 7, ['binder:expression_statement'] = 5, ['binder:variable_declaration'] = 1,
         ['missing:if_statement'] = 1 },
     -- recalib @ CART-0405 (the ruby grid's findings, applied everywhere): 975 -> 305.
     -- extra:try_with_resources_statement 670 -> 0. flow blanks a TRY head's def/use since
@@ -432,14 +434,15 @@ M.EXPECTED = {
     -- it does now, by MIRRORING flow's rule rather than re-deriving it. The same change also
     -- cleared the head's `rmw`, which the blanking had left behind — a row's read census is
     -- `use u rmw`, so half the names survived a zeroing that meant to remove all of them.
-    libs = { total = 205, ['missing:declaration'] = 133, ['binder:class_declaration'] = 21,
+    -- (CART-0433: 205 -> 204, binder:for_statement 2 -> 1)
+    libs = { total = 204, ['missing:declaration'] = 133, ['binder:class_declaration'] = 21,
         ['missing:local_variable_declaration'] = 16, ['binder:return_statement'] = 13,
         ['binder:block'] = 6, ['missing:match_arm'] = 5,
         ['binder:local_variable_declaration'] = 3, ['binder:call_expression'] = 2,
-        ['binder:for_statement'] = 2, ['extra:match_block'] = 2,
+        ['binder:for_statement'] = 1, ['extra:match_block'] = 2,
         ['extra:match_expression'] = 2 },
-    mootools = { total = 17, ['binder:expression_statement'] = 13, ['binder:for_statement'] = 2,
-        ['binder:sequence_expression'] = 1, ['binder:variable_declaration'] = 1 },
+    -- (CART-0433: 17 -> 1 — the compound-assignment binders were all of it but one for_statement)
+    mootools = { total = 1, ['binder:for_statement'] = 1 },
     nio = { total = 34, ['missing:return_statement'] = 15, ['missing:variable_declaration'] = 9,
         ['missing:assignment_statement'] = 6, ['missing:function_call'] = 4 },
     -- ★★ FIRST PIN EVER (CART-0423). odin could not be censused at ALL until the per-file
@@ -475,8 +478,8 @@ M.EXPECTED = {
     -- was made for bash and every interpolating language gained from it, which is the tell
     -- that it is a rule and not a bash shim.
     -- python 7 -> 4: an f-string's `interpolation` kid now yields its reads.
-    python = { total = 4, ['binder:expression_statement'] = 3,
-        ['missing:subscript'] = 1 },
+    -- (CART-0433: `x += …` defs x now, on both sides — 4 -> 1)
+    python = { total = 1, ['missing:subscript'] = 1 },
     -- recalib @ CART-0405: as ruby.
     -- rails 463 -> 32, the largest fall of any corpus here: ruby interpolation is
     -- everywhere in a rails app, and `missing:string` 83 -> 0 took `assignment` and `call`

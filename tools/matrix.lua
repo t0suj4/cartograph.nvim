@@ -350,7 +350,7 @@ local function run_row(name)
             local dist = ec.distinct(r.instances)
             parse = r.parse
             local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods,
-                ec.census_distinct(r.cats, dist)), ec.coverage(r) }
+                ec.census_distinct(r.cats, dist)), (ec.coverage(r)) } -- (one value: coverage also returns the ratio)
             if ec.EXPECTED[name] then
                 local diffs = ec.diff(r.cats, ec.EXPECTED[name])
                 for _, l in ipairs(diffs) do d[#d + 1] = l end

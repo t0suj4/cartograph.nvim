@@ -745,6 +745,7 @@ local ASSIGN = { assignment_statement = true, assignment = true,
 -- (CART-0316).
 local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, variable_assignment = true }
+local compound_tok -- (defined beside assign_sides below; forward-declared because build() reads it first, CART-0433)
 -- erlang (CART-0957), tabled because this module's @langs does not include it:
 --   PATMATCH  `Pat = Expr`: the pattern side BINDS (flow.pattern_names, the rule du uses), the value side reads
 --   RECFIELD  `X#rec.f`: a field read that also names its record
@@ -1330,7 +1331,7 @@ function build_core(node, src, lang)
     -- it keeps falling through to `?`, where both kids are read — which is correct there.
     -- `kids` is carried for the same reason `pair` carries it: kids-walkers keep seeing
     -- both halves, so a consumer that has never heard of this kind loses nothing.
-    if PLAIN_ASSIGN[t] then
+    if PLAIN_ASSIGN[t] and not compound_tok(node, src) then -- (compound: falls to `?`, both read — CART-0433)
         local o = operands(node)
         local tgt = node:field('left')[1] or o[1]
         local val = node:field('right')[1] or o[2]
@@ -1420,6 +1421,19 @@ M.build = build
 local ASSIGN_OP = setmetatable({}, { __index = function (_, k)
     return require('cartograph.flow').ASSIGN_TOK[k]
 end })
+-- ★ A COMPOUND OPERATOR ON A PLAIN ASSIGNMENT NODE (CART-0433): c / cpp / java spell `a += b` as the same
+-- `assignment_expression` as `a = b`, bash as the same `variable_assignment`, zig as the same flat declaration — the
+-- operator token is the only difference, and a compound one READS its target. flow's du records that read in rmw;
+-- the IR must read it too, or the gate reports `missing={a}` on every accumulator. Same token table as du (flow's).
+function compound_tok(node, src)
+    for _, c in tsutil.inext, node, -1 do
+        if not c:named() then
+            local tk = vim.treesitter.get_node_text(c, src)
+            if tk ~= '=' and tk ~= ':=' and ASSIGN_OP[tk] then return true end
+        end
+    end
+    return false
+end
 local function assign_sides(node, src)
     local left = node:field('left')[1]
     local right = node:field('right')[1] or node:field('value')[1]
@@ -1675,6 +1689,7 @@ function M.harvest_row(node, src, hint, lang)
             end
         end
         for _, c in tsutil.inext, node, -1 do
+            -- (a COMPOUND one unwraps too: the ASSIGN branch below keeps its target as a write AND a read, CART-0433)
             if c:named() and PLAIN_ASSIGN[c:type()] then
                 return M.harvest_row(c, src, nil, lang)
             end
@@ -1794,10 +1809,11 @@ function M.harvest_row(node, src, hint, lang)
             -- rows it broke were not the rows it fixed, so the TOTAL barely moved (4 -> 4)
             -- while every row underneath it changed: a count that holds still is not a count
             -- that means nothing changed.
-            local before, after, past = {}, {}, false
+            local before, after, past, cmp = {}, {}, false, false
             for _, c in tsutil.inext, node, -1 do
                 if not c:named() then
-                    if ASSIGN_OP[vim.treesitter.get_node_text(c, src)] then past = true end
+                    local tk = vim.treesitter.get_node_text(c, src)
+                    if ASSIGN_OP[tk] then past = true; if tk ~= '=' and tk ~= ':=' then cmp = true end end
                 elseif not tsutil.is_comment(c) then
                     local into = past and after or before
                     into[#into + 1] = c
@@ -1823,6 +1839,12 @@ function M.harvest_row(node, src, hint, lang)
                 end
                 for _, tn in ipairs(after) do
                     if not tys[tn:id()] then frhs[#frhs + 1] = build(tn, src, lang) end
+                end
+                -- a COMPOUND operator reads its target too (`extra_index += items.len`, CART-0433)
+                if cmp then
+                    for _, tn in ipairs(before) do
+                        if not tys[tn:id()] then frhs[#frhs + 1] = build(tn, src, lang) end
+                    end
                 end
                 if #flhs > 0 then return { lhs = flhs, rhs = frhs } end
             end
@@ -1894,7 +1916,11 @@ function M.harvest_row(node, src, hint, lang)
                     .pattern_binders(tn, abindf, abids)
                 for _, x in ipairs(bn) do lhs[#lhs + 1] = build_binder(x, src, lang) end
                 for _, x in ipairs(br) do rhs[#rhs + 1] = build(x, src, lang) end
-            else lhs[#lhs + 1] = build(tn, src, lang) end
+            else
+                lhs[#lhs + 1] = build(tn, src, lang)
+                -- a COMPOUND operator reads its target too (bash `a+=x`, CART-0433)
+                if compound_tok(node, src) then rhs[#rhs + 1] = build(tn, src, lang) end
+            end
             ::nexttarget::
         end
         for _, vn in ipairs(rpos or list_children(right)) do rhs[#rhs + 1] = build(vn, src, lang) end
