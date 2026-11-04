@@ -5135,6 +5135,9 @@ local SUBSTMT_BLOCKS = {
     -- method beside it worked.
     constructor_body = true, enum_body = true, interface_body = true,
     annotation_type_body = true,
+    -- rust's enum body (CART-0464): the same shape as java's enum_body, rust's alone across the 45 grammars. Without
+    -- it an enum descended into nothing — ripgrep 14 traps, and a struct-like variant's fields behind them.
+    enum_variant_list = true,
 }
 -- A block whose children belong to the ENCLOSING list rather than to a row of their own:
 -- java's enum_body holds `enum_body_declarations` beside its constants, and that node is

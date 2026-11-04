@@ -403,6 +403,20 @@ test('forms: java constructor, enum, interface and annotation bodies open', func
     eq({ 'String v();' }, forms(6))                    -- annotation_type_body
 end)
 
+-- rust's ENUM had no route in (CART-0464): its variants sit in an `enum_variant_list`, a body spelling no table knew —
+-- the same shape java's enum_body was (CART-0459). navcensus, ripgrep/crates: `enum_item ! enum_variant_list` 14
+-- traps, and a struct-like variant's fields (`field_declaration_list > field_declaration`) were trapped behind it.
+test('forms: a rust enum opens to its variants', function ()
+    if not has_parser('rust') then skip 'no rust parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local src = 'enum E {\n    A,\n    B(u8),\n    C { x: u8 },\n}\n'
+    local fd = assert(io.open(root .. '/e.rs', 'w')); fd:write(src); fd:close()
+    local out = {}
+    for _, f in ipairs(ts.forms(root .. '/e.rs', 0)) do out[#out + 1] = f.text:gsub('%s+$', '') end
+    vim.fn.delete(root, 'rf')
+    eq({ 'A', 'B(u8)', 'C { x: u8 }' }, out)
+end)
+
 -- zig was the worst language in the navigation census — 9491 trapped statements in
 -- 40 files of ~/git/zig/src, 33 causes (CART-0463) — and the reason is grammatical:
 -- it wraps a body TWICE (`if_statement > block_expression > block`), hangs a label
