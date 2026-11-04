@@ -542,6 +542,11 @@ local function build(store, opts)
     -- prototype that escaped with it: R.escape_of)
     local ESCAT = (opts.explain or opts.dump) and {} or nil -- (and the dump's answers: pesc / pescvia, CART-1824)
     G7.ESCREL = ESCAT and {} or nil -- (an object escmore released: the tainted port whose rule did — not a saturation, CART-1824)
+    -- (opts.explain: where UNKNOWN CODE'S VALUE first arrived at each port, CART-1867 — G7.XARR[x][p] for x = EXT and each
+    -- module contract's own: the port it came from (G7.ESRC, set around every delivery), a ROOT record { kind, … } where
+    -- the solve made it (a call of unknown code, a require or load, a dynamic _G[k] read, …), false where neither was
+    -- known — R.stats.xnosrc counts those, a delivery path the recorder does not cover)
+    G7.XARR = opts.explain and {} or nil
     local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
@@ -623,6 +628,7 @@ local function build(store, opts)
             if n > BIG then tobits(p) end
         end
         if G7.TR and G7.TSRC then G7.trbump(G7.TSRC, p, G7.TKIND) end
+        if G7.XARR then local xr = G7.XARR[o]; if xr and xr[p] == nil then xr[p] = G7.ESRC or false end end
         if n > M.CAP and G7.capped(p) then return settop(p) end
         -- (a port's pending delta as its objects are: ONE object is the number itself, more a list, many a bitset — most
         -- deltas hold one object, and a list per port per round was the allocation census's top site, 1.3 M per run)
@@ -635,6 +641,10 @@ local function build(store, opts)
             if #d > BIG then dbits(p) end
         end
         push(p)
+    end
+    function G7.eroot(p, o, root) -- (o delivered into p by the solve itself: a root of its arrival, CART-1867)
+        if not G7.XARR then return addobj(p, o) end
+        local es = G7.ESRC; G7.ESRC = root; addobj(p, o); G7.ESRC = es
     end
     -- the bitset d into q: word by word, what was new becomes q's delta
     local function addbits(q, d)
@@ -661,6 +671,7 @@ local function build(store, opts)
             end
         end
         if added > 0 then
+            if G7.XARR then for x, xr in pairs(G7.XARR) do if xr[q] == nil and bs_test(d, x) then xr[q] = G7.ESRC or false end end end
             cnt[q] = (cnt[q] or 0) + added
             if cnt[q] > M.CAP and G7.capped(q) then return settop(q) end
             push(q)
@@ -806,10 +817,12 @@ local function build(store, opts)
         end
         if top[a] then if spread then settop(b) end; return end
         local sa = pts[a]
-        local ts, tk = G7.TSRC, G7.TKIND
+        local ts, tk, es = G7.TSRC, G7.TKIND, G7.ESRC
         if G7.TR then G7.TSRC, G7.TKIND = a, 'edge' end
+        if G7.XARR then G7.ESRC = a end
         if type(sa) == 'table' and sa.bs then addbits(b, sa) else for o in each(a) do addobj(b, o) end end
         if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
+        if G7.XARR then G7.ESRC = es end
     end
     local function ofp(o, f)
         local m = ofield[o]
@@ -895,7 +908,7 @@ local function build(store, opts)
         if f:byte(1) == 1 then return end
         info.kids = info.kids or {}
         if info.kids[f] ~= nil then return end
-        if info.d >= 3 then info.kids[f] = false; addobj(ofp(o, f), G7.EXT); return end
+        if info.d >= 3 then info.kids[f] = false; G7.eroot(ofp(o, f), G7.EXT, { 'placeholder' }); return end
         local path = info.path .. ((f == '[]' or f == '{k}' or f == '#') and f or ('.' .. f))
         local c = G7.mkph({ param = info.param, call = info.call, k = info.k, path = path, d = info.d + 1, label = info.label .. path })
         info.kids[f] = c
@@ -910,10 +923,12 @@ local function build(store, opts)
         -- registered on it (parked) and the list's ⊤ marker takes what it gains later
         if G7.TOPL and top[dst] and not G7.owntop(dst) then if G7.FEDTOP[q] then return end; G7.FEDTOP[q] = true end
         local sq = pts[q]
-        local ts, tk = G7.TSRC, G7.TKIND
+        local ts, tk, es = G7.TSRC, G7.TKIND, G7.ESRC
         if G7.TR then G7.TSRC, G7.TKIND = q, 'load' end
+        if G7.XARR then G7.ESRC = q end
         if type(sq) == 'table' and sq.bs then addbits(dst, sq) else for x in each(q) do addobj(dst, x) end end
         if G7.TR then G7.TSRC, G7.TKIND = ts, tk end
+        if G7.XARR then G7.ESRC = es end
     end
     local function load_obj(o, f, dst, seen, strict, via)
         LOADV = LOADV + 1
@@ -928,7 +943,7 @@ local function build(store, opts)
         -- EXT's field ports hold only what the tree stored there, so `ext.f(t)` called nothing and t was never handed to
         -- unknown code — a later t.k answered a wrong whole exact. A STORE into it needs nothing more: its __newindex
         -- lookup reads EXT's `\1mt`, now EXT, and that call hands the value to unknown code)
-        if o == G7.EXT or G7.XC[o] then addobj(dst, o) end
+        if o == G7.EXT or G7.XC[o] then if via then G7.eroot(dst, o, { 'proto', via }) else addobj(dst, o) end end
         local tn = TNAME[o]
         if tn then
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
@@ -989,7 +1004,7 @@ local function build(store, opts)
                 -- (`_G[k]`, k unknown: what a dynamic-key write stored, and a global the HOST defines — EXT. Not every
                 -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
                 -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
-                pull(dst, ofp(o, '[]')); if G7.EXT then addobj(dst, G7.EXT) end
+                pull(dst, ofp(o, '[]')); if G7.EXT then G7.eroot(dst, G7.EXT, G7.XARR and { 'host-global', G7.XLOC }) end
             elseif f == '[]' then
                 local m = ofield[o]
                 local named = G7.PKGL and G7.PKGL[o] and G7.PKGNAMED
@@ -1065,7 +1080,9 @@ local function build(store, opts)
             loads[x] = i
         end
         if top[x] and spread then settop(dst) end
+        local es = G7.ESRC; if G7.XARR then G7.ESRC = x end
         for o in each(x) do load_obj(o, f, dst, nil, strict) end
+        G7.ESRC = es
         return dst
     end
     local function storec(x, f, v)
@@ -1136,7 +1153,9 @@ local function build(store, opts)
         local l = filters[a]
         if not l then l = {}; filters[a] = l end
         l[#l + 1] = { b, pred }
+        local es = G7.ESRC; if G7.XARR then G7.ESRC = a end
         for o in each(a) do if pred(o) then addobj(b, o) end end
+        G7.ESRC = es
     end
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
@@ -1212,8 +1231,9 @@ local function build(store, opts)
         if (o == G7.EXT or G7.XC[o]) and G7.EXTCALL then
             -- (calling UNKNOWN code: its results are unknown, what it is handed it may call or write — CART-1707. A
             -- module contract's EXT returns its own: what the module returns is its code too)
-            if type(res) == 'table' then for _, r in ipairs(res) do addobj(r, o) end elseif res then addobj(res, o) end
             local cs = G7.callsite(res)
+            local rt = G7.XARR and { 'call', cs } or nil
+            if type(res) == 'table' then for _, r in ipairs(res) do G7.eroot(r, o, rt) end elseif res then G7.eroot(res, o, rt) end
             local c = G7.XC[o] or G7.sitecon(cs)
             if c then -- (an entry CONTRACT, CART-1861: nothing it is handed escapes; a function among it is called, unless no-callback)
                 G7.cmet(c, cs or false)
@@ -1666,13 +1686,14 @@ local function build(store, opts)
     end
     local EXT = newobj('external')
     G7.EXT = EXT
+    if G7.XARR then G7.XARR[EXT] = {} end
     -- (ENTRY CONTRACTS, CART-1861 — M.contracts above. G7.XC: the EXT a MODULE contract's require returns, one per
     -- contract -> it; each is unknown code everywhere EXT is, apart from what its contract promises. Empty without a
     -- module contract: the solve is unchanged. G7.CMET: contract id -> { [site] = hand-outs } — where it met the tree)
     G7.CON, G7.XC, G7.XCOF, G7.CMET = M.contracts(store, opts), {}, {}, {}
     function G7.extc(c)
         local o = G7.XCOF[c.rec.id]
-        if not o then o = newobj('external:' .. c.rec.module); G7.XCOF[c.rec.id] = o; G7.XC[o] = c end
+        if not o then o = newobj('external:' .. c.rec.module); G7.XCOF[c.rec.id] = o; G7.XC[o] = c; if G7.XARR then G7.XARR[o] = {} end end
         G7.cmet(c, nil)
         return o
     end
@@ -1970,6 +1991,7 @@ local function build(store, opts)
             else
                 local d = delta[p]
                 delta[p] = nil
+                if G7.XARR then G7.ESRC = p end -- (what the loop delivers from p: its copies, readers, loads, filters)
                 if G7.RG and G7.RG[p] then G7.rgspread(p) end
                 if type(d) == 'table' and d.bs then
                     -- (a DENSE delta: the copy edges and the field's readers in bulk; the rest per object)
@@ -2061,6 +2083,7 @@ local function build(store, opts)
                 end
             end
         end
+        G7.ESRC = nil
     end
     local named = {}
     local function port(key)
@@ -2327,7 +2350,7 @@ local function build(store, opts)
     do
         local xa = new()
         G7.XA = xa
-        addobj(xa, EXT)
+        G7.eroot(xa, EXT, { 'callback' })
         G7.XRES = new()
         callc(G7.EXTCALL, { xa, xa, xa, xa, spread = 4 }, G7.XRES)
         -- (CART-1861: what a no-write contract's code is handed — the FUNCTIONS among it, which it may call with unknown
@@ -2980,7 +3003,7 @@ local function build(store, opts)
                 local xp = new()
                 if not (s0 and G7.profmod(txt(s0))) then
                     local c = s0 and G7.CON.at(file).mod[txt(s0)] -- (a MODULE contract: its own EXT, CART-1861)
-                    addobj(xp, c and G7.extc(c) or EXT)
+                    G7.eroot(xp, c and G7.extc(c) or EXT, G7.XARR and { 'require', key_of(n) })
                 end
                 return xp
             end
@@ -3052,7 +3075,7 @@ local function build(store, opts)
                     else G7.handout(fname, key_of(n), ap); edge(ap, G7.EXTCALL) end
                 end
                 local out = {}
-                for k = 1, want or 1 do out[k] = new(); addobj(out[k], EXT) end
+                for k = 1, want or 1 do out[k] = new(); G7.eroot(out[k], EXT, G7.XARR and { fname, key_of(n) }) end
                 if want then return out end
                 return out[1]
             end
@@ -3653,7 +3676,11 @@ local function build(store, opts)
                 local kname = keyname(knode)
                 if kname == '[]' and knode then G7.NEXTK = expr(knode) end
                 if kname ~= '[]' and kname ~= '#' and G7.MODFILE and G7.MODFILE[kname] and G7.ispkgloaded(n:field('table')[1], lookup, txt) then G7.pkgmodule(kname) end
-                return field(base, kname)
+                if not G7.XARR then return field(base, kname) end
+                local xl = G7.XLOC; G7.XLOC = key_of(n) -- (a dynamic _G[k] read's site, for its arrival of a host global, CART-1867)
+                local r = field(base, kname)
+                G7.XLOC = xl
+                return r
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); local c = n:field('content')[1]; G7.LITV[p] = c and txt(c) or ''; return p end -- (its text: CART-1820)
@@ -4451,7 +4478,7 @@ local function build(store, opts)
             for _, fp in sorted(ofield[o] or {}) do
                 for fo in each(fp) do
                     local fpp = fnports[fo]
-                    if fpp then for _, pp in ipairs(fpp.params) do addobj(pp, EXT) end end
+                    if fpp then for _, pp in ipairs(fpp.params) do G7.eroot(pp, EXT, { 'export' }) end end
                 end
             end
         end
@@ -5983,6 +6010,57 @@ local function build(store, opts)
             if ho then return { cause = ho[1], sites = { ho[1] .. ' ' .. (ho[2] or '-') }, at = tostring(obinfo[o] or o), why = why, dir = dir } end
             return { cause = G7.EROOTC[o] or why or '?', at = tostring(obinfo[o] or o), why = why }
         end
+        -- ★ AN UNKNOWN ANSWER'S ENTRY (CART-1867): a receiver that may hold unknown code's value — EXT, or a module
+        -- contract's own — gets no verdict and has no taint path. Its first arrival (G7.XARR) walked back to the ROOT the
+        -- solve made it at: `call` (unknown code returned it, at that call's site), `require` / `load` … (what a module
+        -- outside the tree or a loaded chunk is), `callback` (unknown code called a tree function back — the hand-outs of
+        -- that function), `host-global` (a dynamic _G[k] read), `export` (open: a caller outside the tree), `proto` (a
+        -- prototype that is unknown code), `placeholder`; or `saturated` (a receiver past CAP: the analysis's own loss).
+        -- -> { cause, root, sites = { 'kinds site' … } | nil, at = a label, dir = 'in' } | nil (an answer with a verdict).
+        -- First arrival, not cause, as R.entry_of (FLOW-0123)
+        local rcv, kat
+        local function sitekeys(st, k0)
+            if not kat then
+                kat = {}
+                for k, m in pairs(G7.HOSEEN) do for x in pairs(m) do if x then local t = kat[x]; if not t then t = {}; kat[x] = t end; t[k] = true end end end
+            end
+            return { xkey(st or '-', st and kat[st] or { [k0] = true }) }
+        end
+        R.unknown_of = function (c)
+            if not G7.XARR or verdicts[c] then return nil end
+            if not rcv then
+                rcv = {}
+                for _, pr in ipairs(probes) do local t = rcv[pr.c]; if not t then t = {}; rcv[pr.c] = t end; t[#t + 1] = pr.recv end
+            end
+            local rs = rcv[c]
+            if not rs then return nil end
+            for _, r in ipairs(rs) do if top[r] then return { cause = 'saturated', at = label(r) } end end
+            local xs = {}
+            for x in pairs(G7.XARR) do xs[#xs + 1] = x end
+            table.sort(xs)
+            for _, r in ipairs(rs) do
+                for _, x in ipairs(xs) do
+                    if has(r, x) then
+                        local m, q, prev, seen = G7.XARR[x], r, nil, {}
+                        while type(m[q]) == 'number' and not seen[q] do seen[q] = true; prev, q = q, m[q] end
+                        local w = m[q]
+                        if type(w) ~= 'table' then return { cause = '?', at = label(q) } end
+                        local k = w[1]
+                        if k == 'callback' then
+                            local fo = prev and ofport(prev)
+                            if not fo then return { cause = 'unknown-code', root = k, at = label(q), dir = 'in' } end
+                            local l, at = xsites(fo)
+                            return { cause = 'unknown-code', root = k, sites = l, at = at, dir = 'in' }
+                        elseif k == 'proto' then return { cause = 'unknown-code', root = k, at = tostring(obinfo[w[2]] or w[2]), dir = 'in' }
+                        elseif k == 'host-global' then return { cause = k, root = k, sites = w[2] and sitekeys(w[2], k), at = label(q), dir = 'in' }
+                        elseif k == 'export' or k == 'placeholder' then return { cause = k, root = k, at = label(q), dir = 'in' }
+                        else return { cause = 'unknown-code', root = k, sites = sitekeys(w[2], k), at = label(q), dir = 'in' } end
+                    end
+                end
+            end
+            return nil
+        end
+        do local n = 0; for _, m in pairs(G7.XARR or NOTHING) do for _, w in pairs(m) do if w == false then n = n + 1 end end end; stats.xnosrc = n end
     end
     -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,
     -- an external value, no port — never a short list read as the whole)

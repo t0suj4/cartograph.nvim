@@ -3684,6 +3684,85 @@ test('flowtype: an answer less known under a contract than without it lists the 
     assert(okk, err)
 end)
 
+-- (CART-1867: AN UNKNOWN ANSWER'S ENTRY. A receiver that may hold unknown code's own value has no verdict and no taint
+-- path; R.unknown_of walks that value's first arrival back to the root the solve made it at — the call of unknown code
+-- that returned it, the require of a module outside the tree, a dynamic _G[k] read, unknown code calling a tree
+-- function back — and the hand-out site that names; a receiver past CAP is `saturated`. Explain on; the bitset path too)
+test('flowtype: an unknown answer traces unknown code\'s value back to the call, require or call-back that made it (CART-1867)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local r = ext.f()',
+        'local function u1() return r:m() end',
+        'local function u2() return ext.g:m() end',
+        'local h = { k = setmetatable({}, { __index = A }) }',
+        'if os.time() > 0 then h.k = ext.mk(1) end',
+        'if os.time() > 1 then h.k = setmetatable({}, { __index = B }) end',
+        'local function u3() return h.k:m() end',
+        'local d = _G[("x"):upper()]',
+        'local function u4() return d:m() end',
+        'local w = setmetatable({}, { __index = B })',
+        'local function u5() return w:m() end',
+        'local function u6(z) return z:m() end',
+        'u6(setmetatable({}, { __index = A })); u6(setmetatable({}, { __index = B }))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local function pick(u) return u and { cause = u.cause, root = u.root, sites = u.sites, dir = u.dir } end
+    local cap, big = flowtype.CAP, flowtype.BIG
+    local okk, err = pcall(function ()
+        for _, b in ipairs({ big, 1 }) do -- (1: a set of 3 objects is a bitset — h.k's, EXT among them: the dense path)
+            flowtype.BIG = b
+            local R = flowtype.solve(store, { open = false, explain = true })
+            local tag = 'BIG ' .. b .. ': '
+            eq(R.stats.xnosrc, 0, tag .. 'every arrival of unknown code\'s value has a source or a root')
+            eq(pick(R.unknown_of(call('r:m'))), { cause = 'unknown-code', root = 'call', sites = { 'call m.lua:4:10' }, dir = 'in' }, tag .. 'returned by the call')
+            eq(pick(R.unknown_of(call('ext.g:m'))), { cause = 'unknown-code', root = 'require', sites = { 'require m.lua:0:12' }, dir = 'in' }, tag .. 'a member of the module: its require')
+            eq(pick(R.unknown_of(call('h.k:m'))), { cause = 'unknown-code', root = 'call', sites = { 'call m.lua:8:28' }, dir = 'in' }, tag .. 'stored in a field: through it, to the call')
+            eq(pick(R.unknown_of(call('d:m'))), { cause = 'host-global', root = 'host-global', sites = { 'host-global m.lua:11:10' }, dir = 'in' }, tag .. 'a dynamic _G[k] read, at its site')
+            eq(R.unknown_of(call('w:m')), nil, tag .. 'an answer with a verdict has no unknown entry')
+        end
+        flowtype.BIG = big
+        flowtype.CAP = 1 -- (z holds two objects: past CAP — one parameter, ctx off)
+        local R = flowtype.solve(store, { open = false, explain = true, ctx = false })
+        local u = R.unknown_of(call('z:m'))
+        eq(u and u.cause, 'saturated', 'a receiver past CAP is the analysis\'s own loss')
+        eq(flowtype.solve(store, { open = false }).unknown_of, nil, 'explain off: no recorder')
+    end)
+    flowtype.CAP, flowtype.BIG = cap, big
+    vim.fn.delete(root, 'rf')
+    assert(okk, err)
+    -- (unknown code calling a tree function back: CART-1875's fixture under lpeg's contract, CAP 4 — the hub is under
+    -- CAP and calls the setter with EXT; s.k:m traces to the setter and the hand-out that gave it to unknown code)
+    root = tree({ ['m.lua'] = table.concat({
+        'local lpeg = require("lpeg")',
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local s = { k = setmetatable({}, { __index = A }) }',
+        'local function f(q) return q end',
+        'local function g(q) s.k = q end',
+        'lpeg.Cmt(f)',
+        'ext.h(g)',
+        'local function use() return s.k:m() end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    flowtype.CAP = 4
+    okk, err = pcall(function ()
+        local R = flowtype.solve(store, { open = false, explain = true,
+            contracts = { { id = 'lpeg-reads', module = 'lpeg', clauses = { 'no-write', 'no-callback' }, src = 'the lpeg manual' } } })
+        local u = R.unknown_of(call('s.k:m'))
+        eq(u and { cause = u.cause, root = u.root, sites = u.sites, at = u.at }, { cause = 'unknown-code', root = 'callback', sites = { 'call m.lua:9:0' }, at = 'm.lua::g@7' },
+            'called back: the function and where it was handed out')
+    end)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(okk, err)
+end)
+
 -- (CART-1861: the scoped key `entry_contracts` — a contract holds for the files of its scope only)
 test('flowtype: entry_contracts in scoped config hold in their scope (CART-1861)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
