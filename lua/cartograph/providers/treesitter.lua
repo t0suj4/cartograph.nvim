@@ -4744,6 +4744,23 @@ local function resolve_receiver_type(cv, data, exact, tail)
         end
     end
     local n = 0
+    -- (CART-1887: a call that already JOINED BY NAME — inferred — to a project def is withdrawn as well, and its site
+    -- leaves the ref edge the join added; an edge left with no site goes. `c:named()` on a node had reached band.lua's
+    -- Band:named, `n:named_child()` a test's mock of TSNode: 634 such on our tree. A matched join stays)
+    local refidx, emptied
+    local function unref(from, to, at)
+        if not refidx then
+            refidx = {}
+            for _, e in ipairs(data.edges or {}) do if e.kind == 'ref' then refidx[e.from .. '\31' .. e.to] = e end end
+        end
+        local e = refidx[from .. '\31' .. to]
+        if not (e and at) then return end
+        for j = #e.at, 1, -1 do
+            local x = e.at[j]
+            if rawequal(x, at) or (atr.sl(x) == atr.sl(at) and atr.sc(x) == atr.sc(at)) then table.remove(e.at, j); break end
+        end
+        if #e.at == 0 then emptied = emptied or {}; emptied[e] = true end
+    end
     for _, g in pairs(groups) do
         -- (1) a UNIQUELY OWNED member the language's code never defines names the type
         local ty, conflict
@@ -4775,13 +4792,23 @@ local function resolve_receiver_type(cv, data, exact, tail)
                 local m = cget(i, 'callee')
                 -- (a REFUSED call is withdrawn from its wrong join; an unresolved one, already external, carries the
                 -- type too — `n:parent()` has no project def, and a chain `local p = n:parent()` reads it, CART-1621)
-                if m and members['profile:' .. ty][m] and not cget(i, 'to') then
+                local cto = cget(i, 'to')
+                if m and members['profile:' .. ty][m] and cto and cget(i, 'inferred') then
+                    if cget(i, 'fn') then unref(cget(i, 'fn'), cto, cget(i, 'at')) end
+                    cset(i, 'to', nil); cset(i, 'inferred', nil); cto = nil
+                end
+                if m and members['profile:' .. ty][m] and not cto then
                     cset(i, 'refused', nil)
                     cset(i, 'ext', { disp = 'external', why = 'typed-receiver', inferred = true, type = ty })
                     n = n + 1
                 end
             end
         end
+    end
+    if emptied then
+        local E, w = data.edges, 0
+        for r = 1, #E do local e = E[r]; if not emptied[e] then w = w + 1; E[w] = e end end
+        for r = #E, w + 1, -1 do E[r] = nil end
     end
     return n
 end
