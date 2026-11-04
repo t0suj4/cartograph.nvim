@@ -375,8 +375,10 @@ local DECLWRAP = { pointer_declarator = true, array_declarator = true }
 -- dfparity cannot catch it, because its per-statement def/use comparison only runs when the
 -- coarse counts MATCH, and they do not for the functions holding these very forms.
 -- Value = the FIELD holding the binder; `false` = no field, take the non-header children.
+-- (and ruby's `for x in xs`, its binder in `pattern` — in no registered corpus, so no gate had seen it read
+-- def={} use={x,xs}: CART-0377)
 local LOOPVAR = { enhanced_for_statement = 'name', for_in_statement = 'left',
-    for_range_loop = false }
+    for_range_loop = false, ['for'] = 'pattern' }
 -- cpp for_range_loop's non-binder fields; every other named child is the declarator
 local RANGE_HEAD = { 'type', 'right', 'body' }
 
@@ -866,8 +868,8 @@ function M.head_binders(node, src, cls)
     local names, skip = {}, {}
     local function leaves(n)
         if n:named() and n:child_count() == 0 then
-            -- @langs-ok reached only through LOOPVAR, whose forms exist in java/js/ts/cpp
-            -- alone — and in all four the collection loop's binder leaf is `identifier`
+            -- @langs-ok reached only through LOOPVAR, whose forms exist in java/js/ts/cpp/ruby
+            -- alone — and in all five the collection loop's binder leaf is `identifier`
             if n:type() == 'identifier' then names[#names + 1] = txt(n, src) end
             return
         end

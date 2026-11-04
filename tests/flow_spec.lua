@@ -1069,6 +1069,22 @@ test('flow: a ruby while opens its body', function ()
         .. #kids_of(fl, h) .. ' (' .. table.concat(kids_of(fl, h), ', ') .. ')')
 end)
 
+-- (CART-0377: ruby `for x in xs` is in no registered corpus — rails/activesupport, discourse's models and its model
+-- specs have ZERO, measured with ctrlcensus --coverage — so no gate could ever fail on it. The suite is its gate: the
+-- body opens, and x is the loop's BINDING, not a free use)
+test('flow: a ruby for opens its body, and its variable is a def', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  for x in xs\n    g(x)\n    h(x)\n  end\nend')
+    local h = head_of(fl, 'for')
+    ok(h, 'the for is a row')
+    ok(#kids_of(fl, h) >= 2, 'and its two body statements are rows: got '
+        .. #kids_of(fl, h) .. ' (' .. table.concat(kids_of(fl, h), ', ') .. ')')
+    local head = fl.stmts[h]
+    ok(setof(head.def).x, 'x is a DEF of the for head: ' .. vim.inspect(head.def))
+    ok(setof(head.use).xs, 'the collection is a use')
+    ok(not setof(head.use).x, 'x is a binding, not a free use: ' .. vim.inspect(head.use))
+end)
+
 test('flow: a ruby if regions its then-branch, and elsif/else are CLAUSES', function ()
     if not ready('ruby') then skip 'no ruby parser' end
     local fl = rb('def f(a, b)\n  if a\n    g(1)\n    g(2)\n  elsif b\n    g(3)\n'
