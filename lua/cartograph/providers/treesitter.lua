@@ -4320,6 +4320,12 @@ local function lexical_pick(cands, file, fn, call_at, parent_fn, node_index)
     return best
 end
 M._lexical_pick = lexical_pick
+-- (CART-1883: a samefile refusal's `cands` is a capped SAMPLE — tsutil.refusal, 8 of n — and the binder must see EVERY
+-- same-file definition: a name defined more than 8 times left the later ones' calls refused. The whole list rides beside
+-- the refusal, weakly keyed, never into the graph)
+local SAMEALL = setmetatable({}, { __mode = 'k' })
+function M._samefile_refusal(list) local r = refusal('samefile', list); SAMEALL[r] = list; return r end
+function M._samefile_all(r) return SAMEALL[r] or r.cands end
 
 -- can definition `n` RECEIVE a `x:f()` call (CART-1491)? The colon passes x as the first argument, so in a language
 -- whose spec sets `colon_calls_pass_self` (Lua) the target is a method — `T:f`, or a first parameter `self`. A plain
@@ -9751,7 +9757,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     end
                 end
             end
-            if samedup then return nil, nil, refusal('samefile', samedup) end
+            if samedup then return nil, nil, M._samefile_refusal(samedup) end
             if same then return same, false end
             if short then return nil, nil, nil, EXT.short end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
@@ -10238,7 +10244,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             if not shadowed and not fdef then
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
                 if refused and refused.rule == 'samefile' then
-                    local pick = M._lexical_pick(refused.cands, p.file, from and node_index[from], p.at, parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                    local pick = M._lexical_pick(M._samefile_all(refused), p.file, from and node_index[from], p.at, parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
@@ -10799,7 +10805,7 @@ function M.relink(data, touched, opts)
                     end
                 end
             end
-            if samedup then return nil, nil, refusal('samefile', samedup) end
+            if samedup then return nil, nil, M._samefile_refusal(samedup) end
             if same then return same, false end
             if short then return nil, nil, nil, EXT.short end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
@@ -11102,7 +11108,7 @@ function M.relink(data, touched, opts)
                 -- deferral waits for the rounds (see extract)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
                 if refused and refused.rule == 'samefile' and not cfull then
-                    local pick = M._lexical_pick(refused.cands, cfile, cfn and node_index[cfn], cget(i, 'at'), parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                    local pick = M._lexical_pick(M._samefile_all(refused), cfile, cfn and node_index[cfn], cget(i, 'at'), parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)

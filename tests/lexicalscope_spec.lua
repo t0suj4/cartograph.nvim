@@ -87,3 +87,33 @@ test('lexical scope: an INCREMENTAL refresh re-resolves the same way — the rel
     eq({ 3, 3, 7, 22 }, { line_of(data, walks[1].to), line_of(data, walks[2].to), line_of(data, walks[3].to), line_of(data, walks[4].to) }, vim.inspect(stats))
     eq(12, line_of(data, calls_of(data, 'pick')[1].to))
 end)
+-- (CART-1883: MORE THAN EIGHT DEFINITIONS OF ONE NAME. A samefile refusal's `cands` is a capped SAMPLE of 8 —
+-- tsutil.refusal — and the binder read it as the whole: the ninth scope's `put` was never a candidate, its call stayed
+-- refused, and dead-function reported the definition dead. Ten sibling scopes, each calling its own `put`)
+local SRC10 = {}
+for i = 1, 10 do SRC10[#SRC10 + 1] = ('local function f%d(t) local function put(x) return %d end return put(t) end'):format(i, i) end
+SRC10 = table.concat(SRC10, '\n') .. '\n'
+
+test('lexical scope: a name defined more than 8 times in one file binds every call to its own scope\'s definition (CART-1883)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(SRC10); fd:close()
+    local data = ts.extract(root)
+    local function lines(d)
+        local got = {}
+        for _, c in ipairs(calls_of(d, 'put')) do got[#got + 1] = c.to and line_of(d, c.to) or c.refused or '-' end
+        return got
+    end
+    eq({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, lines(data), 'each call reaches the put of its own function')
+    store.ingest(data)
+    local dead = 0
+    for _, f in ipairs(require('cartograph.lint').run(store, { only = { ['dead-function'] = true } })) do if f.message:find("'put'") then dead = dead + 1 end end
+    eq(0, dead, 'no put is dead')
+    -- (the relink path has its own copy of the resolver)
+    fd = assert(io.open(root .. '/m.lua', 'w')); fd:write((SRC10:gsub('return 10 end', 'return 11 end'))); fd:close()
+    assert(require('cartograph.refresh').files({ 'm.lua' }, { incremental = true }))
+    local got = lines(store.data)
+    vim.fn.delete(root, 'rf')
+    eq({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, got, 'and after an incremental refresh')
+end)
