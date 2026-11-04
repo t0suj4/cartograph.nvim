@@ -336,6 +336,11 @@ local function run_row(name)
         elseif (r.fns + r.methods) == 0 then
             cell('expr', '--', { ('no expression-bearing subjects (fns=%d methods=%d) —'
                 .. ' this corpus cannot gate the expression IR'):format(r.fns, r.methods) })
+        elseif select(2, ec.coverage(r)) < ec.COVERAGE_FLOOR then
+            -- ★ COVERAGE, NOT PRESENCE (CART-0430): `== 0` is dodged by any stray file, and a language's own repo
+            -- is exactly where C shims and python harnesses live — haskell's pin was a green zero over 3 of 1696
+            cell('expr', '--', { ec.coverage(r), ('below the %d%% floor: this census does not speak for the'
+                .. ' corpus, so no pin is checked'):format(ec.COVERAGE_FLOOR * 100) })
         else
             -- INSTANCES and DISTINCT ROWS are different numbers and the pin is on the first
             -- (CART-0410): M.check iterates functions, so a row reachable from several
@@ -345,7 +350,7 @@ local function run_row(name)
             local dist = ec.distinct(r.instances)
             parse = r.parse
             local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods,
-                ec.census_distinct(r.cats, dist)) }
+                ec.census_distinct(r.cats, dist)), ec.coverage(r) }
             if ec.EXPECTED[name] then
                 local diffs = ec.diff(r.cats, ec.EXPECTED[name])
                 for _, l in ipairs(diffs) do d[#d + 1] = l end

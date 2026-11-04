@@ -88,9 +88,23 @@ function M.check(store)
     -- one's hits as its own
     local p0 = expr.parse_stats()
     local freed = 0
+    -- ★ A REFUSAL IS COUNTED, NOT DROPPED (CART-0430). haskell's pin read a green zero over 3 of 1696 subjects —
+    -- two C functions and a python one, stray fixtures — because expr.of refuses every .hs subject (no haskell
+    -- expression spec) and nothing kept the refusals. `attempted` and `refused` (by reason) are the denominator.
+    local attempted, refused = 0, {}
+    local function refuse(why) refused[why] = (refused[why] or 0) + 1 end
     for _, fkey in ipairs(order) do
         for _, n in ipairs(buckets[fkey]) do
+            attempted = attempted + 1
             local ok, got = pcall(expr.of, store, n.id)
+            if not ok then refuse('raised')
+            elseif not (got and got.fl) then
+                local unsupported = n.file and not expr.lang_of(n.file)
+                if unsupported then
+                    local lang = require('cartograph.providers.treesitter').parse_lang(n.file)
+                    refuse('unsupported:' .. tostring(lang or n.file:match('%.(%w+)$') or '?'))
+                else refuse(n.file and 'no-function-node' or 'no-file') end
+            end
             if ok and got and got.fl then
                 if n.kind == 'method' then methods = methods + 1 else fns = fns + 1 end
                 local S = got.fl.stmts or {}
@@ -151,9 +165,25 @@ function M.check(store)
         if k == NOFILE then nofile = #buckets[k] else nfiles = nfiles + 1 end
     end
     return { fns = fns, methods = methods, total = cats.total, cats = cats,
-        instances = instances,
+        instances = instances, attempted = attempted, refused = refused,
         parse = { hit = p1.hit - p0.hit, miss = p1.miss - p0.miss,
             concat = p1.concat - p0.concat, files = nfiles, nofile = nofile } }
+end
+
+--- The census's COVERAGE (CART-0430): subjects harvested / attempted, and what was refused, by reason —
+--- `covers 3 of 1696 subjects (0.2%); refused unsupported:haskell=1693`. A number without this denominator can be
+--- a green zero over a population that is not the corpus.
+M.COVERAGE_FLOOR = 0.5 -- a census below it does not speak for the corpus: the matrix will not gate it
+function M.coverage(r)
+    local got = (r.fns or 0) + (r.methods or 0)
+    local a = r.attempted or got
+    local parts = {}
+    for k, v in pairs(r.refused or {}) do parts[#parts + 1] = { k, v } end
+    table.sort(parts, function (x, y) if x[2] ~= y[2] then return x[2] > y[2] end return x[1] < y[1] end)
+    local rs = {}
+    for _, p in ipairs(parts) do rs[#rs + 1] = p[1] .. '=' .. p[2] end
+    return ('covers %d of %d subjects (%.1f%%)%s'):format(got, a, a > 0 and 100 * got / a or 0,
+        #rs > 0 and ('; refused ' .. table.concat(rs, ' ')) or ''), (a > 0 and got / a or 0)
 end
 
 --- Census one-liner (stable order: total first, then classes by descending count).
@@ -390,6 +420,9 @@ M.EXPECTED = {
         ['binder:expression_statement'] = 31, ['missing:foreach_statement'] = 6,
         ['missing:pair'] = 6, ['missing:if_statement'] = 4,
         ['both:expression_statement'] = 1 },
+    -- (UNCHECKED since CART-0430: the census covers 3 of 1696 subjects, 0.2% — two C fixtures and a python one;
+    -- every .hs subject is refused, no haskell expression spec — so the matrix reads `--` below COVERAGE_FLOOR and
+    -- this zero is never compared. Kept as the recorded number, not as a gate)
     haskell = { total = 0 },
     jquery = { total = 22, ['binder:expression_statement'] = 18, ['binder:variable_declaration'] = 3,
         ['missing:if_statement'] = 1 },
@@ -729,6 +762,7 @@ if invoked then
     local dist = M.distinct(r.instances)
     print(('%s  fns=%d methods=%d%s'):format(target, r.fns, r.methods,
         want_lang and ('  [lang=' .. want_lang .. ']') or ''))
+    if r.attempted then print('  ' .. M.coverage(r)) end
     -- ★ THE CACHE'S HIT RATE IS PRINTED, NOT ASSUMED (CART-0423). The by-file walk and the
     -- one-entry parse cache are useless apart, and a silent no-hit degrades to EXACTLY the
     -- old cost — which is how four corpora came to be unrunnable without anyone noticing.
