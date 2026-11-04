@@ -358,14 +358,12 @@ M.EXPECTED = {
     -- cppmodern 106 -> 1, `both:declaration` GONE. TWO defects, both C++-only shapes that a
     -- set written against C could not have: a REFERENCE declarator (`Config &c = x;`), and a
     -- declaration MODIFIER with no initialiser (`static String str;`). No new class either.
-    cpp = { total = 1379, ['missing:preproc_def'] = 858, ['missing:declaration'] = 469,
-        ['binder:declaration'] = 1, ['missing:preproc_function_def'] = 22,
-        ['binder:if_statement'] = 6, ['binder:compound_statement'] = 5,
-        ['missing:declaration_command'] = 5, ['missing:command'] = 4,
-        ['binder:for_statement'] = 2, ['missing:expression_statement'] = 2,
-        ['binder:declaration_command'] = 1, ['both:pipeline'] = 1,
-        ['missing:if_statement'] = 1, ['missing:list'] = 1,
-        ['missing:variable_assignment'] = 1 },
+    -- (re-pinned 2026-11-04: STALE ON STOCK — 1379 -> 1364, nine classes moved since August, none by CART-0404's
+    -- expr change, which reads cpp identically before and after; the bash-shaped classes are gone from this corpus)
+    cpp = { total = 1364, ['missing:preproc_def'] = 855, ['missing:declaration'] = 469,
+        ['missing:preproc_function_def'] = 22, ['binder:if_statement'] = 6, ['binder:compound_statement'] = 5,
+        ['binder:for_statement'] = 2, ['missing:expression_statement'] = 2, ['binder:declaration'] = 1,
+        ['binder:pipeline'] = 1, ['missing:if_statement'] = 1 },
     -- ★ pinned from the FINAL state, not a mid-arc reading: my first attempt wrote 41,
     -- measured after the reference-declarator fix and BEFORE the modifier one, and the pin
     -- went red on its own next run. `binder:declaration` reaches 0 here — cppmodern is C++
@@ -495,20 +493,21 @@ M.EXPECTED = {
     -- same 156 rows, moved from `both` to `missing`. A two-sided disagreement became
     -- one-sided — flat in COUNT and strictly better in KIND, the same shape CART-0405
     -- recorded on bash. Reading the rise without the fall would have called this a loss.
-    v8 = { total = 146275, ['missing:preproc_function_def'] = 77685,
-        ['binder:declaration'] = 11289, ['missing:declaration'] = 20947,
-        ['binder:compound_statement'] = 17461, ['missing:expression_statement'] = 7157,
-        ['missing:if_statement'] = 4169, ['missing:case_statement'] = 3643,
-        ['missing:preproc_def'] = 1871, ['binder:if_statement'] = 1470,
-        ['missing:for_range_loop'] = 192,
-        ['binder:namespace_definition'] = 133, ['missing:compound_statement'] = 47,
-        ['binder:ERROR'] = 37, ['both:expression_statement'] = 35,
-        ['binder:while_statement'] = 33, ['binder:expression_statement'] = 27,
-        ['both:compound_statement'] = 24, ['extra:if_statement'] = 14,
-        ['missing:return_statement'] = 12, ['binder:for_statement'] = 10,
-        ['both:if_statement'] = 7, ['binder:template_declaration'] = 6,
-        ['missing:static_assert_declaration'] = 4,
-        ['missing:assignment_expression'] = 1, ['missing:attributed_statement'] = 1 },
+    -- ★ RE-PINNED 2026-11-04 @ CART-0404 (9646db91): expr's re-parse now applies the extractor's src_repair, so a
+    -- macro-headed class (`class V8_EXPORT_PRIVATE Foo {`) is a class, not a function whose body is the class: 77135 ->
+    -- 66639, binder:declaration 472 -> 257 distinct, only binder:if_statement rose (+1). The old pin (146275) was
+    -- already stale: stock at 1cb25232 read 77135. The 257 left are a macro BEFORE `class` (CART-1891).
+    v8 = { total = 66639,
+        ['missing:preproc_function_def'] = 18645, ['missing:declaration'] = 14338,
+        ['binder:compound_statement'] = 12832, ['binder:declaration'] = 6890,
+        ['missing:expression_statement'] = 5152, ['missing:case_statement'] = 3517, ['missing:if_statement'] = 2711,
+        ['binder:if_statement'] = 1396, ['extra:compound_statement'] = 390, ['missing:for_range_loop'] = 174,
+        ['missing:preproc_def'] = 171, ['extra:preproc_function_def'] = 125, ['binder:expression_statement'] = 60,
+        ['binder:namespace_definition'] = 39, ['missing:compound_statement'] = 38, ['binder:ERROR'] = 34,
+        ['binder:while_statement'] = 33, ['both:compound_statement'] = 23, ['extra:struct_specifier'] = 18,
+        ['missing:return_statement'] = 12, ['extra:if_statement'] = 11, ['binder:for_statement'] = 10,
+        ['both:if_statement'] = 9, ['missing:static_assert_declaration'] = 4, ['extra:declaration'] = 3,
+        ['extra:ERROR'] = 2, ['missing:assignment_expression'] = 1, ['missing:attributed_statement'] = 1 },
     -- ★★ FIRST PIN EVER (CART-0423). wow is the third corpus the per-file parse unlocked.
     -- ★ AND IT IS THE ONE THAT SAYS THE FIX IS NOT ABOUT BIG FILES. wow is 353 addons of
     -- ordinary-sized Lua — it died on VOLUME (39748 subjects), not on any single enormous
