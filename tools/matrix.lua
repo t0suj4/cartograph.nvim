@@ -14,7 +14,8 @@
 -- Columns (each an independent oracle; a red cell = a bug on ONE side):
 --   counts  census refs/nodes == corpora.lua expected (the drift tripwire)
 --   valid   validate.check — the closed schema as an executable registry
---   mem     inline peak RSS within the corpus budget (2x-regression tripwire)
+--   mem     inline peak RSS within the corpus budget (2x-regression tripwire) — judged LAST over the whole
+--           row: extraction against budget_mb, a later phase over it REFUSED by name (CART-0425)
 --   dfpar   coarse(flow)==df census + flow CFG invariants (tools/dfparity);
 --           gated where EXPECTED is calibrated, reported (~) elsewhere —
 --           this widens dfgate's 11-corpus coverage to the whole registry
@@ -191,6 +192,7 @@ local function run_row(name)
     end
 
     local cells = {}
+    local hwm = {} -- { column, VmHWM when it reported }: which phase raised the row's peak (CART-0425)
     local parse -- the expr column's parse-cache reuse (see the `expr` column below)
     -- ★ ONE CHOKEPOINT FOR THE SCOPED VERDICT. Every column reports through `cell`, so the
     -- downgrade lives here rather than in eight column bodies — there is no way to add a
@@ -200,6 +202,7 @@ local function run_row(name)
     local function cell(col, s, d)
         if opts.file and SCOPE_UNGATED[col] and (s == 'OK' or s == 'FAIL') then s = '~' end
         cells[col] = { s = s, d = d }
+        if col ~= 'mem' then hwm[#hwm + 1] = { col, bench.peak_now() } end
     end
     if opts.file then
         for col in pairs(SCOPE_NA) do
@@ -268,15 +271,6 @@ local function run_row(name)
             vr.ok and nil or { validate.report(vr) })
     end
 
-    if wanted('mem') then
-        if corpus.budget_mb and stats.peak then
-            local mb = stats.peak / 2^20
-            cell('mem', mb <= corpus.budget_mb and 'OK' or 'FAIL',
-                { ('peak %.0f MB budget %d MB'):format(mb, corpus.budget_mb) })
-        else
-            cell('mem', '--')
-        end
-    end
 
     -- ★ THE FINE ROW MODEL (CART-0389). No other column can see it: struct gates
     -- nodes/edges/calls and opening a control form mints neither; dfpar gates the COARSE
@@ -707,6 +701,21 @@ local function run_row(name)
                     { a = 'sequential', b = 'parallel', limit = 5 })
                 cell('par', gd.empty(d) and 'OK' or 'FAIL', det)
             end
+        end
+    end
+
+    -- ★ THE mem CELL IS JUDGED LAST, OVER THE WHOLE ROW (CART-0425). It used to read `stats.peak` — the EXTRACT
+    -- window — straight after extraction, so every phase after it (the expr census, dfpar's re-extract, the cache
+    -- warm-load) was STRUCTURALLY outside the only window it sampled: ghost's census ran at 4256 MB against a 1600 MB
+    -- budget and the column said OK. VmHWM is monotonic within a window, so the sample `cell` takes as each column
+    -- reports names the phase that raised it. budget_mb is calibrated against EXTRACTION (~2x its peak), so it judges
+    -- extraction; a LATER phase over it has no budget of its own and is REFUSED (`~`, named) — not passed. (`par`'s
+    -- parallel child is a separate process: its peak is not in this one's VmHWM.)
+    if wanted('mem') then
+        if corpus.budget_mb and stats.peak then
+            cell('mem', bench.mem_verdict(corpus.budget_mb, stats.peak, hwm))
+        else
+            cell('mem', '--')
         end
     end
 

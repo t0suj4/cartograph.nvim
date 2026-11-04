@@ -83,6 +83,29 @@ local function vmhwm()
     local kb = txt:match('VmHWM:%s*(%d+)%s*kB')
     return kb and tonumber(kb) * 1024 or nil
 end
+--- The high-water mark NOW, without resetting it: since the last reset (a measure window's start), so a caller
+--- sampling it between phases can say which phase raised it (CART-0425: matrix's mem column)
+function M.peak_now() return vmhwm() end
+
+--- THE mem VERDICT OVER A WHOLE ROW (CART-0425). `budget_mb` is calibrated against EXTRACTION (~2x its peak), so it
+--- judges `extract_peak`; `samples` = { { phase, VmHWM bytes } … } taken as each later phase reported. A later phase
+--- over the extract budget has no budget of its own, so it is REFUSED (`~`, named) — never passed, which is what the
+--- column did while it only ever sampled the extract window (ghost's census at 2.7x its budget read OK).
+---@return string status 'OK' | 'FAIL' | '~'
+---@return string[] detail
+function M.mem_verdict(budget_mb, extract_peak, samples)
+    local mb = extract_peak / 2 ^ 20
+    local rowpk, at = extract_peak, nil
+    for _, h in ipairs(samples or {}) do if h[2] and h[2] > rowpk then rowpk, at = h[2], h[1] end end
+    local d = { ('extract peak %.0f MB budget %d MB'):format(mb, budget_mb) }
+    if at then d[#d + 1] = ('row peak %.0f MB, reached by the %s column'):format(rowpk / 2 ^ 20, at) end
+    if mb > budget_mb then return 'FAIL', d end
+    if at and rowpk / 2 ^ 20 > budget_mb then
+        d[#d + 1] = 'over the EXTRACT budget in a phase that has no budget of its own: not gated (CART-0425)'
+        return '~', d
+    end
+    return 'OK', d
+end
 function M.peak_reset()
     local fd = io.open('/proc/self/clear_refs', 'w')
     if not fd then return false end
