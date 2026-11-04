@@ -153,8 +153,9 @@ end
 -- (CART-1874). On self, string.buffer's module contract saturates 348 ports and un-saturates 136: 10 partial answers lose their verdict (a receiver saturated:
 -- unknown), 11 gain one, and with every site contracted as well one whole answer turns partial (an object escaped
 -- through a newly saturated port). R.costs lists a loss under a contract only where dropping THAT ONE alone undoes it
--- (CART-1875): a loss two contracts cause together is under neither, as a gain is (FLOW-0123); and a partial GAIN
--- (no verdict -> partial) is in neither list.
+-- (CART-1875): a loss two contracts cause together is under neither, as a gain is (FLOW-0123). R.gains(c) the
+-- contracts a PARTIAL answer has its verdict from (dropping one alone leaves no verdict, CART-1876): neither whole, so not
+-- in R.assumes, nor less known, so not in R.costs.
 M.CLAUSES = {
     ['no-write'] = 'writes no field of what it is handed, sets no metatable on it, keeps none of it',
     ['no-callback'] = 'calls no function it is handed',
@@ -6449,12 +6450,14 @@ end
 -- R.costs(c) -> { contract id … } | nil: from the same solves, the contracts a call's answer is LESS KNOWN under —
 -- dropping that one alone makes it more known (whole > partial > no verdict). Past CAP a contract moves saturation both
 -- ways, and this is what it took (CART-1875, CART-1874)
+-- R.gains(c) -> { contract id … } | nil: from the same solves, the contracts a PARTIAL answer has its verdict from —
+-- dropping that one alone leaves it no verdict (CART-1876; a whole answer's are R.assumes)
 local function cites(R, store, opts)
-    local CI, CO
+    local CI, CO, CG
     local function rank(v) return not v and 0 or v.partial and 1 or 2 end
     local function run()
         if not CI then
-            CI, CO = {}, {}
+            CI, CO, CG = {}, {}, {}
             local function same(a, b)
                 if not b or b.partial or a.kind ~= b.kind or a.type ~= b.type then return false end
                 return table.concat(a.targets or NOTHING, '\0') == table.concat(b.targets or NOTHING, '\0')
@@ -6478,6 +6481,10 @@ local function cites(R, store, opts)
                             local t = CO[cc]; if not t then t = {}; CO[cc] = t end
                             t[#t + 1] = e.id
                         end
+                        if v and v.partial and not v2 then
+                            local t = CG[cc]; if not t then t = {}; CG[cc] = t end
+                            t[#t + 1] = e.id
+                        end
                     end
                 end
             end
@@ -6485,6 +6492,7 @@ local function cites(R, store, opts)
     end
     function R.assumes(c) run(); return CI[c] end
     function R.costs(c) run(); return CO[c] end
+    function R.gains(c) run(); return CG[c] end
     return R
 end
 
