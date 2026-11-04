@@ -49,6 +49,7 @@
 
 local SELF = debug.getinfo(1, 'S').source:sub(2)
 local here = SELF:match('^(.*)/matrix%.lua$')
+local PV = dofile(here .. '/pinverdict.lua') -- a pin's movement as a verdict (CART-0446)
 
 -- headless print() writes to STDERR; the row protocol and the grid must ride
 -- stdout (vim.system captures them per stream), so write it explicitly
@@ -353,6 +354,9 @@ local function run_row(name)
                 ec.census_distinct(r.cats, dist)), (ec.coverage(r)) } -- (one value: coverage also returns the ratio)
             if ec.EXPECTED[name] then
                 local diffs = ec.diff(r.cats, ec.EXPECTED[name])
+                -- ★ WHICH WAY, before the rows (CART-0446): strengthened / lateral / WEAKENED — only the last is a
+                -- regression. The colour stays FAIL either way: a moved pin is re-pinned, never left to drift
+                if #diffs > 0 then d[#d + 1] = '    ' .. PV.line(PV.classify(r.cats, ec.EXPECTED[name], true)) end
                 for _, l in ipairs(diffs) do d[#d + 1] = l end
                 cell('expr', #diffs == 0 and 'OK' or 'FAIL', d)
             else
@@ -390,6 +394,7 @@ local function run_row(name)
                 cell('dfpar', 'FAIL', d)
             elseif dfp.EXPECTED[name] then
                 local diffs = dfp.diff(r.cats, dfp.EXPECTED[name])
+                if #diffs > 0 then d[#d + 1] = '    ' .. PV.line(PV.classify(r.cats, dfp.EXPECTED[name])) end -- (CART-0446)
                 for _, l in ipairs(diffs) do d[#d + 1] = l end
                 cell('dfpar', #diffs == 0 and 'OK' or 'FAIL', d)
             else
