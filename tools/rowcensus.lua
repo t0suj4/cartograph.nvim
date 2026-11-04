@@ -205,10 +205,11 @@ M.EXPECTED = {
     -- is a genuinely EMPTY arm (`elsif PG::ReadOnlySqlTransaction === ex` whose body is a
     -- comment), not a form that went dark.
     -- recalib @ CART-0387: a case SUBJECT and a when PATTERN are not rows (10324 -> 10257)
-    rails = { rows = 13816, opened = 3592, opaque = 22, begin = 35, block = 447, case = 17,
+    -- (2026-11-04, CART-1889/0394: ruby's loop modifiers are control rows — one `while_modifier` here, +1 opened)
+    rails = { rows = 13817, opened = 3593, opaque = 22, begin = 35, block = 447, case = 17,
         catch = 65, ['catch:opaque'] = 21, do_block = 506, elsif = 75, ['elsif:opaque'] = 1,
         ['if'] = 977, if_modifier = 1172, unless = 54, unless_modifier = 190, when = 47,
-        ['while'] = 7 },
+        ['while'] = 7, while_modifier = 1 },
     -- ★ rspec IS THE BLOCK-DENSEST CORPUS WE OWN, and it shows what the gap actually was:
     -- an RSpec suite is `describe … do` / `it … do` all the way down, and it opened SIX
     -- control structures across 123 functions. Now 33, of which 25 are the blocks.
@@ -221,10 +222,11 @@ M.EXPECTED = {
     -- …then @ part B: rows 5672->7745 (+37%), opened 1112->2027. `block:opaque` 0->1 is
     -- CHECKED the same way — group.rb:112 is `Dir::Tmpname.create([…]) { }`, a literally
     -- empty brace block, which is exactly what an honest opaque count is FOR.
-    ruby = { rows = 7734, opened = 2022, opaque = 11, begin = 40, block = 311,
+    -- (2026-11-04, CART-1889/0394: as rails — one `while_modifier`, +1 opened)
+    ruby = { rows = 7735, opened = 2023, opaque = 11, begin = 40, block = 311,
         ['block:opaque'] = 1, case = 70, catch = 65, ['catch:opaque'] = 7, do_block = 309,
         elsif = 78, ['if'] = 465, if_modifier = 298, unless = 67, unless_modifier = 138,
-        ['until'] = 4, when = 163, ['when:opaque'] = 3, ['while'] = 14 },
+        ['until'] = 4, when = 163, ['when:opaque'] = 3, ['while'] = 14, while_modifier = 1 },
     rust = { rows = 10986, opened = 1263, opaque = 1, case_statement = 9, for_expression = 146,
         if_expression = 685, if_statement = 1, loop_expression = 9, match_block = 190,
         match_expression = 190, while_expression = 33, ['while_expression:opaque'] = 1 },

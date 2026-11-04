@@ -361,15 +361,19 @@ local RUBY_FORMS = {
     { id = 'begins',     node = 'rescue',          chain = 3 },
     { id = 'doblock',    node = 'do_block' },
     { id = 'braceblock', node = 'block' },
-    -- the MODIFIERS. A modifier takes exactly ONE statement, so every body variant except
-    -- `one` is illegal — and that is recorded as a SKIP rather than quietly not emitted.
-    { id = 'ifmod',      node = 'if_modifier',     onebody = true },
-    { id = 'unlessmod',  node = 'unless_modifier', onebody = true },
-    { id = 'whilemod',   node = 'while_modifier',  onebody = true },
-    { id = 'untilmod',   node = 'until_modifier',  onebody = true },
+    -- the MODIFIERS. A modifier takes exactly ONE statement — and that statement may be a `begin … end` holding any
+    -- body, which for `while`/`until` is ruby's POST-TEST loop (`begin … end while c`: the body runs first). So every
+    -- body variant is legal: `one` is the bare form, the others wrap their body in a begin (CART-0405: these 72 cells
+    -- were SKIPPED as illegal, and the skip hid CART-1889 — that whole form was one opaque row)
+    { id = 'ifmod',      node = 'if_modifier' },
+    { id = 'unlessmod',  node = 'unless_modifier' },
+    { id = 'whilemod',   node = 'while_modifier' },
+    { id = 'untilmod',   node = 'until_modifier' },
 }
 local RUBY_SHELLS = { 'top', 'inloop', 'inif', 'inelse', 'inblock', 'inrescue' }
 local RUBY_BODIES = { 'empty', 'one', 'two', 'nest' }
+local MODKW = { ifmod = { 'if', 'm > 0' }, unlessmod = { 'unless', 'm > 0' },
+    whilemod = { 'while', 'm > 100' }, untilmod = { 'until', 'm > 100' } }
 
 local function ruby(opts)
     opts = opts or {}
@@ -475,16 +479,19 @@ local function ruby(opts)
                 w(p .. 'xs.each { |x|')
                 emit_body(bodykind, ind + 1)
                 w(p .. '}')
-            elseif f == 'ifmod' then
-                claim('if_modifier'); w(p .. 'acc = step(acc) if m > 0')
-            elseif f == 'unlessmod' then
-                claim('unless_modifier'); w(p .. 'acc = step(acc) unless m > 0')
-            elseif f == 'whilemod' then
-                -- ★ CART-0394's cell: the four block loops and the two IF modifiers both
+            elseif MODKW[f] then
+                -- ★ CART-0394's cell (whilemod / untilmod): the four block loops and the two IF modifiers both
                 -- landed in part A, so every aggregate looked complete. This is the product.
-                claim('while_modifier'); w(p .. 'acc = step(acc) while m > 100')
-            elseif f == 'untilmod' then
-                claim('until_modifier'); w(p .. 'acc = step(acc) until m > 100')
+                local kw, cond = MODKW[f][1], MODKW[f][2]
+                claim(kw .. '_modifier')
+                if bodykind == 'one' then
+                    w(p .. 'acc = step(acc) ' .. kw .. ' ' .. cond)
+                else
+                    claim('begin')
+                    w(p .. 'begin')
+                    emit_body(bodykind, ind + 1)
+                    w(p .. 'end ' .. kw .. ' ' .. cond)
+                end
             else
                 error('genmatrix: no ruby emitter for form ' .. tostring(f))
             end
@@ -537,12 +544,7 @@ local function ruby(opts)
         for _, shell in ipairs(RUBY_SHELLS) do
             for _, body in ipairs(RUBY_BODIES) do
                 for chain = 1, (F.chain or 1) do
-                    if F.onebody and body ~= 'one' then
-                        skipped[#skipped + 1] = { form = F.id, shell = shell, body = body,
-                            chain = chain, why = 'a modifier takes exactly ONE statement' }
-                    else
-                        cell(F.id, shell, body, chain)
-                    end
+                    cell(F.id, shell, body, chain)
                 end
             end
         end

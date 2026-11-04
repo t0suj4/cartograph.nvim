@@ -114,7 +114,12 @@ local HEADFIELD = { preproc_if = 'condition', preproc_elif = 'condition',
     case_expr = 'expr', receive_expr = false, if_expr = false,
     -- …and a `fun` (CART-1106) evaluates nothing where it stands: its clauses are arms, run later. Erlang's
     -- alone across the 45 installed grammars (checked by language.inspect).
-    anonymous_fun = false }
+    anonymous_fun = false,
+    -- ruby's MODIFIER forms (CART-1889) evaluate only their condition: the body is ONE statement, and when it is a
+    -- `begin … end` (the post-test loop) du walked straight into it — a begin hangs its statements directly — so the
+    -- head read every name in the loop body. Ruby's alone across the 45 installed grammars (language.inspect).
+    if_modifier = 'condition', unless_modifier = 'condition',
+    while_modifier = 'condition', until_modifier = 'condition' }
 -- a clause whose case LABEL is a CHILD rather than a `value` field (java `switch_label`)
 local CASELABEL = { switch_label = true }
 -- control forms with an acquire step that runs BEFORE the head, like a three-part for's
@@ -1098,7 +1103,8 @@ function M.build(fnnode, src, cfg)
     -- escape LICM by row kind rather than by luck of position, and moving them would
     -- reorder every lua function's rows for no soundness gain.
     local function for_init(node)
-        if not node:field('body')[1] then return nil end
+        local bodyf = node:field('body')[1]
+        if not bodyf then return nil end
         local init = node:field('initializer')[1]
         if init then return init end
         local cond = node:field('condition')[1]
@@ -1107,7 +1113,9 @@ function M.build(fnnode, src, cfg)
         -- that PRECEDES the condition (and is not a clause or the body).
         for _, c in tsutil.inext, node, -1 do
             if c:id() == cond:id() then return nil end
-            if c:named() and not COMMENT[c:type()]
+            -- (and not the body FIELD: ruby's `x while c` puts its body BEFORE the condition, and a body that is a
+            -- plain statement passes every TYPE test — it was emitted as the loop's init, before the head, CART-1889)
+            if c:named() and not COMMENT[c:type()] and c:id() ~= bodyf:id()
                 and not BODY_[c:type()] and not CLAUSE_[c:type()] then return c end
         end
         return nil

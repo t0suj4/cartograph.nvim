@@ -448,8 +448,9 @@ M.EXPECTED = {
     -- rails 463 -> 32, the largest fall of any corpus here: ruby interpolation is
     -- everywhere in a rails app, and `missing:string` 83 -> 0 took `assignment` and `call`
     -- with it — the reads were inside the strings those rows are made of.
-    rails = { total = 32, ['missing:conditional'] = 28, ['missing:assignment'] = 2,
-        ['missing:call'] = 1, ['missing:while_modifier'] = 1 },
+    -- (2026-11-04: missing:while_modifier GONE — the loop modifier's head reads only its condition, CART-1889)
+    rails = { total = 31, ['missing:conditional'] = 28, ['missing:assignment'] = 2,
+        ['missing:call'] = 1 },
     -- recalib @ CART-0405: as ruby.
     -- rspec 10 -> 0. A census reaching zero is worth pausing on rather than celebrating:
     -- it means every row this corpus has, the IR and du now agree about — not that the
@@ -458,8 +459,9 @@ M.EXPECTED = {
     -- recalib @ CART-0405: the `begin` head no longer harvests its own body (see libs).
     -- ruby 336 -> 67: `missing:string` 52 -> 0 and the rows it was hiding inside went
     -- with it (call 130 -> 0, assignment 56 -> 4, binary 25 -> 0).
-    ruby = { total = 67, ['missing:conditional'] = 61, ['missing:assignment'] = 4,
-        ['missing:hash'] = 1, ['missing:while_modifier'] = 1 },
+    -- (2026-11-04: missing:while_modifier GONE, as rails)
+    ruby = { total = 66, ['missing:conditional'] = 61, ['missing:assignment'] = 4,
+        ['missing:hash'] = 1 },
     rust = { total = 828, ['missing:match_arm'] = 479, ['missing:let_declaration'] = 123,
         ['extra:match_block'] = 73, ['extra:match_expression'] = 72,
         ['missing:attribute_item'] = 35, ['missing:const_item'] = 16,

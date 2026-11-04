@@ -368,9 +368,14 @@ M.EXPECTED = {
     -- CART-0394 — putting the loop modifiers in ruby's ctrl — settles both sides at once.
     -- `for x in xs` (CART-0393) is planted and currently AGREES: du and the IR both read `x`
     -- as a use, so the self-gate is silent on it. AGREEMENT IS NOT CORRECTNESS.
-    ruby = { hash = '5b4cd48e623065ddcf932c1f3d1aad975fcf5caf9989d53cb5c49294fc4b5732',
-        cells = 384, skipped = 72,
-        ['expr:while_modifier'] = 6, ['expr:until_modifier'] = 6 },
+    -- ★ RE-PINNED 2026-11-04 (CART-0405 / CART-0394 / CART-1889): THE GRID IS CLEAN. The 72 SKIPPED cells were
+    -- not illegal — a modifier takes one statement, and that statement may be a `begin … end` holding any body
+    -- (for while/until: ruby's post-test loop). Emitted, they fired norow:begin 30 — the whole form was one opaque
+    -- row (CART-1889). The loop modifiers went into ruby's ctrl + preloop, for_init stopped taking a body that
+    -- precedes the condition as the loop's init, and all four modifiers are HEADFIELD 'condition'. That also closed
+    -- the 12 above (CART-0394's cell). And `for x in xs` no longer AGREES wrongly: CART-0377 made x a def.
+    ruby = { hash = '16ce80058d0c1aa03bb14eec7946819d674980c41ae4d6c1c15a3b340b215139',
+        cells = 456, skipped = 0 },
 }
 local pin = M.EXPECTED[lang]
 if not pin then

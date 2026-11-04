@@ -976,11 +976,19 @@ M.spec.ruby.ctrl = { ['if'] = 'if', ['unless'] = 'if', ['while'] = true,
     -- the emit fallback handles that, which is the same path a C-family unbraced body takes.
     -- cfg.lua already models both in its COND set (and unless_modifier in INVERTED), so this
     -- brings the ROW model level with the dominance model rather than ahead of it.
-    if_modifier = 'if', unless_modifier = 'if' }
+    if_modifier = 'if', unless_modifier = 'if',
+    -- ★ AND THE LOOP MODIFIERS, which were in no set at all (CART-1889): `x while c` and ruby's post-test loop
+    -- `begin … end while c` were each ONE plain row — the begin's statements had no rows anywhere. The grid's
+    -- `begin`-wrapped modifier cells (CART-0405) found 30 of them; they had been SKIPPED as illegal before.
+    while_modifier = true, until_modifier = true }
 -- PRE-condition: the test runs before the body, so a zero-trip skip is feasible and the
 -- back-edge wires to the head. `until` is a while with an INVERTED condition, which cfg.lua
 -- already models (its INVERTED set) — the loop STRUCTURE is identical, so it belongs here.
-M.spec.ruby.preloop = { ['while'] = true, ['until'] = true, ['for'] = true }
+-- ★ The loop MODIFIERS too, though `begin … end while c` runs its body FIRST: a node-type set cannot tell
+-- `x while c` (tests first) from the begin form, and pre-test is the SOUND side of the two — it adds a zero-trip
+-- edge the begin form never takes, where post-test would claim `x while c` always runs x (CART-1889).
+M.spec.ruby.preloop = { ['while'] = true, ['until'] = true, ['for'] = true,
+    while_modifier = true, until_modifier = true }
 M.spec.ruby.body = { ['then'] = true, ['do'] = true }
 -- a MAP, not a set: the value names WHICH clause class, so clause() can dispatch without
 -- two more spec keys. `elsif` is a guard over a body (condition + consequence), `when` is a

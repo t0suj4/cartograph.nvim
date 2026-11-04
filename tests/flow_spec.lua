@@ -1085,6 +1085,25 @@ test('flow: a ruby for opens its body, and its variable is a def', function ()
     ok(not setof(head.use).x, 'x is a binding, not a free use: ' .. vim.inspect(head.use))
 end)
 
+-- (CART-1889 / CART-0394: ruby's LOOP MODIFIERS were in no set. `x while c` folded body and condition into one row,
+-- and the post-test loop `begin … end while c` hid its whole body in that row. Now: the head is a loop reading only
+-- its condition, the body is its child, and a begin body's statements are rows under the begin)
+test('flow: ruby loop modifiers are loops whose body is a child row, a begin body included', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(m)\n  acc = step(acc) while m > 100\n  begin\n    g(1)\n    g(2)\n  end until m > 1\nend')
+    local w = head_of(fl, 'while_modifier')
+    ok(w, 'the while modifier is a row')
+    eq({ 'assignment' }, kids_of(fl, w), 'its one statement is its child, not a sibling before it')
+    eq({ 'm' }, fl.stmts[w].use, 'the head reads its condition only')
+    local u = head_of(fl, 'until_modifier')
+    ok(u, 'the until modifier is a row')
+    eq({ 'begin' }, kids_of(fl, u), 'its body is the begin')
+    eq({ 'm' }, fl.stmts[u].use, 'and the head does NOT read the begin body (g)')
+    eq(2, #kids_of(fl, head_of(fl, 'begin')), 'the begin\'s two statements are rows')
+    local L = flow.loops_of(fl)
+    ok(L.while_modifier == true and L.until_modifier == true, 'both are LOOPS (a back edge): ' .. vim.inspect(L))
+end)
+
 test('flow: a ruby if regions its then-branch, and elsif/else are CLAUSES', function ()
     if not ready('ruby') then skip 'no ruby parser' end
     local fl = rb('def f(a, b)\n  if a\n    g(1)\n    g(2)\n  elsif b\n    g(3)\n'
