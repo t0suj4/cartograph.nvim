@@ -417,6 +417,21 @@ test('forms: a rust enum opens to its variants', function ()
     eq({ 'A', 'B(u8)', 'C { x: u8 }' }, out)
 end)
 
+-- ONE NODE-TYPE NAME, TWO SHAPES (CART-0466): zig's `enum_declaration` holds its members as direct children, java's
+-- holds modifiers + a name + an enum_body. The browser's block set is global, so opening it for zig fabricated rows in
+-- java, and leaving it out cost zig 2014 traps. The zig spec declares it as ITS descent block; java is untouched (the
+-- java enum case above still opens through enum_body, constants and methods, with no `E` row).
+test('forms: a zig enum opens to its members, through the spec\'s own descent block', function ()
+    if not has_parser('zig') then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/e.zig', 'w'))
+    fd:write('const Color = enum {\n    red,\n    green,\n    blue,\n};\n'); fd:close()
+    local out = {}
+    for _, f in ipairs(ts.forms(root .. '/e.zig', 0)) do out[#out + 1] = f.text:gsub('%s+$', '') end
+    vim.fn.delete(root, 'rf')
+    eq({ 'red', 'green', 'blue' }, out)
+end)
+
 -- zig was the worst language in the navigation census — 9491 trapped statements in
 -- 40 files of ~/git/zig/src, 33 causes (CART-0463) — and the reason is grammatical:
 -- it wraps a body TWICE (`if_statement > block_expression > block`), hangs a label

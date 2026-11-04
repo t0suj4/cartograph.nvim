@@ -454,6 +454,11 @@ local function zig_std_aliases(tsroot, src)
 end
 
 return {
+    -- DESCENT (CART-0466): zig's `enum_declaration` holds its members as direct children
+    -- (`enum { a, b }` -> container_field, container_field), so it IS a block — in zig.
+    -- java spells its enum the same way with a different shape, which is why this is
+    -- declared here and not in the browser's global set.
+    descent_blocks = { enum_declaration = true },
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

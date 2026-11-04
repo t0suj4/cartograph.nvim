@@ -5229,8 +5229,22 @@ local ROOT_TYPES = { chunk = true, program = true, source_file = true,
 -- immediate sub-forms of `node`: nested statements (through block/clause
 -- wrappers) for imperative langs; child list forms for lisp (the head symbol
 -- and, for a def/lambda, the signature list are not sub-forms).
-local function child_forms(node, lisp)
+-- the descent BLOCK set for a language: the global SUBSTMT_BLOCKS plus the spec's own `descent_blocks`, for the
+-- node-type names whose SHAPE differs by grammar (CART-0466: zig's enum_declaration is a block, java's is not)
+local BLOCKS_BY_LANG = {}
+local function blocks_for(lang)
+    local b = lang and BLOCKS_BY_LANG[lang]
+    if b then return b end
+    local extra = lang and M.spec[lang] and M.spec[lang].descent_blocks
+    b = extra and setmetatable({}, { __index = function (_, k) return SUBSTMT_BLOCKS[k] or extra[k] end })
+        or SUBSTMT_BLOCKS
+    if lang then BLOCKS_BY_LANG[lang] = b end
+    return b
+end
+
+local function child_forms(node, lisp, lang)
     local out = {}
+    local BLK = blocks_for(lang)
     if lisp then
         -- every child list is a nested form (the caller drops the signature
         -- list of a def/lambda); bare symbols/atoms are leaves, not forms.
@@ -5274,7 +5288,7 @@ local function child_forms(node, lisp)
                 kids[#kids + 1] = g
             end
         end
-        if #kids == 1 and SUBSTMT_BLOCKS[kids[1]:type()] then return emit_block(kids[1]) end
+        if #kids == 1 and BLK[kids[1]:type()] then return emit_block(kids[1]) end
         for _, g in ipairs(kids) do
             if SPLICE_BLOCKS[g:type()] then emit_block(g) else out[#out + 1] = g end
         end
@@ -5302,7 +5316,7 @@ local function child_forms(node, lisp)
                 if CLAUSE_SEP[c:type()] then past = true end
             elseif not tsutil.is_comment(c) then
                 local t = c:type()
-                if SUBSTMT_BLOCKS[t] then
+                if BLK[t] then
                     emit_block(c)
                 elseif SUBSTMT_CASES[t] then
                     out[#out + 1] = c -- an arm is a form, not a wrapper
@@ -5348,7 +5362,7 @@ local function child_forms(node, lisp)
         if not only then break end
         entry = only
     end
-    if SUBSTMT_BLOCKS[entry:type()] then
+    if BLK[entry:type()] then
         emit_block(entry)
         return out
     end
@@ -5383,7 +5397,7 @@ function M.child_forms(node, lang)
         end
         return out
     end
-    return child_forms(node, lisp)
+    return child_forms(node, lisp, lang)
 end
 
 -- (binder_at — the scope-model shadow-attribution service — was RETIRED here
@@ -5393,11 +5407,11 @@ end
 
 --- One form record. The form's OWN text (first line), so several forms sharing
 --- a source line read distinctly; whitespace collapsed and truncated.
-local function form_rec(node, src, lisp)
+local function form_rec(node, src, lisp, lang)
     local sr, sc, er, ec = node:range()
     return { sr = sr, sc = sc, er = er, ec = ec,
         text = node_text(node, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80),
-        branch = #child_forms(node, lisp) > 0 }
+        branch = #child_forms(node, lisp, lang) > 0 }
 end
 
 --- The node spanning an EXACT range. `named_descendant_for_range` answers the
@@ -5474,7 +5488,7 @@ function M.forms(file, sr, sc, er, ec, opts)
                 local csr, csc, cer, cec = c:range()
                 if (csr > sr or (csr == sr and csc >= sc))
                     and (cer < er or (cer == er and cec <= ec)) then
-                    out[#out + 1] = form_rec(c, src, lisp)
+                    out[#out + 1] = form_rec(c, src, lisp, lang)
                 end
             end
         end
@@ -5487,7 +5501,7 @@ function M.forms(file, sr, sc, er, ec, opts)
         -- position mode: the statement that STARTS on row `sr` — the child of
         -- a block/root that begins there (indentation-agnostic; col ignored)
         local function find_stmt(node)
-            local container = SUBSTMT_BLOCKS[node:type()] or ROOT_TYPES[node:type()]
+            local container = blocks_for(lang)[node:type()] or ROOT_TYPES[node:type()]
                 or SUBSTMT_CASES[node:type()] -- a case holds its statements directly
             for _, c in inext, node, -1 do
                 if c:named() and not tsutil.is_comment(c) then
@@ -5521,7 +5535,7 @@ function M.forms(file, sr, sc, er, ec, opts)
         end
     end
 
-    local subs = child_forms(n, lisp)
+    local subs = child_forms(n, lisp, lang)
     -- ...and it is the signature only if it sits IMMEDIATELY AFTER THE HEAD. Dropping
     -- the first list unconditionally was safe only while a quoted form could not be a
     -- form at all: the moment the quote sigils opened (CART-0461), `(define roman
@@ -5534,7 +5548,7 @@ function M.forms(file, sr, sc, er, ec, opts)
     end
 
     local out = {}
-    for _, s in ipairs(subs) do out[#out + 1] = form_rec(s, src, lisp) end
+    for _, s in ipairs(subs) do out[#out + 1] = form_rec(s, src, lisp, lang) end
     return out
 end
 

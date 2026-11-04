@@ -422,7 +422,7 @@ section when you use it; the fence only requires that each appears somewhere in 
 - `tools/mcpserve.lua` — T3: THE MCP STDIO HOST — the pure verb table (lua/cartograph/agent.lua)
 - `tools/mentionbuf.lua` — mentionbuf — SIZE the per-file mention buffers, i.e. price KEEPING them past
 - `tools/navaudit.lua` — The NAV AUDIT — fence the NAVIGATION surface the way tools/docaudit.lua fences
-- `tools/navcensus.lua` — navcensus — WHAT CAN THE BROWSER NOT DESCEND INTO, per language (CART-0456).
+- `tools/navcensus.lua` — navcensus — WHAT CAN THE BROWSER NOT DESCEND INTO, per language (CART-0456). A node-type name whose SHAPE differs by grammar is declared per language in the spec's `descent_blocks` (contract group NAVIGATION, CART-0466: zig's `enum_declaration` is a block, java's is not; zig 49 -> 38 files trapped, java identical).
 - `tools/nodegate.lua` — nodegate — the faithfulness gate for the resident columnar NODE store
 - `tools/observe.lua` — The DISPATCH OBSERVER: cartograph's runtime/confirmed tier, driven
 - `tools/patchcensus.lua` — MONKEY-PATCH CENSUS (CART-0618) — where does this code modify a table it did

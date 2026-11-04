@@ -30,6 +30,7 @@ M.GROUPS = {
     { name = 'TYPES',     unlocks = 'receiver / return / chain / field typing' },
     { name = 'EMITTERS',  unlocks = 'convention defs (accessors, ctors, ancestors, callbacks)' },
     { name = 'ANALYSIS',  unlocks = 'flow / df / effects / write-axis / taint' },
+    { name = 'NAVIGATION', unlocks = 'browser descent: which node types open to their members' },
     { name = 'QUIRKS',    unlocks = 'nothing new — quarantined single-language shims (generalize or die)' },
 }
 
@@ -50,6 +51,12 @@ M.SLOTS = {
     -- nothing to fix. Length-preserving is the contract: every range in the graph is
     -- an offset into the repaired bytes and must still address the raw file.
     src_repair = 'CORE',
+
+    -- NAVIGATION (CART-0466): node types that are a descent BLOCK in THIS language only. The browser's block set is
+    -- global and keyed by node-type name, and one name can be two shapes: zig's `enum_declaration` holds its members
+    -- as children, java's holds modifiers + a name + an enum_body. A global entry opens zig and FABRICATES rows in
+    -- java; leaving it out cost zig 2014 traps. A spec declares the collision-prone ones for itself.
+    descent_blocks = 'NAVIGATION',
 
     -- SCOPE&KEY: how names scope, qualify, key; the stdlib tail gate (until L2)
     -- ★ `lexical_scopes` WAS `scopes` (CART-1160 step 7): one letter from `scope` and an unrelated meaning — `scope`
