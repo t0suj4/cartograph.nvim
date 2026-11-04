@@ -2451,7 +2451,8 @@ local function parse_root(src, lang, lines)
     local shared = require('cartograph.parsecache').peek(view, lang)
     -- release BEFORE parsing: two trees alive at once is the peak we are cutting
     M.parse_release()
-    if shared then -- (held here as the current entry; parsecache owns the tree, so there is no parser to keep)
+    local rep = spec[lang] and spec[lang].src_repair -- (CART-0404, below: a shared tree the repair would change is no hit)
+    if shared and not (rep and rep(shared, view)) then -- (held here as the current entry; parsecache owns the tree, so there is no parser to keep)
         pc.lines, pc.src, pc.lang, pc.root, pc.parser = lines, src, lang, shared, false
         return shared
     end
@@ -2460,6 +2461,22 @@ local function parse_root(src, lang, lines)
     local tree = parser:parse()[1]
     local root = tree and tree:root() or nil
     if not root then return nil end
+    -- ★ THE EXTRACTOR'S SOURCE REPAIR, HERE TOO (CART-0404). Extraction re-parses a file its grammar demonstrably
+    -- misread (spec.src_repair: cpp's macro between `class` and its name, which turns the class BODY into a
+    -- function's), and this re-parse did not — so `fn_node` found the wreck's function around a method and
+    -- flow.build ran over a CLASS BODY: `friend class X;`, `using T = …;`, `HeapBase& heap_;` became statements the
+    -- IR read and du defined (v8: 472 distinct `binder:declaration` rows, 360 of them `friend`). Same fixpoint bound.
+    if rep then
+        local text = view
+        for _ = 1, 4 do
+            local fixed = rep(root, text)
+            if not fixed then break end
+            local okr, p2 = pcall(vim.treesitter.get_string_parser, fixed, lang)
+            local t2 = okr and p2:parse()[1]
+            if not t2 then break end
+            text, parser, root = fixed, p2, t2:root()
+        end
+    end
     -- the PARSER is kept alive alongside the root: a TSNode is only valid while its
     -- tree is, and the tree's owner is the parser
     pc.lines, pc.src, pc.lang, pc.root, pc.parser = lines, src, lang, root, parser

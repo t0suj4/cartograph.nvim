@@ -1933,3 +1933,56 @@ test('bound_names: a lua numeric for binds its NAME only — not the start, limi
     local got = expr.bound_names(root, src, ts.spec.lua.binders)
     eq({ i = true, _ = true, v = true }, got)
 end)
+
+-- (CART-0404: THE IR RE-PARSES WITH THE EXTRACTOR'S SOURCE REPAIR. `class EXPORT_IT Foo { … }` — a macro between
+-- `class` and its name — parses as a function whose BODY is the class; extraction repairs it (spec.src_repair) and
+-- mints Foo::m, but expr's own re-parse did not, so the method's enclosing function was the WRECK and its rows were
+-- the class body: `friend class Bar;` and `using T = int;` read as statements, the IR reading what du defined.
+-- v8: 472 distinct binder:declaration rows, 360 of them `friend`)
+test('expr: a body-less member of a macro-headed C++ class gets no rows, not the class body (CART-0404)', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/u.cpp', 'w'))
+    fd:write(table.concat({
+        'class EXPORT_IT Foo {',
+        ' public:',
+        '  explicit Foo(int s);',
+        '  void m(int a) { g(a); }',
+        '  friend class Bar;',
+        '  using T = int;',
+        ' private:',
+        '  int x_;',
+        '};', '' }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local by = {}
+    for _, n in ipairs(store.data.nodes) do by[n.name] = n end
+    -- WARM: the extractor shares its FIRST tree through parsecache — the unrepaired one, under the original bytes'
+    -- key (ingest clears the cache, so it is put back here the way extraction puts it) — and a peek hit must be
+    -- checked against the repair, not served
+    do
+        local src = table.concat(vim.fn.readfile(root .. '/u.cpp'), '\n') -- (expr's key: store.content's lines joined)
+        local view = require('cartograph.parseview').view(src, 'cpp')
+        local p = vim.treesitter.get_string_parser(view, 'cpp')
+        local tr = p:parse()[1]
+        eq('function_definition', tr:root():named_child(0):type(), 'the raw parse IS the wreck')
+        require('cartograph.parsecache').put(view, 'cpp', tr, tr:root())
+    end
+    expr.parse_release()
+    local w = expr.of(store, by['Foo'].id)
+    eq(0, w and #w.fl.stmts or 0, 'warm: the shared tree is the wreck, and it is not served')
+    -- COLD, as the census meets a file
+    require('cartograph.parsecache').clear(); expr.parse_release()
+    ok(by['Foo::m'], 'extraction repaired the class: Foo::m is a method')
+    ok(by['Foo'] and by['Foo'].kind == 'function', 'the constructor declaration is a node')
+    local e = expr.of(store, by['Foo'].id)
+    local rows = {}
+    for _, st in ipairs(e and e.fl.stmts or {}) do rows[#rows + 1] = tostring(st.t) end
+    eq(0, #rows, 'a declaration has no body: no rows — the unrepaired re-parse gave it the CLASS BODY: '
+        .. table.concat(rows, ','))
+    local em = expr.of(store, by['Foo::m'].id)
+    vim.fn.delete(root, 'rf')
+    eq(1, #em.fl.stmts, 'the method has its one row')
+    eq(0, #expr.gate(em.fl, em.lang), 'and the IR agrees with du on it')
+end)
