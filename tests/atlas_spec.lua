@@ -264,3 +264,28 @@ test('atlas: unobserved is in the public label set, so a census counts it', func
     eq(2, c.counts.unobserved)
     eq(0, c.counts.const, 'and it is not double-counted as const')
 end)
+
+-- ★ A REBIND IS NOT A MUTATION THROUGH THE BINDING (CART-0534). The edge's `rw` is the union over its occurrences, so
+-- `T.x = 1` and `T = {}` were one fact; the edge's `flds` (field -> packed rw + gw*4, '' = the whole var) splits them.
+-- RED IF the split reads `rw` alone: then T would count a rebind.
+test('classify: a write through a NAMED field is a mutation, a write on the whole var a rebind', function ()
+    local function use_f(from, to, rw, flds) local e = use(from, to, rw); e.flds = flds; return e end
+    store.ingest({ schema = 1, nodes = {
+        node('m.lua::M.f'), node('m.lua::M.g'), node('m.lua::M.h'), node('m.lua::M.k'),
+        node('m.lua::var:T', 'var'), node('m.lua::var:R', 'var'), node('m.lua::var:Q', 'var'),
+    }, edges = {
+        use_f('m.lua::M.f', 'm.lua::var:T', 2, { x = 6 }),      -- T.x = 1
+        use_f('m.lua::M.g', 'm.lua::var:T', 1, { x = 1 }),
+        use_f('m.lua::M.h', 'm.lua::var:R', 2, { [''] = 6 }),   -- R = { … }
+        use_f('m.lua::M.k', 'm.lua::var:R', 1, { y = 1 }),
+        use('m.lua::M.f', 'm.lua::var:Q', 2),                   -- no field facts at all: conservatively a rebind
+        use('m.lua::M.g', 'm.lua::var:Q', 1),
+    } })
+    local t = atlas.classify(store, 'm.lua::var:T', { indirect = false })
+    eq({ 0, 1 }, { t.rebinds, t.mutations }, 'T: mutated, never rebound')
+    local r = atlas.classify(store, 'm.lua::var:R', { indirect = false })
+    eq({ 1, 0 }, { r.rebinds, r.mutations }, 'R: rebound')
+    local q = atlas.classify(store, 'm.lua::var:Q', { indirect = false })
+    eq({ 1, 0 }, { q.rebinds, q.mutations }, 'Q: no field facts — counted as a rebind, the conservative side')
+    eq('single-writer', t.label, 'the LABEL is unchanged: naming the new rung is the user\'s decision')
+end)

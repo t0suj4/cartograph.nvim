@@ -72,6 +72,11 @@ function M.classify(store, id, opts)
     local nr, nw, unk, gwmin = 0, 0, false, nil
     local writers = {}
     local nedge = 0
+    -- ★ A REBIND IS NOT A MUTATION THROUGH THE BINDING (CART-0534). The edge's `rw` is the union over its occurrences,
+    -- so `T.x = 1` and `T = {}` were the same fact here — and 154 `final` server vars (a rebind is a compile error)
+    -- read as written. The edge's `flds` (field -> packed rw + gw*4, '' = the whole var) splits them: a write on a NAMED
+    -- field mutated the object; a write on '' — or an edge with no field facts at all — wrote the binding.
+    local nrb, nmut = 0, 0
     for _, u in ipairs(store.topo():var_used_by_detail(id)) do
         nedge = nedge + 1
         local rw = u.rw
@@ -84,6 +89,8 @@ function M.classify(store, id, opts)
                 writers[nw] = u.from
                 local g = u.gw or 1
                 if not gwmin or g < gwmin then gwmin = g end
+                local whole = not u.flds or (u.flds[''] and u.flds[''] % 4 >= 2)
+                if whole then nrb = nrb + 1 else nmut = nmut + 1 end
             end
         end
     end
@@ -99,6 +106,7 @@ function M.classify(store, id, opts)
             if not seenw[fid] then
                 seenw[fid] = true
                 nw = nw + 1; nwi = nwi + 1
+                nmut = nmut + 1 -- (a callee writing through its PARAMETER mutates the object; it cannot rebind our var)
                 writers[nw] = fid
                 gwmin = math.min(gwmin or 1, 1)
             end
@@ -129,8 +137,10 @@ function M.classify(store, id, opts)
     -- reads change is const-on-nothing -> const-with-evidence, a STRENGTHENING.
     -- So the honest surface is a count ("const · 7 reads (7 via config_get)") and
     -- per-row marks, not a hedge glyph implying doubt about the label.
+    -- `rebinds` / `mutations` split `nw` (CART-0534); the LABEL is unchanged — what to call "never rebound, object
+    -- mutated" is a browser vocabulary decision the ticket leaves with the user
     return { label = label, nr = nr, nw = nw, nwi = nwi > 0 and nwi or nil, writers = writers, gw = gwmin,
-        dnr = dnr > 0 and dnr or nil }
+        dnr = dnr > 0 and dnr or nil, rebinds = nrb, mutations = nmut }
 end
 
 -- ── the FIELD atlas: one var, decomposed per field, on demand ────────────
