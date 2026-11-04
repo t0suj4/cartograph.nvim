@@ -5949,6 +5949,35 @@ local function build(store, opts)
             table.sort(l)
             return #l > 0 and l or nil, tostring(obinfo[o] or o)
         end
+        -- (EVERY unknown-code hand-out whose object reaches o, CART-1866: the closure's field / prototype edges reversed,
+        -- walked back from o to each object a hand-out port held — not the spanning tree's one witness. On WoW w3 the
+        -- witness sent 332 of 551 partial answers to AceDB's CallbackDummy, one of the many roots reaching them.
+        -- Reach over the escaped set as it stands after the solve; memoised per object)
+        do local xrev, xall
+        function G7.allsites(o) -- (a G7 field: build is at Lua's 200 locals)
+            xbuild()
+            if not xrev then
+                xrev, xall = {}, {}
+                local function add(x, o2) local t = xrev[x]; if not t then t = {}; xrev[x] = t end; t[#t + 1] = o2 end
+                for o2 in pairs(XESC) do
+                    for _, fp in pairs(ofield[o2] or NOTHING) do for x in each(fp) do if XESC[x] and x ~= o2 then add(x, o2) end end end
+                    for c in pairs(protos[o2] or NOTHING) do if XESC[c] and c ~= o2 then add(c, o2) end end
+                end
+            end
+            local m = xall[o]
+            if m then return m end
+            local seen, q, set, i = { [o] = true }, { o }, {}, 1
+            while i <= #q do
+                local x = q[i]; i = i + 1
+                for st, ks in pairs(xheld[x] or NOTHING) do set[xkey(st, ks)] = true end
+                for _, y in ipairs(xrev[x] or NOTHING) do if not seen[y] then seen[y] = true; q[#q + 1] = y end end
+            end
+            m = {}
+            for k in pairs(set) do m[#m + 1] = k end
+            table.sort(m)
+            xall[o] = m
+            return m
+        end end
         local function ofport(q) -- (the object a seed's port stands for: the rule's object, a field's owner, a function
             -- — whose parameter it is: what calls it passes the value IN)
             if G7.TOBJ[q] then return G7.TOBJ[q] end
@@ -5997,7 +6026,7 @@ local function build(store, opts)
                 dir = d or dir
             else o, why = v.pesc, 'an escaped receiver lacks the member' end
             if not o then return { cause = why or '?', at = q and label(q), why = why } end
-            if why == G7.WHYX then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, at = at, why = why, dir = dir } end
+            if why == G7.WHYX then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, all = G7.allsites(o), at = at, why = why, dir = dir } end
             local seen, w = {}, nil
             while o and not seen[o] do -- (its carriers, to the object that escaped first)
                 seen[o] = true
@@ -6006,7 +6035,7 @@ local function build(store, opts)
             end
             -- (what unknown code holds: its hand-outs, also where saturation reached it first — the root no refinement
             -- of the solve removes, G7.EROOTC)
-            if w == G7.EXTCALL or G7.EROOTC[o] == 'unknown-code' then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, at = at, why = why, dir = dir } end
+            if w == G7.EXTCALL or G7.EROOTC[o] == 'unknown-code' then local l, at = xsites(o); return { cause = 'unknown-code', sites = l, all = G7.allsites(o), at = at, why = why, dir = dir } end
             local ho = G7.ESCHO[o]
             if ho then return { cause = ho[1], sites = { ho[1] .. ' ' .. (ho[2] or '-') }, at = tostring(obinfo[o] or o), why = why, dir = dir } end
             return { cause = G7.EROOTC[o] or why or '?', at = tostring(obinfo[o] or o), why = why }
@@ -6051,7 +6080,7 @@ local function build(store, opts)
                             local fo = prev and ofport(prev)
                             if not fo then return { cause = 'unknown-code', root = k, at = label(q), dir = 'in' } end
                             local l, at = xsites(fo)
-                            return { cause = 'unknown-code', root = k, sites = l, at = at, dir = 'in' }
+                            return { cause = 'unknown-code', root = k, sites = l, all = G7.allsites(fo), at = at, dir = 'in' }
                         elseif k == 'proto' then return { cause = 'unknown-code', root = k, at = tostring(obinfo[w[2]] or w[2]), dir = 'in' }
                         elseif k == 'host-global' then return { cause = k, root = k, sites = w[2] and sitekeys(w[2], k), at = label(q), dir = 'in' }
                         elseif k == 'export' or k == 'placeholder' then return { cause = k, root = k, at = label(q), dir = 'in' }

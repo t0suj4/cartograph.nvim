@@ -10,6 +10,10 @@
 -- answers = the partial answers listing it, sole = those listing ONLY it, in = those where outside code passes a value
 -- IN (calls a tree function it was handed), closure = the objects unknown code was handed there, closed over fields and
 -- prototypes (unknown-code sites only). Every unknown-code site is a row, also one no answer traces to.
+-- REACH (CART-1866): `answers` / `sole` follow ONE witness route per answer (the closure's spanning tree); `reach` counts
+-- the partial answers EVERY hand-out site reaches (R.entry_of's `all`: the closure walked back from the answer's object to
+-- each object a hand-out held), `alone` those only this site reaches — the answers one contract on this site could
+-- touch at all, and the ones no other site also explains. Still first-arrival taint (FLOW-0123): reach is no removal.
 -- ROOTS: the same answers by the OBJECT they trace to (R.entry_of's `at`: the root handed over, on the closure's
 -- spanning tree — ONE WITNESS ROUTE, not every root that reaches the answer — or the late-escaped object)
 -- with the number of entry sites that handed it — one object handed at many sites is one contract, not many: WoW w3's
@@ -32,12 +36,12 @@ local function measure(store, p)
     local t0 = vim.uv.hrtime()
     local R = require('cartograph.flowtype').solve(store, { open = p.mode == 'open', ctx = false, explain = true })
     local v = { secs = 0, partial = 0, entry = 0, loss = 0, nosite = 0, causes = {}, rows = {}, sites = 0, roots = {},
-        unknown = 0, usat = 0, unosite = 0, ucauses = {} }
+        unknown = 0, usat = 0, unosite = 0, ucauses = {}, multi = 0 }
     local roots = {}
     local rows = {}
     local function row(k)
         local r = rows[k]
-        if not r then r = { key = k, answers = 0, sole = 0, ['in'] = 0, closure = 0, unknown = 0 }; rows[k] = r end
+        if not r then r = { key = k, answers = 0, sole = 0, ['in'] = 0, closure = 0, unknown = 0, reach = 0, alone = 0 }; rows[k] = r end
         return r
     end
     for k, n in pairs(R.xclosure()) do row(k).closure = n end
@@ -61,6 +65,13 @@ local function measure(store, p)
                     r.answers = r.answers + 1
                     if #e.sites == 1 then r.sole = r.sole + 1 end
                     if e.dir == 'in' then r['in'] = r['in'] + 1 end
+                end
+                local all = e.all or e.sites
+                if #all > 1 then v.multi = v.multi + 1 end
+                for _, k in ipairs(all) do
+                    local r = row(k)
+                    r.reach = r.reach + 1
+                    if #all == 1 then r.alone = r.alone + 1 end
                 end
             end
         else
@@ -88,10 +99,10 @@ local function measure(store, p)
     v.sites = #l
     if p.out then
         local fd = assert(io.open(p.out, 'w'))
-        fd:write('kinds\tsite\tanswers\tsole\tin\tclosure\tunknown\n')
+        fd:write('kinds\tsite\tanswers\tsole\tin\tclosure\tunknown\treach\talone\n')
         for _, r in ipairs(l) do
             local ks, st = r.key:match('^(%S+) (.*)$')
-            fd:write(('%s\t%s\t%d\t%d\t%d\t%d\t%d\n'):format(ks, st, r.answers, r.sole, r['in'], r.closure, r.unknown))
+            fd:write(('%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n'):format(ks, st, r.answers, r.sole, r['in'], r.closure, r.unknown, r.reach, r.alone))
         end
         fd:close()
     end
@@ -101,7 +112,7 @@ local function measure(store, p)
     for i = 1, math.min(tonumber(p.top) or 30, #rl) do v.roots[i] = ('%5d %5d  %s'):format(rl[i].answers, rl[i].sites, rl[i].key) end
     for i = 1, math.min(tonumber(p.top) or 30, #l) do
         local r = l[i]
-        v.rows[i] = ('%5d %5d %5d %7d %5d  %s'):format(r.answers, r.sole, r['in'], r.closure, r.unknown, r.key)
+        v.rows[i] = ('%5d %5d %5d %7d %5d %5d %5d  %s'):format(r.answers, r.sole, r['in'], r.closure, r.unknown, r.reach, r.alone, r.key)
     end
     return v
 end
@@ -120,6 +131,22 @@ local FX = { ['m.lua'] = table.concat({
     'function D.n(self) return 4 end',
     'local own = setmetatable({}, { __index = C })',
     'local r3 = own:n()' }, '\n') .. '\n' }
+local FXR = { ['m.lua'] = table.concat({
+    'local ext = require("notintree")',
+    'local A, B = {}, {}',
+    'function A.m(self) return 1 end',
+    'function B.m(self) return 2 end',
+    'local x = { k = setmetatable({}, { __index = A }) }',
+    'local r1 = { x = x }',
+    'local r2 = { y = { z = x } }',
+    'ext.f(r1)',
+    'ext.g(r2)',
+    'local a1 = x.k:m()',
+    'local y = { k = setmetatable({}, { __index = B }) }',
+    'ext.h(y)',
+    'local a2 = y.k:m()',
+    'local p = setmetatable({}, { __index = x })',
+    'ext.p(p)' }, '\n') .. '\n' }
 local FXU = { ['m.lua'] = table.concat({
     'local ext = require("notintree")',
     'local A, B = {}, {}',
@@ -133,7 +160,7 @@ return {
     name = 'entry-points',
     kind = 'discovery',
     tags = { 'measure', 'flow', 'code' },
-    summary = 'every site where the tree\'s values meet code the analysis cannot follow (unknown code, a builtin with no model, a host `any`), with the partial answers that FIRST TRACE to each (flowtype R.entry_of) and how many trace to the analysis\'s own losses instead, and the UNKNOWN answers (a receiver that may hold unknown code\'s own value: R.unknown_of, its first arrival back to the call / require / load / function called back that made it); rows = answers, sole, in, closure, unknown, `kinds site`; roots = answers, sites, `cause object` (one object handed at many sites); first arrival, not cause — never read a row as what a contract wins; mode = closed | open, top = rows, out = a TSV of every row',
+    summary = 'every site where the tree\'s values meet code the analysis cannot follow (unknown code, a builtin with no model, a host `any`), with the partial answers that FIRST TRACE to each (flowtype R.entry_of) and how many trace to the analysis\'s own losses instead, and the UNKNOWN answers (a receiver that may hold unknown code\'s own value: R.unknown_of, its first arrival back to the call / require / load / function called back that made it); rows = answers, sole, in, closure, unknown, reach, alone, `kinds site` (reach / alone: the partial answers EVERY site reaches, not one witness route, and those it alone reaches); roots = answers, sites, `cause object` (one object handed at many sites); first arrival, not cause — never read a row as what a contract wins; mode = closed | open, top = rows, out = a TSV of every row',
     params = { mode = 'string?', top = 'string?', out = 'string?' },
     measure = measure,
     claim = function (v)
@@ -143,8 +170,8 @@ return {
         local us = {}
         for k, n in pairs(v.ucauses) do us[#us + 1] = ('%s %d'):format(k, n) end
         table.sort(us)
-        return true, ('%d partial answers: %d first trace to an entry (%d without a site), %d to the analysis\'s own losses; %d unknown: %d trace to unknown code\'s value (%d without a site; %s), %d saturated receivers; %d entry sites; causes: %s; %.1f s')
-            :format(v.partial, v.entry, v.nosite, v.loss, v.unknown, v.unknown - v.usat, v.unosite, table.concat(us, ', '), v.usat, v.sites, table.concat(cs, ', '), v.secs)
+        return true, ('%d partial answers: %d first trace to an entry (%d without a site; %d reached from more than one site), %d to the analysis\'s own losses; %d unknown: %d trace to unknown code\'s value (%d without a site; %s), %d saturated receivers; %d entry sites; causes: %s; %.1f s')
+            :format(v.partial, v.entry, v.nosite, v.multi, v.loss, v.unknown, v.unknown - v.usat, v.unosite, table.concat(us, ', '), v.usat, v.sites, table.concat(cs, ', '), v.secs)
     end,
     examples = {
         {
@@ -154,8 +181,19 @@ return {
             expect = { holds = true, check = function (v)
                 local first, other = v.rows[1] or '', nil
                 for _, r in ipairs(v.rows) do if r:match(' call m%.lua:7:0$') then other = r end end
-                return first:match('^%s+1%s+1%s+0%s+%d+%s+0  call m%.lua:5:0$') ~= nil and other ~= nil and other:match('^%s+0 ') ~= nil
+                return first:match('^%s+1%s+1%s+0%s+%d+%s+0%s+1%s+1  call m%.lua:5:0$') ~= nil and other ~= nil and other:match('^%s+0 ') ~= nil
                     and v.partial == 1 and v.entry == 1 and (v.roots[1] or ''):match('^%s+1%s+1  unknown%-code tbl:m%.lua:4:10$') ~= nil, vim.inspect(v)
+            end },
+        },
+        {
+            name = 'reach: every hand-out whose object reaches the answer counts it, alone only where no other does',
+            files = FXR,
+            params = function () return { top = '10' } end,
+            expect = { holds = true, check = function (v)
+                local got = {}
+                for _, r in ipairs(v.rows) do local re, al, k = r:match('(%d+)%s+(%d+)  (call m%.lua:%d+:0)$'); if k then got[k] = re .. '/' .. al end end
+                return v.multi == 1 and got['call m.lua:7:0'] == '1/0' and got['call m.lua:8:0'] == '1/0' and got['call m.lua:14:0'] == '1/0'
+                    and got['call m.lua:11:0'] == '1/1', vim.inspect(v)
             end },
         },
         {
@@ -165,8 +203,8 @@ return {
             expect = { holds = true, check = function (v)
                 local call, req
                 for _, r in ipairs(v.rows) do
-                    if r:match('^%s+0%s+0%s+0%s+%d+%s+1  call m%.lua:4:10$') then call = true end
-                    if r:match('^%s+0%s+0%s+0%s+%d+%s+1  require m%.lua:0:12$') then req = true end
+                    if r:match('^%s+0%s+0%s+0%s+%d+%s+1%s+0%s+0  call m%.lua:4:10$') then call = true end
+                    if r:match('^%s+0%s+0%s+0%s+%d+%s+1%s+0%s+0  require m%.lua:0:12$') then req = true end
                 end
                 return call and req and v.unknown == 2 and v.usat == 0 and v.unosite == 0 and v.ucauses.call == 1 and v.ucauses.require == 1, vim.inspect(v)
             end },

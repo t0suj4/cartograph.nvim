@@ -3473,6 +3473,61 @@ test('flowtype: R.entry_of names the hand-out a partial answer first traces to (
     ok(e and e.cause == 'host-any' and vim.deep_equal(e.sites, { 'host-any m.lua:7:11' }), 'a host `any` result: its call: ' .. d)
 end)
 
+-- (CART-1866: EVERY ROOT. R.entry_of's `sites` follow the closure's spanning tree — one witness route per answer; `all`
+-- lists every hand-out whose object reaches the answer's object, back over fields and prototypes: x is reached from r1
+-- (a field), r2 (a field of a field) and p (x is its prototype); y only from its own hand-out)
+test('flowtype: R.entry_of lists every hand-out that reaches an answer, not one witness (CART-1866)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local x = { k = setmetatable({}, { __index = A }) }',
+        'local r1 = { x = x }',
+        'local r2 = { y = { z = x } }',
+        'ext.f(r1)',
+        'ext.g(r2)',
+        'local a1 = x.k:m()',
+        'local y = { k = setmetatable({}, { __index = B }) }',
+        'ext.h(y)',
+        'local a2 = y.k:m()',
+        'local p = setmetatable({}, { __index = x })',
+        'ext.p(p)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function at(R, full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return R.verdict(c) end end end
+    local R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    local e = R.entry_of(at(R, 'x.k:m'))
+    eq(e and e.all, { 'call m.lua:14:0', 'call m.lua:7:0', 'call m.lua:8:0' }, 'x: through a field, a field of a field, a prototype')
+    eq(e and #e.sites, 1, 'the witness is one of them')
+    e = R.entry_of(at(R, 'y.k:m'))
+    eq(e and e.all, { 'call m.lua:11:0' }, 'y: its own hand-out alone')
+    -- (a PROTOTYPE alone: p's metatable field is past CAP 2, so no field route reaches x — its prototype link does)
+    root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local x = { k = setmetatable({}, { __index = A }) }',
+        'local p = {}',
+        'setmetatable(p, { __index = x })',
+        'setmetatable(p, { __index = {} })',
+        'setmetatable(p, { __index = {} })',
+        'ext.p(p)',
+        'local a1 = x.k:m()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local okk, R2 = pcall(flowtype.solve, store, { open = false, explain = true })
+    e = okk and R2.entry_of(at(R2, 'x.k:m'))
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(okk, R2)
+    eq(e and e.all, { 'call m.lua:9:0' }, 'reached through the prototype link alone')
+end)
+
 -- (CART-1861: ENTRY CONTRACTS — a declared promise about the unknown code at one entry point, by the MODULE a require
 -- the tree cannot map loads or by the SITE that hands values over. What it is handed does not escape there; the answers
 -- it makes whole cite it, R.assumes, exactly: dropping that contract alone changes the answer)
