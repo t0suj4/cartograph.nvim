@@ -1233,12 +1233,14 @@ HAZARDS: disclosed with counts, yours to finish.
            then the alibi names that file, so the premise is one a
            reader can go and check rather than one to be trusted
 
-A row FITS, or it says so.                              *cartograph-budget*
+A row is SEARCHABLE, and a cut row says so.             *cartograph-budget*
 The symbols pane has `symbols_width` columns of text (default 30; the gutter is
-outside it) and 'wrap' is off, so a longer row would be cut by the editor with
-no marker at all — the pane would silently withhold what it rendered. So a row
-carries ONE identity that fits, and whatever does not fit is detail with a home
-somewhere else:
+outside it) and 'wrap' is off. The pane is an ordinary buffer, so |/| over the
+file list is a file finder — and |/| searches the buffer TEXT. So an identity is
+NEVER fitted to the pane: it stays whole in the buffer, the symbol count LEADS a
+file row ("(5) bug_actiongroup_update_product_build_inc.php"), and the window
+marks a row cut at its edge with ">" ('list' with 'listchars' extends/precedes).
+Statements and lists still fit the budget:
 
   a file row shows the shortest path SUFFIX that is UNIQUE among the files on
   screen. Two railbot.lua in different directories each keep the directory that
@@ -1247,9 +1249,8 @@ somewhere else:
   above the header. The path itself is never lost — hover, gf, staging and the
   source pane read the real path, never the label.
 
-  …        an identity too long even on its own is elided IN THE MIDDLE, both
-           ends kept (crash-site-…-machine.lua). Only an identity is ever
-           elided, and never silently; an annotation moves or goes instead.
+  …        an identity longer than 80 columns is elided IN THE MIDDLE, both
+           ends kept. Nothing shorter is ever elided, so |/| finds it.
 
   free TEXT — a statement, a call, a condition — elides at the TAIL instead
   (`local vonnCharacter = playe…`), because a statement reads left to right and
@@ -1344,8 +1345,8 @@ comment per field.
   keys          remap any binding — see |cartograph-keys|
   symbols_width the symbols pane's TEXT budget in columns (default 30; the
                 gutter sits outside it, and the window is sized to fit both).
-                Every row's identity is rendered to FIT this — see
-                |cartograph-budget|
+                Statements and lists fit it; identities stay WHOLE and a cut
+                row is marked ">" — see |cartograph-budget|
   entrypoints   path patterns for files EXPECTED to have no importer, so
                 they classify 'entry' (▶) instead of 'orphan' (○)
   exclude       extra vendored directory NAMES to skip

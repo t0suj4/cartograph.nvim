@@ -264,7 +264,7 @@ require('cartograph').setup {
 | option | sets |
 |---|---|
 | `keys` | remap any binding |
-| `symbols_width` | the symbols pane's **text** budget in columns (default 30; the gutter is outside it). Every row's identity is rendered to fit |
+| `symbols_width` | the symbols pane's **text** budget in columns (default 30; the gutter is outside it). Statements and lists fit it; identities stay whole (elided only past 80) and a cut row is marked `>` (CART-0453) |
 | `entrypoints` | path patterns for files expected to have no importer → classify `entry` (`▶`) not `orphan` (`○`) |
 | `exclude` | extra vendored directory **names** to skip |
 | `cache` | per-file shard cache; warm opens |

@@ -9,6 +9,13 @@
 -- to descend into." So a row carries ONE identity that FITS, and this spec is the
 -- fence for it. The 5 pre-existing pane specs assert what a row SAYS; none assert
 -- that a row can be SEEN.
+--
+-- ★ RE-DECIDED 2026-11-04 (CART-0453, USER 2026-08-19: "we only need to truncate only unreasonably long lines, that
+-- way it will stay searchable"). The pane is an ORDINARY BUFFER and `/` over its file list is its best feature — but
+-- `/` searches BUFFER TEXT, and names fitted to 30 columns made 24% of mantis's roster unsearchable. So an IDENTITY is
+-- no longer fitted to the pane: it stays WHOLE up to IDENT_MAX (80, a semantic bound), the count LEADS the row, and the
+-- WINDOW marks a row cut at its edge (`list` + `listchars=extends:>`). FREE TEXT and LISTS still fit the budget — they
+-- are detail, not search targets. The cases below that inverted say so, case by case.
 
 local store   = require 'cartograph.store'
 local symbols = require 'cartograph.panes.symbols'
@@ -59,30 +66,53 @@ end
 
 -- ── the budget is DECLARED, not hardcoded ───────────────────────────────────
 
-test('width: the budget is a config field, and the renderers honour it',
+test('width: an identity row is the SAME TEXT at any pane budget — names are not fitted to it (CART-0453)',
     function ()
-    eq(30, config.symbols_width)   -- the user's actual pane; the default IS the law
+    eq(30, config.symbols_width)   -- still the declared pane; free text and lists fit it
     tree()
-    local w = widest(render('files'))
-    ok(w <= 30, 'at the default budget every file row fits, widest = ' .. w)
+    local at30 = render('files')
     config.symbols_width = 20
-    local narrow = widest(render('files'))
-    ok(narrow <= 20, 'and at 20 they fit 20, widest = ' .. narrow)
-    ok(narrow < w, 'the rows actually got narrower: ' .. narrow .. ' < ' .. w)
+    local at20 = render('files')
     config.symbols_width = 30
+    eq(at30, at20, 'the roster does not change with the pane: `/` finds the same names at any width')
 end)
 
 -- ── identity fits, and stays UNAMBIGUOUS ────────────────────────────────────
 
-test('width: every file row fits the budget at every files mode', function ()
+test('width: every file row LEADS with its count and carries its WHOLE name, at every files mode (CART-0453)',
+    function ()
     tree()
     for _, mode in ipairs({ 'flat', 'layers' }) do
         symbols.files_mode = mode
         local lines = render('files')
-        local w, worst = widest(lines)
-        ok(w <= 30, ('%s mode: widest row = %d — %s'):format(mode, w, tostring(worst)))
+        local rows = 0
+        for i, l in ipairs(lines) do
+            local f = symbols.line_file[i]
+            if f and symbols.line_kind[i] == 'file' then
+                rows = rows + 1
+                ok(l:find('^%s*%(%d+%) '), ('%s mode: the count leads: %s'):format(mode, l))
+                ok(l:find(symbols.shortpath(f), 1, true), ('%s mode: the name is whole: %s'):format(mode, l))
+                ok(not l:find('…', 1, true), ('%s mode: nothing elided under IDENT_MAX: %s'):format(mode, l))
+            end
+        end
+        ok(rows >= 4, mode .. ' mode: every file has a row: ' .. rows)
     end
     symbols.files_mode = 'flat'
+end)
+
+test('width: the pane WINDOW marks a row cut at its edge — `list` + extends / precedes (CART-0453)', function ()
+    tree()
+    symbols.buf = nil
+    symbols.create()
+    vim.cmd('vsplit')
+    local win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, symbols.buf)
+    symbols.attach(win)
+    local wl, lc = vim.wo[win].list, vim.wo[win].listchars
+    vim.api.nvim_win_close(win, true)
+    ok(wl, 'list is on, so the cut is drawn')
+    ok(lc:find('extends:>', 1, true) and lc:find('precedes:<', 1, true), 'both edges are marked: ' .. lc)
+    ok(lc:find('tab:', 1, true), 'and tab is set, or `list` would show source tabs as ^I: ' .. lc)
 end)
 
 -- ── the LAYER roster: what replaced the include tree ────────────────────────
@@ -196,17 +226,20 @@ test('width: a UNIQUE basename drops its prefix entirely', function ()
         .. found)
 end)
 
-test('width: an over-budget identity elides with a MARK, never silently',
+test('width: an identity elides only past IDENT_MAX, and then with a MARK, never silently (CART-0453)',
     function ()
     tree()
     local lines = render('files')
     local found
     for _, l in ipairs(lines) do if l:find('machine', 1, true) then found = l end end
-    -- `crash-site-assembling-machine.lua` is 33 cols; the budget is 30 with a
-    -- 5-col count, so it MUST lose characters — and must say so
-    ok(found:find('…'), 'the elision is marked: ' .. found)
-    ok(found:find('^crash%-site'), 'the head is kept: ' .. found)
-    ok(found:find('lua'), 'and so is the tail (both ends carry signal): ' .. found)
+    -- `crash-site-assembling-machine.lua` is 33 cols: past the 30-col pane, far under IDENT_MAX — WHOLE, so `/`
+    -- finds it (it used to read `crash-sit…chine.lua` and `/assembling` found nothing)
+    ok(found:find('crash-site-assembling-machine.lua', 1, true), 'whole in the buffer: ' .. found)
+    local long = ('k'):rep(60) .. '_' .. ('z'):rep(40) .. '.lua'
+    local cut = symbols.fit_identity(long, '', '')
+    ok(cut:find('…', 1, true), 'past IDENT_MAX the elision is marked: ' .. cut)
+    ok(cut:find('^kkk') and cut:find('lua$'), 'both ends kept (both carry signal): ' .. cut)
+    ok(vim.fn.strdisplaywidth(cut) <= symbols.IDENT_MAX, 'and it fits the bound')
 end)
 
 test('width: the full path is never LOST — line_file keeps it', function ()
@@ -229,8 +262,9 @@ test('width: descending a file DISCLOSES the directory it dropped', function ()
     local lines = render('file', DEEP)
     ok(lines[1]:find('prototypes/entity'), 'the dropped prefix is here: ' .. lines[1])
     ok(lines[2]:find('machine'), 'above the file itself: ' .. tostring(lines[2]))
-    local w = widest(lines)
-    ok(w <= 30, 'and the breadcrumb obeys the budget too, widest = ' .. w)
+    ok(lines[1]:find('prototypes/entity/', 1, true), 'the breadcrumb is WHOLE (CART-0453): ' .. lines[1])
+    ok(lines[2]:find('^%(%d+%) crash%-site%-assembling%-machine%.lua'), 'the header leads with its count, name whole: '
+        .. tostring(lines[2]))
     -- a root file dropped nothing, so it gets no breadcrumb (no empty chrome)
     local flat = render('file', SHORT)
     ok(flat[1]:find('data%.lua'), 'a root file has no breadcrumb: ' .. flat[1])
@@ -260,8 +294,8 @@ test('width: free TEXT elides at the TAIL, where an identity elides the middle',
     local got = symbols.fit_text('local vonnCharacter = player.surface.create_entity{x=1}', '  ')
     eq(28, vim.fn.strdisplaywidth(got))     -- 30 minus the 2-column indent
     eq('local vonnCharacter = playe…', got) -- head kept, loss MARKED
-    -- and an identity of the same length elides the MIDDLE instead
-    local id = symbols.fit_identity('crash-site-assembling-machine.lua', '', '')
+    -- and an identity elides the MIDDLE instead — once it is past IDENT_MAX (CART-0453)
+    local id = symbols.fit_identity('crash-site-' .. ('assembling-'):rep(8) .. 'machine.lua', '', '')
     assert(id:match('^crash'), id)
     assert(id:match('lua$'), id)  -- both ends carry signal for a name
     assert(id:find('…', 1, true), 'the elision must be marked')
@@ -288,8 +322,10 @@ test('width: PROSE rows are the known overflow class, and it does not grow',
     tree()
     local over = 0
     for _, level in ipairs({ 'files', 'ws' }) do
-        for _, l in ipairs(render(level)) do
-            if vim.fn.strdisplaywidth(l) > 30 then over = over + 1 end
+        for i, l in ipairs(render(level)) do
+            -- (an IDENTITY row may overflow by design since CART-0453 — whole for `/`, marked by the window — so the
+            -- ratchet counts PROSE rows: those that are not a file row)
+            if vim.fn.strdisplaywidth(l) > 30 and not symbols.line_file[i] then over = over + 1 end
         end
     end
     eq(1, over) -- the ws empty note: "(empty — 'm' on a symbol marks it)"
@@ -380,4 +416,23 @@ test('fn view: a real function with many inputs fits every row', function ()
         if w > 30 then over[#over + 1] = ('row %d = %d cols: %s'):format(i, w, l) end
     end
     eq({}, over, 'the default altitude must not clip')
+end)
+
+test('width: with the count leading, the NAME is still the highlighted section and the count is dim (CART-0453)',
+    function ()
+    tree()
+    local lines = render('files')
+    local row
+    for i, l in ipairs(lines) do if l:find('crash-site-assembling-machine.lua', 1, true) then row = i end end
+    ok(row, 'the deep file has a row')
+    local l = lines[row]
+    local c0 = l:find('crash', 1, true) - 1 -- 0-based byte where the name starts
+    local sec, dim
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(symbols.buf, -1, { row - 1, 0 }, { row - 1, -1 }, { details = true })) do
+        local d = m[4]
+        if d.hl_group == 'CartographSection' then sec = { m[3], d.end_col } end
+        if d.hl_group == 'CartographDim' and m[3] == 0 then dim = { m[3], d.end_col } end
+    end
+    eq({ c0, c0 + #'crash-site-assembling-machine.lua' }, sec, 'the section highlight is exactly the name: ' .. l)
+    eq({ 0, c0 }, dim, 'and the leading count is dim')
 end)

@@ -368,17 +368,22 @@ function M.shortpath(file)
     return si.idx[file] or file
 end
 
---- Fit an identity into what the budget leaves after `indent` and `tail`. Elides
---- the MIDDLE (both ends of a name carry signal — `crash-site-…-machine.lua`)
---- and MARKS it with …, because eliding identity is a real loss, unlike moving
---- the directory prefix to hover. Never squeezes below MIN_IDENTITY: a long prose
---- annotation must not mangle the name, so such a row overflows instead and
---- tests/width_spec.lua counts it against a declared ratchet.
-local MIN_IDENTITY = 14
+--- An identity is elided only when it is UNREASONABLY LONG — past IDENT_MAX, a semantic bound independent of the
+--- pane — and then in the MIDDLE (both ends of a name carry signal — `crash-site-…-machine.lua`), MARKED with ….
+---
+--- ★ IT IS NO LONGER FITTED TO THE PANE (CART-0453, USER 2026-08-19: "we only need to truncate only unreasonably
+--- long lines, that way it will stay searchable and the detail pane reveals more anyway"). The pane's best feature
+--- is that it is an ORDINARY BUFFER — `/` over the file list beats a file finder — and `/` searches BUFFER TEXT:
+--- with names fitted to 30 columns, 24% of mantis's file rows read `account_prof…dit_page.php` and
+--- `/account_profile_edit_page` found NOTHING, which reads as "no such file". The budget law's premise ("wrap is
+--- off, so nvim clips with NO marker") is made false by the window instead: `list` + `listchars=extends:>` marks a
+--- row cut at the edge (M.attach). 80 is where long lives: mantis and self elide nothing, es/libs only past its p99.
+--- `indent` / `tail` are kept for the callers' sake and no longer shrink the room.
+local MIN_IDENTITY = 14 -- (fit_text's floor: free text still fits the pane budget)
+local IDENT_MAX = 80
+M.IDENT_MAX = IDENT_MAX
 function M.fit_identity(label, indent, tail)
-    local room = (require('cartograph.config').symbols_width or 30)
-        - vim.fn.strdisplaywidth(indent or '') - vim.fn.strdisplaywidth(tail or '')
-    room = math.max(room, MIN_IDENTITY)
+    local room = IDENT_MAX
     if vim.fn.strdisplaywidth(label) <= room then return label end
     local keep = room - 1                        -- 1 cell for the … marker
     local head = math.ceil(keep / 2)
@@ -523,13 +528,18 @@ local function file_row(ctx, file, depth, dim)
     local ran = store.data and store.data.provider == 'self'
         and require('cartograph.self_oracle').loaded_files(store.data)[file]
     local ndefs = #shown_defs(file)
-    local tail = ('  (%d)%s%s'):format(ndefs, dim and ' …' or '', ran and '  ⚡' or '')
+    -- ★ THE COUNT LEADS (CART-0453). It used to trail the name, and "the first casualty, because it sits at the far
+    -- right" was the budget law's own measurement; with the name whole in the buffer, a trailing count would be cut
+    -- on every long row. On the left it is the last thing to go.
+    local cnt = ('(%d) '):format(ndefs)
+    local tail = ('%s%s'):format(dim and ' …' or '', ran and '  ⚡' or '')
     local label = ident(tail)
-    ctx.lines[#ctx.lines + 1] = indent .. label .. tail
+    ctx.lines[#ctx.lines + 1] = indent .. cnt .. label .. tail
+    local c0 = #indent + #cnt
     ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
-        or { { #indent, #indent + #label, 'CartographSection' }, { #indent + #label, -1, 'CartographDim' } }
+        or { { #indent, c0, 'CartographDim' }, { c0, c0 + #label, 'CartographSection' }, { c0 + #label, -1, 'CartographDim' } }
     if ran then
-        local b = #indent + #label + #(('  (%d)%s'):format(ndefs, dim and ' …' or ''))
+        local b = c0 + #label + #(dim and ' …' or '')
         table.insert(ctx.marks[#ctx.lines], { b, -1, 'DiagnosticOk' })
     end
     ctx.line_file[#ctx.lines] = file
@@ -740,11 +750,11 @@ local function render_file(ctx, file)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         ctx.line_sep[#ctx.lines] = true -- chrome: hover keeps the preview
     end
-    local tail = ('  (%d)'):format(#shown_defs(file))
-    local label = M.fit_identity(short, '', tail)
+    local cnt = ('(%d) '):format(#shown_defs(file)) -- (the count leads, as on a roster row: CART-0453)
+    local label = M.fit_identity(short, '', '')
     local hrow = #ctx.lines + 1
-    ctx.lines[hrow] = label .. tail
-    ctx.marks[hrow] = { { 0, #label, 'CartographSection' }, { #label, -1, 'CartographDim' } }
+    ctx.lines[hrow] = cnt .. label
+    ctx.marks[hrow] = { { 0, #cnt, 'CartographDim' }, { #cnt, -1, 'CartographSection' } }
     ctx.line_file[hrow] = file
     ctx.line_kind[hrow] = 'file'
     ctx.file_header[file] = hrow
@@ -3313,6 +3323,11 @@ function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
     vim.wo[win].wrap = false         -- rows are rows; long ones clip, not fold
+    -- ★ …AND A CLIPPED ROW SAYS SO (CART-0453): identities stay WHOLE in the buffer so `/` finds them, and the
+    -- window marks a row cut at its right edge (`>`) or scrolled past its left (`<`). `tab:` is set because `list`
+    -- shows an unlisted tab as ^I, and statement rows carry source text
+    vim.wo[win].list = true
+    vim.wo[win].listchars = 'tab:  ,extends:>,precedes:<'
     vim.wo[win].cursorline = true
     vim.wo[win].winbar = M.winbar()  -- the mode strip, before the first render
     local keys = config.keys

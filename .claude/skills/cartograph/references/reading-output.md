@@ -41,23 +41,23 @@ Some verbs refuse outright rather than answer thinly: `:CartographMentions` refu
 on a thin index rather than reporting zero mentions, because that would be a
 fabricated negative.
 
-## A row FITS, or it says so
+## A row is searchable, and a cut row says so
 
 The symbols pane has `symbols_width` columns of text (default 30, gutter outside it)
-and `wrap` off — so a longer row would be cut by the editor with no marker at all,
-and the pane would silently withhold what it rendered. The rules:
+and `wrap` off. It is an ordinary buffer, so `/` over the file list is a file finder,
+and `/` searches buffer TEXT. The rules (CART-0453):
 
-- A row carries **one identity that fits**; whatever does not fit is detail with a
-  home somewhere else.
+- An **identity is never fitted to the pane**: it stays whole in the buffer, and the
+  window marks a row cut at its edge with `>` (`list` + `listchars`). A file row's
+  symbol **count leads**: `(5) bug_actiongroup_update_product_build_inc.php`.
 - **File rows** show the shortest path **suffix** unique among the files on screen.
   Two `railbot.lua` in different directories each keep the directory that separates
   them; a unique basename drops its prefix entirely. Descend and the dropped
   directory is the dim breadcrumb above the header. **The path itself is never
   lost** — hover, `gf`, staging and the source pane read the real path, never the
   label.
-- An identity too long even alone elides **in the middle**, both ends kept
-  (`crash-site-…-machine.lua`). Only an identity is ever elided, and never silently;
-  an annotation moves or goes instead.
+- An identity longer than **80 columns** elides **in the middle**, both ends kept.
+  Nothing shorter is elided, so `/` finds it.
 - **Free text** — a statement, a call, a condition — elides at the **tail**
   (`local vonnCharacter = playe…`), because a statement reads left to right and its
   front identifies it. Every such row anchors to its source line, so the source pane
