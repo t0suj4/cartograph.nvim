@@ -22,8 +22,11 @@
 -- module outside the tree or of a loaded chunk, unknown code called a tree function back with it — has no verdict and no
 -- taint path. flowtype R.unknown_of walks that value's first arrival back to its root: the `unknown` column counts them
 -- per site (the call that returned it, the require, the hand-outs of the function called back); a receiver past CAP is
--- the analysis's own loss (`saturated`). A no-verdict answer in neither has no member there (none) or lost its targets
--- to saturation inside the lookup — no entry's doing.
+-- the analysis's own loss (`saturated`). A receiver of tree objects whose member LOOKUP is unknown (CART-1877): unknown
+-- code's value read as the member is that value's arrival at the field, counted as above (`member`); else the lookup is
+-- the analysis's own loss — a field past CAP (`lookup-saturated`), a function stored under a computed key
+-- (`computed-key`), a function the graph has no node for, in loaded text (`unmapped-function`) — no entry's doing.
+-- `unattributed` = the solve's unknown answers R.unknown_of names no cause for (0 is the invariant).
 -- ⚠ FIRST ARRIVAL, NOT CAUSE: the taint is overdetermined (flowpath FLOW-0123: once anything escapes, the world rules
 -- hit every escaped object), so `answers` is no count of what a contract on that entry would win — never rank by it as
 -- a removal. Runs the solve with explain on (one ⊤ per saturated port): its answers are checked against the default
@@ -36,7 +39,7 @@ local function measure(store, p)
     local t0 = vim.uv.hrtime()
     local R = require('cartograph.flowtype').solve(store, { open = p.mode == 'open', ctx = false, explain = true })
     local v = { secs = 0, partial = 0, entry = 0, loss = 0, nosite = 0, causes = {}, rows = {}, sites = 0, roots = {},
-        unknown = 0, usat = 0, unosite = 0, ucauses = {}, multi = 0 }
+        unknown = 0, usat = 0, unosite = 0, ucauses = {}, multi = 0, umember = 0, ulook = 0, ulookup = {}, unattributed = 0 }
     local roots = {}
     local rows = {}
     local function row(k)
@@ -79,7 +82,9 @@ local function measure(store, p)
             if u then
                 v.unknown = v.unknown + 1
                 if u.cause == 'saturated' then v.usat = v.usat + 1
+                elseif u.cause == 'lookup' then v.ulook = v.ulook + 1; v.ulookup[u.lookup] = (v.ulookup[u.lookup] or 0) + 1
                 else
+                    if u.lookup == 'member' then v.umember = v.umember + 1 end
                     local k = u.root or u.cause
                     v.ucauses[k] = (v.ucauses[k] or 0) + 1
                     if not u.sites then v.unosite = v.unosite + 1
@@ -88,6 +93,7 @@ local function measure(store, p)
             end
         end
     end
+    v.unattributed = (R.stats.unknown or 0) - v.unknown
     v.secs = (vim.uv.hrtime() - t0) / 1e9
     local l = {}
     for _, r in pairs(rows) do l[#l + 1] = r end
@@ -155,12 +161,26 @@ local FXU = { ['m.lua'] = table.concat({
     'local r = ext.f()',
     'local function u1() return r:m() end',
     'local function u2() return ext.g:m() end' }, '\n') .. '\n' }
+local FXL = { ['m.lua'] = table.concat({
+    'local ext = require("notintree")',
+    'local A, B = {}, {}',
+    'function A.m(self) return 1 end',
+    'function B.m(self) return 2 end',
+    'local t1 = setmetatable({}, { __index = A })',
+    't1.m = ext.f',
+    'local function u1() return t1:m() end',
+    'local t3 = setmetatable({}, { __index = A })',
+    'local function put(k) t3[k] = function () return 4 end end',
+    'local function u3() return t3:m() end',
+    'local L = load("return { m = function (self) return 3 end }")()',
+    'local t4 = setmetatable({}, { __index = L })',
+    'local function u4() return t4:m() end' }, '\n') .. '\n' }
 
 return {
     name = 'entry-points',
     kind = 'discovery',
     tags = { 'measure', 'flow', 'code' },
-    summary = 'every site where the tree\'s values meet code the analysis cannot follow (unknown code, a builtin with no model, a host `any`), with the partial answers that FIRST TRACE to each (flowtype R.entry_of) and how many trace to the analysis\'s own losses instead, and the UNKNOWN answers (a receiver that may hold unknown code\'s own value: R.unknown_of, its first arrival back to the call / require / load / function called back that made it); rows = answers, sole, in, closure, unknown, reach, alone, `kinds site` (reach / alone: the partial answers EVERY site reaches, not one witness route, and those it alone reaches); roots = answers, sites, `cause object` (one object handed at many sites); first arrival, not cause — never read a row as what a contract wins; mode = closed | open, top = rows, out = a TSV of every row',
+    summary = 'every site where the tree\'s values meet code the analysis cannot follow (unknown code, a builtin with no model, a host `any`), with the partial answers that FIRST TRACE to each (flowtype R.entry_of) and how many trace to the analysis\'s own losses instead, and the UNKNOWN answers (a receiver that may hold unknown code\'s own value: R.unknown_of, its first arrival back to the call / require / load / function called back that made it — or, for a receiver of tree objects, the member LOOKUP: unknown code\'s value read as the member, or the analysis\'s own loss: lookup-saturated, computed-key, unmapped-function; unattributed = unknown answers with no cause, 0); rows = answers, sole, in, closure, unknown, reach, alone, `kinds site` (reach / alone: the partial answers EVERY site reaches, not one witness route, and those it alone reaches); roots = answers, sites, `cause object` (one object handed at many sites); first arrival, not cause — never read a row as what a contract wins; mode = closed | open, top = rows, out = a TSV of every row',
     params = { mode = 'string?', top = 'string?', out = 'string?' },
     measure = measure,
     claim = function (v)
@@ -170,8 +190,12 @@ return {
         local us = {}
         for k, n in pairs(v.ucauses) do us[#us + 1] = ('%s %d'):format(k, n) end
         table.sort(us)
-        return true, ('%d partial answers: %d first trace to an entry (%d without a site; %d reached from more than one site), %d to the analysis\'s own losses; %d unknown: %d trace to unknown code\'s value (%d without a site; %s), %d saturated receivers; %d entry sites; causes: %s; %.1f s')
-            :format(v.partial, v.entry, v.nosite, v.multi, v.loss, v.unknown, v.unknown - v.usat, v.unosite, table.concat(us, ', '), v.usat, v.sites, table.concat(cs, ', '), v.secs)
+        local ls = {}
+        for k, n in pairs(v.ulookup) do ls[#ls + 1] = ('%s %d'):format(k, n) end
+        table.sort(ls)
+        return true, ('%d partial answers: %d first trace to an entry (%d without a site; %d reached from more than one site), %d to the analysis\'s own losses; %d unknown: %d trace to unknown code\'s value (%d without a site; %s; %d read as the member), %d saturated receivers, %d lookups the analysis lost (%s), %d unattributed; %d entry sites; causes: %s; %.1f s')
+            :format(v.partial, v.entry, v.nosite, v.multi, v.loss, v.unknown, v.unknown - v.usat - v.ulook, v.unosite, table.concat(us, ', '), v.umember, v.usat, v.ulook,
+                #ls > 0 and table.concat(ls, ', ') or 'none', v.unattributed, v.sites, table.concat(cs, ', '), v.secs)
     end,
     examples = {
         {
@@ -207,6 +231,17 @@ return {
                     if r:match('^%s+0%s+0%s+0%s+%d+%s+1%s+0%s+0  require m%.lua:0:12$') then req = true end
                 end
                 return call and req and v.unknown == 2 and v.usat == 0 and v.unosite == 0 and v.ucauses.call == 1 and v.ucauses.require == 1, vim.inspect(v)
+            end },
+        },
+        {
+            name = 'a receiver of tree objects with an unknown LOOKUP: unknown code\'s value as the member at its require; a computed key and loaded text the analysis\'s own',
+            files = FXL,
+            params = function () return { top = '10' } end,
+            expect = { holds = true, check = function (v)
+                local req
+                for _, r in ipairs(v.rows) do if r:match('^%s+0%s+0%s+0%s+%d+%s+1%s+0%s+0  require m%.lua:0:12$') then req = true end end
+                return req and v.unknown == 3 and v.umember == 1 and v.ucauses.require == 1 and v.ulook == 2
+                    and v.ulookup['computed-key'] == 1 and v.ulookup['unmapped-function'] == 1 and v.unattributed == 0, vim.inspect(v)
             end },
         },
     },

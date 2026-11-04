@@ -549,6 +549,7 @@ local function build(store, opts)
     -- the solve made it (a call of unknown code, a require or load, a dynamic _G[k] read, …), false where neither was
     -- known — R.stats.xnosrc counts those, a delivery path the recorder does not cover)
     G7.XARR = opts.explain and {} or nil
+    G7.LKU = G7.XARR and {} or nil -- (call -> why its member lookup is unknown, CART-1877)
     local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
@@ -5485,8 +5486,8 @@ local function build(store, opts)
         local p = ofield[o] and ofield[o][m]
         if p and tainted[p] then partial_hit = partial_hit or p end
         if PINC[o] then partial_hit = partial_hit or PINC[o] end -- (a prototype it may lack holds m too)
-        if p and top[p] then return true end
-        if p then for x in each(p) do out[x] = true end end
+        if p and top[p] then G7.LKP = G7.LKP or p; return true end -- (the field past CAP: an unknown answer's cause, CART-1877)
+        if p then for x in each(p) do out[x] = out[x] or p end end -- (each target -> the field port it was read at)
         local t = false
         for c in pairs(protos[o] or NOTHING) do t = targets(c, m, out, seen) or t end
         return t
@@ -5498,7 +5499,7 @@ local function build(store, opts)
         seen[o] = true
         local p = ofield[o] and ofield[o]['[]']
         if p and tainted[p] then partial_hit = partial_hit or p end
-        if p then for x in each(p) do if fnports[x] or x == EXT or G7.XC[x] then return true end end end
+        if p then for x in each(p) do if fnports[x] or x == EXT or G7.XC[x] then G7.LKD = G7.LKD or p; return true end end end
         for c in pairs(protos[o] or NOTHING) do if dynfn(c, seen) then return true end end
         return false
     end
@@ -5511,12 +5512,23 @@ local function build(store, opts)
             if e.STRLIB then
                 local mine = {}
                 if targets(e.STRLIB, member, mine, {}) or dynfn(e.STRLIB, {}) then G7.SSAT = true end
-                for x in pairs(mine) do out[x] = true; any = true end
+                for x, q in pairs(mine) do out[x] = q; any = true end
             end
         end
         return any
     end
     stats.partial = 0
+    function G7.lkwhy(out) -- (a G7 field: build is at Lua's 200 locals)
+        local why
+        for x, q in pairs(out) do if (x == EXT or G7.XC[x]) and (not why or x < why[2]) then why = { 'member', x, q } end end
+        why = why or (G7.LKP and { 'lookup-saturated', G7.LKP }) or (G7.LKD and { 'computed-key', G7.LKD })
+        if not why then
+            for x, q in pairs(out) do
+                if fnports[x] and tostring(obinfo[x]):find('^ts:') and (not why or x < why[2]) then why = { 'unmapped-function', x, q } end
+            end
+        end
+        return why or { '?' }
+    end
     -- (one answer per CALL: a call walked in several context instances has a receiver in each — its answer is over all)
     local groups, gorder = {}, {}
     for _, pr in ipairs(probes) do
@@ -5528,7 +5540,7 @@ local function build(store, opts)
     for _, g in ipairs(gorder) do
         local pr = g.pr
         local kind, v
-        partial_hit = false; G7.PESC = nil
+        partial_hit = false; G7.PESC = nil; G7.LKP, G7.LKD = nil, nil
         local anyunk, anyobj = false, false
         for _, r in ipairs(g.recvs) do
             if tainted[r] then partial_hit = partial_hit or r end
@@ -5566,7 +5578,7 @@ local function build(store, opts)
                     end
                     if next(mine) then
                         other = true
-                        for x in pairs(mine) do out[x] = true end
+                        for x in pairs(mine) do out[x] = mine[x] end
                     end
                     -- ★ AN OBJECT WITHOUT THE MEMBER IS NOT THIS CALL'S RECEIVER (CART-1643): `x:find()` on it would
                     -- raise, so a program that gets past the call did not hold it there. The exact answer always
@@ -5585,6 +5597,9 @@ local function build(store, opts)
                 end
             end
             table.sort(fns)
+            -- (WHY THE LOOKUP is unknown, for R.unknown_of, CART-1877: unknown code's value read as the member — an entry;
+            -- else the analysis's own loss — a field past CAP, a function under a computed key, a function with no node)
+            if unknown and G7.XARR then G7.LKU[pr.c] = G7.lkwhy(out) end
             if unknown then kind = 'unknown'
             elseif tyname and not other then kind = tyname == 'string' and 'string' or 'typed'; v = { kind = kind, type = tyname }
             elseif tyname or #fns == 0 then kind = 'none'
@@ -6048,6 +6063,8 @@ local function build(store, opts)
         -- that function), `host-global` (a dynamic _G[k] read), `export` (open: a caller outside the tree), `proto` (a
         -- prototype that is unknown code), `placeholder`; or `saturated` (a receiver past CAP: the analysis's own loss).
         -- -> { cause, root, sites = { 'kinds site' … } | nil, at = a label, dir = 'in' } | nil (an answer with a verdict).
+        -- A receiver of tree objects whose member LOOKUP is unknown (CART-1877): `lookup = 'member'` on the arrival at the
+        -- field, or { cause = 'lookup', lookup = 'lookup-saturated' | 'computed-key' | 'unmapped-function', at }.
         -- First arrival, not cause, as R.entry_of (FLOW-0123)
         local rcv, kat
         local function sitekeys(st, k0)
@@ -6066,30 +6083,35 @@ local function build(store, opts)
             local rs = rcv[c]
             if not rs then return nil end
             for _, r in ipairs(rs) do if top[r] then return { cause = 'saturated', at = label(r) } end end
+            -- (x's first arrival at port r walked back to its root)
+            local function arrival(x, r)
+                local m, q, prev, seen = G7.XARR[x], r, nil, {}
+                while type(m[q]) == 'number' and not seen[q] do seen[q] = true; prev, q = q, m[q] end
+                local w = m[q]
+                if type(w) ~= 'table' then return { cause = '?', at = label(q) } end
+                local k = w[1]
+                if k == 'callback' then
+                    local fo = prev and ofport(prev)
+                    if not fo then return { cause = 'unknown-code', root = k, at = label(q), dir = 'in' } end
+                    local l, at = xsites(fo)
+                    return { cause = 'unknown-code', root = k, sites = l, all = G7.allsites(fo), at = at, dir = 'in' }
+                elseif k == 'proto' then return { cause = 'unknown-code', root = k, at = tostring(obinfo[w[2]] or w[2]), dir = 'in' }
+                elseif k == 'host-global' then return { cause = k, root = k, sites = w[2] and sitekeys(w[2], k), at = label(q), dir = 'in' }
+                elseif k == 'export' or k == 'placeholder' then return { cause = k, root = k, at = label(q), dir = 'in' }
+                else return { cause = 'unknown-code', root = k, sites = sitekeys(w[2], k), at = label(q), dir = 'in' } end
+            end
             local xs = {}
             for x in pairs(G7.XARR) do xs[#xs + 1] = x end
             table.sort(xs)
             for _, r in ipairs(rs) do
-                for _, x in ipairs(xs) do
-                    if has(r, x) then
-                        local m, q, prev, seen = G7.XARR[x], r, nil, {}
-                        while type(m[q]) == 'number' and not seen[q] do seen[q] = true; prev, q = q, m[q] end
-                        local w = m[q]
-                        if type(w) ~= 'table' then return { cause = '?', at = label(q) } end
-                        local k = w[1]
-                        if k == 'callback' then
-                            local fo = prev and ofport(prev)
-                            if not fo then return { cause = 'unknown-code', root = k, at = label(q), dir = 'in' } end
-                            local l, at = xsites(fo)
-                            return { cause = 'unknown-code', root = k, sites = l, all = G7.allsites(fo), at = at, dir = 'in' }
-                        elseif k == 'proto' then return { cause = 'unknown-code', root = k, at = tostring(obinfo[w[2]] or w[2]), dir = 'in' }
-                        elseif k == 'host-global' then return { cause = k, root = k, sites = w[2] and sitekeys(w[2], k), at = label(q), dir = 'in' }
-                        elseif k == 'export' or k == 'placeholder' then return { cause = k, root = k, at = label(q), dir = 'in' }
-                        else return { cause = 'unknown-code', root = k, sites = sitekeys(w[2], k), at = label(q), dir = 'in' } end
-                    end
-                end
+                for _, x in ipairs(xs) do if has(r, x) then return arrival(x, r) end end
             end
-            return nil
+            -- (a receiver of tree objects whose member LOOKUP is unknown, CART-1877: unknown code's value read as the
+            -- member — its arrival at that field, an entry; or the analysis's own loss, `lookup` = what it was)
+            local why = G7.LKU[c]
+            if not why then return nil end
+            if why[1] == 'member' and G7.XARR[why[2]] then local u = arrival(why[2], why[3]); u.lookup = 'member'; return u end
+            return { cause = 'lookup', lookup = why[1], at = why[1] == 'unmapped-function' and tostring(obinfo[why[2]]) or why[2] and label(why[2]) or '-' }
         end
         do local n = 0; for _, m in pairs(G7.XARR or NOTHING) do for _, w in pairs(m) do if w == false then n = n + 1 end end end; stats.xnosrc = n end
     end

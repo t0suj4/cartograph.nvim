@@ -3473,6 +3473,67 @@ test('flowtype: R.entry_of names the hand-out a partial answer first traces to (
     ok(e and e.cause == 'host-any' and vim.deep_equal(e.sites, { 'host-any m.lua:7:11' }), 'a host `any` result: its call: ' .. d)
 end)
 
+-- (CART-1877: AN UNKNOWN LOOKUP. A receiver of tree objects whose member lookup is unknown had no verdict and no
+-- R.unknown_of: unknown code's value read as the member (t1.m = ext.f) — its arrival at the field, back to the require;
+-- a field past CAP 2 (t2.m holds 3 functions); a function stored under a computed key (t3[k]); a function the graph has
+-- no node for (loaded text); a string method the tree stored from unknown code. Invariant: every unknown answer gets a
+-- cause)
+test('flowtype: an answer whose member LOOKUP is unknown is attributed (CART-1877)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local ext = require("notintree")',
+        'local A, B = {}, {}',
+        'function A.m(self) return 1 end',
+        'function B.m(self) return 2 end',
+        'local t1 = setmetatable({}, { __index = A })',
+        't1.m = ext.f',
+        'local function u1() return t1:m() end',
+        'local t2 = setmetatable({}, { __index = B })',
+        't2.m = function () return 1 end',
+        't2.m = function () return 2 end',
+        't2.m = function () return 3 end',
+        'local function u2() return t2:m() end',
+        'local t3 = setmetatable({}, { __index = A })',
+        'local function put(k) t3[k] = function () return 4 end end',
+        'local function u3() return t3:m() end',
+        'local L = load("return { m = function (self) return 3 end }")()',
+        'local t4 = setmetatable({}, { __index = L })',
+        'local function u4() return t4:m() end',
+        'function A.zz(self) return 1 end',
+        'function B.zz(self) return 2 end',
+        'string.zz = ext.f',
+        'local s = "x"',
+        'local function u5() return s:zz() end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    local function call(full) for _, c in ipairs(store.data.calls) do if callrec.full(c) == full then return c end end end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local okk, err = pcall(function ()
+        local R = flowtype.solve(store, { open = false, ctx = false, explain = true })
+        for _, m in ipairs({ 't1:m', 't2:m', 't3:m', 't4:m' }) do eq(R.verdict(call(m)), nil, m .. ' has no verdict') end
+        local u = R.unknown_of(call('t1:m'))
+        ok(u and u.cause == 'unknown-code' and u.lookup == 'member' and u.root == 'require' and u.sites and u.sites[1] == 'require m.lua:0:12',
+            'unknown code\'s value read as the member: back to the require ' .. vim.inspect(u))
+        u = R.unknown_of(call('t2:m'))
+        ok(u and u.cause == 'lookup' and u.lookup == 'lookup-saturated' and u.at == 'field tbl:m.lua:7:24.m', 'the field past CAP ' .. vim.inspect(u))
+        u = R.unknown_of(call('t3:m'))
+        ok(u and u.cause == 'lookup' and u.lookup == 'computed-key' and u.at == 'field tbl:m.lua:12:24.[]', 'the computed-key field ' .. vim.inspect(u))
+        u = R.unknown_of(call('t4:m'))
+        ok(u and u.cause == 'lookup' and u.lookup == 'unmapped-function' and tostring(u.at):match('^ts:load:m%.lua:15:') ~= nil,
+            'the function with no node ' .. vim.inspect(u))
+        u = R.unknown_of(call('s:zz'))
+        ok(u and u.lookup == 'member' and u.root == 'require', 'a string\'s method the tree stored from unknown code: back to the require ' .. vim.inspect(u))
+        local n = 0
+        for _, c in ipairs(store.data.calls) do if R.unknown_of(c) then n = n + 1 end end
+        eq(n, R.stats.unknown, 'every unknown answer has a cause')
+        eq(n, 5, 'the five lookups')
+    end)
+    flowtype.CAP = cap
+    vim.fn.delete(root, 'rf')
+    assert(okk, err)
+end)
+
 -- (CART-1866: EVERY ROOT. R.entry_of's `sites` follow the closure's spanning tree — one witness route per answer; `all`
 -- lists every hand-out whose object reaches the answer's object, back over fields and prototypes: x is reached from r1
 -- (a field), r2 (a field of a field) and p (x is its prototype); y only from its own hand-out)
