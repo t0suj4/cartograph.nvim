@@ -573,6 +573,35 @@ M.EXPECTED = {
         ['extra:identifier'] = 2, ['binder:defer_statement'] = 1,
         ['binder:for_range_loop'] = 1,
         ['extra:while_expression'] = 1, ['missing:expression_statement'] = 1 },
+    -- ★ PINNED 2026-11-04 (CART-0428 part a): the STABLE corpora that printed a census nothing checked. Every one
+    -- has `expected` counts, so the matrix's default roster visits it and the pin is gated the moment it lands.
+    -- Measured twice (matrix --cols expr, jobs 1): identical. ghost was the August headline (595); it reads 580 now.
+    -- erlang's 288 `match:` are the named residue (CART-1106), not disagreements.
+    blesh = { total = 1943, ['extra:if_statement'] = 678, ['binder:declaration_command'] = 470,
+        ['missing:c_style_for_statement'] = 149, ['binder:elif_clause'] = 133, ['binder:if_statement'] = 124,
+        ['extra:while_statement'] = 66, ['extra:elif_clause'] = 62, ['binder:command'] = 40,
+        ['missing:test_command'] = 40, ['missing:if_statement'] = 26, ['binder:redirected_statement'] = 25,
+        ['binder:list'] = 24, ['missing:elif_clause'] = 23, ['binder:variable_assignments'] = 19,
+        ['missing:list'] = 18, ['missing:ternary_expression'] = 14, ['missing:variable_assignment'] = 12,
+        ['binder:do_group'] = 4, ['missing:compound_statement'] = 3, ['both:if_statement'] = 2,
+        ['missing:do_group'] = 2, ['missing:while_statement'] = 2, ['missing:preproc_function_def'] = 2,
+        ['binder:while_statement'] = 1, ['both:ERROR'] = 1, ['missing:ERROR'] = 1, ['missing:binary_expression'] = 1,
+        ['missing:redirected_statement'] = 1 },
+    erlang = { total = 289, ['match:match_expr'] = 288, ['missing:list'] = 1 },
+    ghost = { total = 580, ['binder:expression_statement'] = 494, ['missing:lexical_declaration'] = 66,
+        ['missing:ternary_expression'] = 5, ['binder:class_declaration'] = 4, ['missing:return_statement'] = 3,
+        ['binder:lexical_declaration'] = 2, ['binder:return_statement'] = 2, ['extra:if_statement'] = 2,
+        ['missing:if_statement'] = 2 },
+    server = { total = 483, ['binder:return_statement'] = 202, ['missing:local_variable_declaration'] = 187,
+        ['binder:expression_statement'] = 35, ['binder:for_statement'] = 23,
+        ['binder:local_variable_declaration'] = 21, ['binder:class_declaration'] = 6, ['binder:class_body'] = 3,
+        ['binder:cond'] = 3, ['binder:argument_list'] = 1, ['binder:explicit_constructor_invocation'] = 1,
+        ['missing:ternary_expression'] = 1 },
+    sylius = { total = 2513, ['missing:expression_statement'] = 1745, ['binder:expression_statement'] = 245,
+        ['missing:return_statement'] = 189, ['missing:foreach_statement'] = 155, ['missing:pair'] = 152,
+        ['missing:if_statement'] = 16, ['missing:member_call_expression'] = 4, ['extra:expression_statement'] = 2,
+        ['missing:match_conditional_expression'] = 2, ['missing:cond'] = 1, ['missing:match_block'] = 1,
+        ['missing:match_expression'] = 1 },
 }
 
 -- ── THE RUNNER (CART-0409) ──────────────────────────────────────────────────────────────
