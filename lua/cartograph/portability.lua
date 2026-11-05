@@ -2065,6 +2065,103 @@ function M.reference_diff(store, from, to)
     return res
 end
 
+-- Every root a profile knows, with its KIND: 'class' (a global typed by an API class) or 'namespace' (a
+-- classless table such as Factorio's `global` / `storage`).
+local function roots_of(prof)
+    local out = {}
+    for r in pairs(prof.global2class or {}) do out[r] = 'class' end
+    for r in pairs(prof.nsset or {}) do out[r] = out[r] or 'namespace' end
+    -- `namespaces` is a LIST in the hand-authored Factorio profiles (nsset is its set) and a map elsewhere
+    for k, v in pairs(prof.namespaces or {}) do
+        local r = type(k) == 'number' and v or k
+        if type(r) == 'string' then out[r] = out[r] or 'namespace' end
+    end
+    return out
+end
+
+--- THE LOST -> NEW-FORM PAIRING (CART-0588): for each name the move LOSES, the form the new environment
+--- offers instead, or nil with the reason. Only two STRUCTURAL rules, each pairing only when it has
+--- exactly ONE candidate:
+---   root-rename  the root exists only in `from`, and exactly one root of the SAME KIND exists only in
+---                `to`: the tail carries over (global.x -> storage.x). It must still be provided there.
+---   member-move  the root is kept but lost this member, and exactly one `to` root's class holds a member of
+---                the SAME NAME (game.active_mods -> script.active_mods). Never its own root: had that kept the
+---                member, the name would not be lost.
+--- ⚠ NO NAME SIMILARITY: `game.entity_prototypes -> prototypes.entity` needs the member split into
+--- tokens, a guess this pairing refuses to make, so that row is UNPAIRED and says so. An unpaired row is
+--- frontier (nobody looked), never "no new form exists".
+--- `common` = the paired form is ALSO provided by `from`: one spelling satisfies both (no shim needed).
+--- Returns { rows = { { name, reads, to?, basis?, common?, candidates?, why } } } or nil, why.
+function M.correspond(from, to, lost)
+    local ok, why, a, b = M.diffable_pair(from, to)
+    if not ok then return nil, why end
+    return M.pair_lost(a, b, lost, from, to)
+end
+
+--- correspond over two LOADED profiles (the rules above; split out so a spec can hand it synthetic ones).
+function M.pair_lost(a, b, lost, from, to)
+    local ra, rb = roots_of(a), roots_of(b)
+    local only_b = {} -- kind -> roots `to` alone holds
+    for r, k in pairs(rb) do
+        if not ra[r] then local l = only_b[k] or {}; only_b[k] = l; l[#l + 1] = r end
+    end
+    for _, l in pairs(only_b) do table.sort(l) end
+    -- member name -> the `to` roots whose (fully enumerated) class holds it
+    local byclass = {}
+    for r, cls in pairs(b.global2class or {}) do
+        local l = byclass[cls] or {}; byclass[cls] = l; l[#l + 1] = r
+    end
+    local holders = {}
+    for key in pairs(b.api_members or {}) do
+        local cls, m = key:match('^(.-)::([%w_]+)$')
+        if cls and (b.api_complete or {})[cls] then
+            for _, r in ipairs(byclass[cls] or {}) do
+                local l = holders[m] or {}; holders[m] = l; l[#l + 1] = r .. '.' .. m
+            end
+        end
+    end
+    for _, l in pairs(holders) do table.sort(l) end
+    local rows = {}
+    for _, e in ipairs(lost) do
+        local row = { name = e.name, reads = e.reads }
+        local root, tail = e.name:match('^([%w_]+)%.(.+)$')
+        local cands, basis
+        if not root then
+            row.why = 'not a dotted name: neither rule applies'
+        elseif ra[root] and not rb[root] then
+            basis, cands = 'root-rename', {}
+            for _, r in ipairs(only_b[ra[root]] or {}) do cands[#cands + 1] = r .. '.' .. tail end
+        elseif rb[root] and tail:match('^[%w_]+$') then
+            basis, cands = 'member-move', {}
+            for _, n in ipairs(holders[tail] or {}) do cands[#cands + 1] = n end
+        else
+            row.why = 'the root is kept and the lost tail is not a single member: neither rule applies'
+        end
+        if cands then
+            if #cands == 1 and M.provides(b, cands[1]) then
+                row.to, row.basis = cands[1], basis
+                row.common = M.provides(a, cands[1]) ~= nil
+                row.why = basis == 'root-rename'
+                    and ('`%s` exists only in %s and `%s` is the one %s root only %s has'):format(root, from,
+                        cands[1]:match('^[%w_]+'), ra[root], to)
+                    or ('`%s` is the one %s root whose class holds a member named `%s`'):format(
+                        cands[1]:match('^[%w_]+'), to, tail)
+            elseif #cands == 1 then
+                row.why = ('%s offers `%s`, which %s does not provide'):format(basis, cands[1], to)
+            elseif #cands == 0 then
+                row.why = basis == 'root-rename'
+                    and ('no %s root exists only in %s'):format(ra[root], to)
+                    or ('no class of a %s root holds a member named `%s` (a renamed member is not guessed)'):format(to, tail)
+            else
+                row.candidates = cands
+                row.why = ('%d candidates by %s — ambiguous, so none is chosen'):format(#cands, basis)
+            end
+        end
+        rows[#rows + 1] = row
+    end
+    return { rows = rows }
+end
+
 --- The reference diff as lines. Direction matters and the wording says so.
 function M.reference_diff_report(store, from, to, opts)
     local res, err = M.reference_diff(store, from, to)

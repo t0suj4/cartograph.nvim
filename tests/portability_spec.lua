@@ -2670,3 +2670,36 @@ test('portability: a TYPE-MOVE row is discharged by the keys the value was writt
     eq(true, rows[1].confirmed, 'and it is marked STILL THE OLD SHAPE, not hedged')
     ok(res.type_move.migrated >= 1, 'while the ported site is discharged and counted')
 end)
+
+-- CART-0588: the lost -> new-form pairing pairs only on ONE candidate, and only to a form `to` provides. The real
+-- Factorio pair never reaches the ambiguous or unprovided branches, so synthetic profiles pin them.
+test('portability: pair_lost pairs on exactly one structural candidate, and says why when it will not', function ()
+    local A = { global2class = { game = 'G' }, api_complete = { G = true }, nsset = { game = true, old = true },
+        api_members = { ['G::moved'] = true, ['G::twice'] = true, ['G::gone'] = true } }
+    local B = { global2class = { game = 'G', s1 = 'S', s2 = 'S2', cls = 'C' },
+        api_complete = { G = true, S = true, S2 = true, C = false },
+        nsset = { game = true, s1 = true, s2 = true, new = true, cls = true },
+        api_members = { ['S::moved'] = true, ['S::twice'] = true, ['S2::twice'] = true, ['C::gone'] = true } }
+    local lost = { { name = 'old.x', reads = 2 }, { name = 'game.moved', reads = 1 },
+        { name = 'game.twice', reads = 1 }, { name = 'game.gone', reads = 1 }, { name = 'bare', reads = 1 } }
+    local rows = {}
+    for _, r in ipairs(port.pair_lost(A, B, lost, 'a', 'b').rows) do rows[r.name] = r end
+    eq('new.x', rows['old.x'].to, 'the one classless namespace only `b` has')
+    eq('root-rename', rows['old.x'].basis)
+    eq(false, rows['old.x'].common, 'new.x is not in `a`: a shim, not a common form')
+    eq('s1.moved', rows['game.moved'].to)
+    eq('member-move', rows['game.moved'].basis)
+    eq(nil, rows['game.twice'].to, 'two roots hold `twice`: ambiguous, so none is chosen')
+    eq({ 's1.twice', 's2.twice' }, rows['game.twice'].candidates)
+    eq(nil, rows['game.gone'].to, 'C is not fully enumerated, so it is no candidate')
+    ok(rows['game.gone'].why:find('not guessed', 1, true), rows['game.gone'].why)
+    eq(nil, rows['bare'].to)
+    -- the provided check: a renamed root whose tail `b` does not provide is refused by name
+    local B2 = vim.deepcopy(B); B2.nsset.new = nil; B2.global2class.new = 'N'; B2.api_complete.N = true
+    B2.global2class.s1, B2.global2class.s2, B2.global2class.cls = nil, nil, nil
+    B2.nsset.s1, B2.nsset.s2, B2.nsset.cls = nil, nil, nil
+    local A2 = vim.deepcopy(A); A2.nsset.old = nil; A2.global2class.old = 'O'; A2.api_complete.O = true
+    local r2 = port.pair_lost(A2, B2, { { name = 'old.x', reads = 1 } }, 'a', 'b').rows[1]
+    eq(nil, r2.to, 'new.x is not a member of N')
+    ok(r2.why:find('does not provide', 1, true), r2.why)
+end)

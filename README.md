@@ -2413,6 +2413,25 @@ Those are the two real 1.1 → 2.0 items: `global` became `storage`, and three
 is evidence in a way an absence is not — it survives both artifacts being
 incomplete the same way.
 
+**Which goal, and how big is each?** One version pair admits several goals with
+different work lists. The `objectives` tactic offers them sized (CART-0588):
+
+```
+toolbelt.lua run objectives <tree> from=lua-factorio-11 to=lua-factorio [corpus=@roots.json]
+  port 10 · backcompat 10 (common 1 / shim 7 / unpaired 2 → split FRONTIER) · floor-raise: unbuilt
+```
+
+Backcompat (satisfy both versions) is split by pairing each lost read with its new
+form. There are only two structural rules, and each pairs only on a single candidate:
+a root that one version alone has, renamed to the one same-kind root the other alone
+has (`global.x → storage.x`), and a member moved to the one root whose class holds
+that name (`game.active_mods → script.active_mods`, which 1.1 also has: a common
+form). `game.entity_prototypes → prototypes.entity` would need a guess, so it stays
+**unpaired**, and the split says frontier rather than one number. `corpus=` takes
+`tools/corpusroots.lua <out.json> <dir>…`: raw read counts from code already on the
+new version, with no profile involved. On three 2.0 mods, `storage` is read 69 times
+and `global` 0, the independent check of the pairing.
+
 A read is silenced only by a binding **in its own file**. It used to be silenced by
 one anywhere in the tree, which is a much larger claim than it looks: `global = {}`
 on line 7 of railloader's `spec/EntityQueue_spec.lua` — a file the same report calls
@@ -3543,6 +3562,9 @@ ladder — is in [`.claude/skills/cartograph/SKILL.md`](.claude/skills/cartograp
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# DESTINATION CORPUS ROOTS (CART-0588): raw reads of code already on a target version, no profile involved — the
+# `corpus=` input of the `objectives` tactic (its independent check of each lost -> new-form pairing):
+nvim --headless -u NONE -l tools/corpusroots.lua <out.json> <dir> [<dir> ...]
 # LUA -> JAVASCRIPT (CART-1197, CART-1199, CART-1206). The CENSUS before the emitter: every site that breaks, by
 # class (template / partial / refused), and every table's judged SHAPE (array / record / map):
 nvim --headless -u NONE -l tools/jsbreaks.lua lua [--show CLASS]
