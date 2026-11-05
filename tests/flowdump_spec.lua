@@ -1861,3 +1861,45 @@ test('flowdump: a WoW frame handler is CALLED by the host — receiver as self, 
     end
     ok(not D2.contracts.clauses['host-handlers'], 'and no clause')
 end)
+
+-- (CART-1949 (1), flowpath FLOW-0049: debug.sethook's HOOK is called by the VM at the masked events — no tree code
+-- calls it. The dump carries the VM's call at the sethook, tagged host:sethook[:<mask>], the event name a string)
+test('flowdump: debug.sethook calls its hook — the event a string, the hook found by the mask, a shadowed debug calls nothing (CART-1949)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function h1(ev) return ev end',
+        'debug.sethook(h1, "c")',
+        'local co = coroutine.create(function () end)',
+        'local function h2(ev) return ev end',
+        'debug.sethook(co, h2, "r")',
+        'local function h3(ev) return ev end',
+        'local m = "l"',
+        'debug.sethook(h3, m)',
+        'local function h4(ev) return ev end',
+        'do local debug = { sethook = function () end }; debug.sethook(h4, "c") end',
+        'return h1, h2, h3, h4' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local fnid, str = {}, nil
+    for _, s in ipairs(D.sites) do
+        if s.kind == 'function' then fnid[s.label:match('::(h%d)@')  or s.label] = s.fn end
+        if s.label == 'type:string' then str = s.id end
+    end
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local F = {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn end
+    local function holds_str(h) local p = F[fnid[h]].params[1]; return vim.tbl_contains(V[p] or {}, str) end
+    ok(holds_str('h1'), 'h1 is called with the event name')
+    ok(holds_str('h2'), 'the thread form: h2 is the hook')
+    ok(holds_str('h3'), 'a non-literal mask: h3 is still called')
+    ok(not holds_str('h4'), 'a LOCAL debug is not the library: h4 is not called')
+    local tags = {}
+    for _, fn in ipairs(D.functions) do for _, t in ipairs(fn.tags or {}) do if t[2]:find('^host:sethook') then tags[#tags + 1] = t[2] end end end
+    table.sort(tags)
+    -- (h1 by its mask; h2 alone — co is no hook; h3 and its neighbour `m` both tried, untagged by a mask)
+    eq({ 'host:sethook', 'host:sethook', 'host:sethook:c', 'host:sethook:r' }, tags)
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

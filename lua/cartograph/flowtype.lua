@@ -3473,6 +3473,35 @@ local function build(store, opts)
                     end)
                 end
             end
+            -- ★ debug.sethook([thread,] hook, mask [, count]) (CART-1949, flowpath FLOW-0049): the VM calls the hook at the
+            -- masked events of that thread with the event name ("call", "return", "line", "count") and, for a line event,
+            -- the line — a number, which holds nothing here. No tree code calls it, and it had been called by nothing.
+            -- Flow-insensitively the VM's call is a call HERE: `call [hr] h [ev]`, ev a string, tagged `host:sethook` (and
+            -- `:<mask>` for a literal mask) for flowpath; it raises into this function, as the core's call does. The hook
+            -- is the argument before the first string-literal mask; with no literal mask both candidates are called (a
+            -- thread or a non-function among them runs nothing)
+            if fname == 'debug.sethook' and argn[1] then
+                local _, gd = lookup('debug')
+                if gd then
+                    local function lit(x) return x and x:type() == 'string' end
+                    local hs = lit(argn[2]) and { 1 } or lit(argn[3]) and { 2 } or { 1, 2 }
+                    local mn = argn[hs[1] + 1]
+                    local mc = #hs == 1 and mn and mn:field('content')[1]
+                    local tag = 'host:sethook' .. (mc and (':' .. txt(mc)) or '')
+                    for _, j in ipairs(hs) do
+                        local hp = aps[j]
+                        if hp then
+                            local ev = new()
+                            addobj(ev, STR)
+                            G7.mu(function ()
+                                local hr = new()
+                                G7.ins({ 'call', { hr }, hp, { ev } }, tag)
+                                callc(hp, { ev }, hr, nil, curerr())
+                            end)
+                        end
+                    end
+                end
+            end
             if to and CTXFNS and CTXFNS[to] and not clone then
                 if not callee and f then expr(f) end -- (the callee expression is still walked: a call inside it)
                 ctx_direct[#ctx_direct + 1] = { to, aps, resl, curerr() } -- (what it raises, the caller raises: CART-1841)

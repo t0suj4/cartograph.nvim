@@ -88,7 +88,8 @@
 --   `divergence:coroutine` (flowtype binds a resume's arguments to that coroutine's function only; the core's `rin` is
 --   one channel), `contract:host-handlers` (a call the HOST makes to a handler a declared registrar was handed —
 --   spec/ecosystem `handlers`, WoW's frame:SetScript / HookScript: emitted at the registration, the receiver first and
---   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
+--   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955),
+--   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
 --   claim: no call is synthesized.)
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — getfenv / setfenv, hooksecurefunc,
 --   getmetatable, newproxy, a hidden field's load / store, a keyed copy, unknown code (load ... : the `ext` sites and
