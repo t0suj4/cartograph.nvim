@@ -3516,6 +3516,24 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 
 `git commit --no-verify` bypasses it for a WIP checkpoint.
 
+Before those gates, pre-commit refuses a commit whose index is not the tree they
+test (a tracked file with unstaged changes, or a new file under `lua/`, `tests/`,
+`tools/`… never added). `.githooks/commit-msg` fences the message:
+- It refuses a new commit whose message is HEAD's word for word (a stale
+  `.git/COMMIT_EDITMSG`).
+- Through `tools/refcheck.py`, every ticket ID and commit hash the message names
+  must be real, and so must every ticket ID the staged diff adds.
+- `refs-ok: <ref>` in the message passes a deliberate one the check cannot see.
+
+For an agent session, `tools/claude-guard.py` is the Claude Code `PreToolUse`
+half, registered in `.claude/settings*.json`. A hook cannot see `--no-verify`, so
+the guard refuses an agent's `git commit --no-verify` / `-n` and a message read
+back from `.git/COMMIT_EDITMSG`. It also checks the ticket IDs and hashes in
+every `tk` write and commit. A ticket filed since the session registered with
+`tk` must be one the session filed or has already read in a tool result, so a
+guessed ID fails. Cross-filing (a FLOW ticket from a cartograph session) is
+fine, because what counts is the session, not the project prefix.
+
 <!-- @claim readme-agent-verbs: The agent surface serves 43 verbs. -->
 <!-- check: #require('cartograph.agent').ORDER == 43 -->
 

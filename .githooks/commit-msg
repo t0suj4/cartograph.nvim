@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# cartograph commit-msg: the MESSAGE fence, beside pre-commit's tree fence. Three checks, all cheap:
+#
+#   1. a STALE MESSAGE — a new (non-amend) commit whose message is HEAD's message word for word. After a
+#      blocked commit .git/COMMIT_EDITMSG can still hold the previous commit's message, and a retry with
+#      `-F .git/COMMIT_EDITMSG` committed a new tree under it (harness #57).
+#   2. every ticket ID and commit hash the message names must be real (tools/refcheck.py): a message
+#      written before `tk new` / `git commit` returned the reference named one that did not exist.
+#   3. every ticket ID the staged diff ADDS must be a filed ticket (IDs only: code is full of hex).
+#
+# A deliberate reference the checks cannot see (a hash in a repo not checked out here): `refs-ok: <ref>`
+# in the message. Without tk on PATH the ID checks are skipped. Bypass: git commit --no-verify.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+body="$(git stripspace --strip-comments < "$1")"
+fail=0
+
+amend=0
+if [ -r "/proc/$PPID/cmdline" ] && tr '\0' '\n' < "/proc/$PPID/cmdline" | grep -qx -- '--amend'; then amend=1; fi
+if [ "$amend" = 0 ] && git rev-parse -q --verify HEAD >/dev/null \
+   && [ "$body" = "$(git log -1 --format=%B HEAD | git stripspace)" ]; then
+    echo "[commit-msg] blocked — this message is HEAD's message word for word; a stale .git/COMMIT_EDITMSG?"
+    fail=1
+fi
+
+printf '%s\n' "$body" | python3 tools/refcheck.py || fail=1
+added="$(git diff --cached -U0 --no-color | grep '^+' | grep -v '^+++')"
+if ! out="$(printf '%s\n' "$added" | python3 tools/refcheck.py --no-hashes)"; then
+    printf '%s\n' "$out" | sed 's/^refcheck: /refcheck (staged diff): /'
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "[commit-msg] blocked — fix the message (or 'git commit --no-verify' to bypass)"
+    exit 1
+fi
+exit 0

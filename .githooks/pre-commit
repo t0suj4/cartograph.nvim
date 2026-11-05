@@ -20,6 +20,10 @@
 #      store.lua fails the commit) + the self-serving / lint dashboard.
 #   5. the full spec suite (tests/run.sh).
 #
+# Gate 0 runs before all five and needs no nvim: the index must BE the tree they test (see below). The
+# message is fenced separately by commit-msg (tools/refcheck.py), and an agent's --no-verify by the
+# Claude Code guard tools/claude-guard.py.
+#
 # Checked in under .githooks/ and activated per-clone with
 #   git config core.hooksPath .githooks
 # (tools/install-hooks.sh does this). Bypass a single commit with
@@ -28,6 +32,20 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 NVIM="${NVIM:-nvim}"
+
+# 0. THE TESTED TREE IS THE COMMITTED TREE. Gates 1-5 read the WORKING TREE, so a tracked file with unstaged
+#    changes, or a new file never added, passes them and is then committed without (harness #44/#57: an amend
+#    committed a stale index the gates had never seen). Refused here, before anything slow. To commit part of
+#    a change, commit it from a worktree checked out at HEAD.
+unstaged="$(git diff --name-only)"
+untracked="$(git ls-files --others --exclude-standard -- lua plugin tests tools doc examples .claude .githooks)"
+if [ -n "$unstaged$untracked" ]; then
+    echo "[pre-commit] blocked — the gates would test a tree this commit does not contain:"
+    if [ -n "$unstaged" ]; then printf '  unstaged:  %s\n' $unstaged; fi
+    if [ -n "$untracked" ]; then printf '  untracked: %s\n' $untracked; fi
+    echo "[pre-commit] git add them (or drop them), or commit the part from a worktree at HEAD"
+    exit 1
+fi
 
 if ! command -v "$NVIM" >/dev/null 2>&1; then
     echo "[pre-commit] $NVIM not found — skipping (set NVIM= or --no-verify)"; exit 0
