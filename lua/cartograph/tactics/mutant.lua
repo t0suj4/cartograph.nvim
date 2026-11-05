@@ -72,6 +72,7 @@ local DECL = [[return function (params) return { variants = { 'a', 'b' },
 return {
     name = 'mutant',
     kind = 'discovery',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'gate', 'test' },
     summary = 'does a DISCOVERY catch a mutation? file, before/after = the mutation (exact text, one site), use = the discovery (it must take repo), with = k=v params for it (@path reads a file); runs it on a scratch copy before and after the mutation — the baseline must hold, the mutant must not',
     params = { file = 'string', before = 'string', after = 'string', use = 'string', with = 'list?', repo = 'string?', keep = 'string?' },

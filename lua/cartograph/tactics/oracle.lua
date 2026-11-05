@@ -49,6 +49,7 @@ print(('  %d  calls EXACT-WRONG'):format(wrong))
 return {
     name = 'oracle',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'gate', 'measure' },
     summary = 'score an analysis against an independent oracle: scorer = a script printing `  N  <label>` rows, run on root + the oracle TSV in its own process (repo on the runtimepath); claim: no WRONG / MISSES row, some RIGHT, at least floor RIGHT',
     params = { scorer = 'string', root = 'string', oracle = 'string', args = 'list?', repo = 'string?', wrong = 'string?',

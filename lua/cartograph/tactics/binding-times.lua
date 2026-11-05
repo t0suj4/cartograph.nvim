@@ -58,6 +58,7 @@ end
 local E = {
     name = 'binding-times',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     measures = 'CART-1445',
     summary = 'mix\'s binding-time analysis as a question, for one Lua function (ref = file::name): with `known` parameters static, each variable\'s binding time (S / C / D), and which parameters the RESULT depends on — a memo needs no key for the rest; `outside` = it reads something besides its parameters (or calls a helper: the function is lowered alone)',

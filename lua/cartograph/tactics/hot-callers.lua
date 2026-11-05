@@ -33,6 +33,7 @@ end
 local E = {
     name = 'hot-callers',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'who calls a function during a workload: target = module.fn wrapped for one run of `workload` (Lua returning function (store); @file) — per caller site (file:line, name) its calls and inclusive seconds',

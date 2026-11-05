@@ -2586,6 +2586,7 @@ local function v_toolbelt_list(store, args)
             for _, b in ipairs(f.chain) do chain[#chain + 1] = { scope = b.scope, path = b.path, chosen = b.chosen, why = b.why } end
             rows[#rows + 1] = { name = e.name, kind = e.kind, scope = e.scope, summary = e.summary, measures = nn(e.measures),
                 params = table.concat(ps, ' '), examples = ex, overrides = nn(e.overrides), tags = tags, chain = chain,
+                executes = e.executes or {},
                 applicable = f.applicable, why_not = nn(f.why_not) }
         end
     end
@@ -2614,15 +2615,56 @@ local function v_toolbelt_list(store, args)
     return { result = rows, notes = notes }
 end
 
+-- ★★ A READ-ONLY HOST RUNS ONLY CARTOGRAPH'S OWN CODE (CART-1915). The audit (CART-0607) ran a caller's Lua through
+-- door-trap's `workload` on a read-only host: a named tactic with a code param is the same door the throwaway tactics
+-- were kept off MCP for. Two layers, because a declaration nobody forgot is not a guard:
+--   1. a discovery that DECLARES `executes` is refused before it runs, by name;
+--   2. everything else — LOADING the entry included, so a tactic file from the project or user mount is refused before
+--      its own code runs — runs with the lua and process doors TRAPPED (cartograph.doors). A run that catches the trap's
+--      error itself has still tried: the refusal is decided on the doors' RECORD, not on whether an error escaped.
+local function trapped(events)
+    local ev = events[1]
+    return refuse('executes-on-read-only',
+        ('this host was started read-only and runs only cartograph\'s own code; the run tried to open a %s door at %s (%s)')
+            :format(ev.kind, ev.at, ev.what),
+        'run it on a writable host')
+end
+
 local function v_toolbelt_run(store, args)
     local tb = require 'cartograph.toolbelt'
-    local e, why = tb.load(args.name, nil, (store.data or {}).root)
+    local doors = require 'cartograph.doors'
+    local root = (store.data or {}).root
+    local e, why
+    if M.WRITABLE then e, why = tb.load(args.name, nil, root)
+    else
+        local okw, events
+        okw, events, e, why = doors.watch(tb.EXECUTES, 'trap', tb.load, args.name, nil, root)
+        if #events > 0 then return trapped(events) end
+        if not okw then e, why = nil, e end -- (watch: ok, events, then the error)
+    end
     if not e then return refuse('unknown-tactic', tostring(why), 'toolbelt_list names every entry, with its params and examples') end
     if args.apply and e.kind == 'write' and not M.WRITABLE then
         return refuse('read-only-host', ('%s would write, and this host was started read-only'):format(e.name),
             'run it without `apply` to preview, or on a writable host')
     end
-    local res, rwhy, rclass = tb.run(store, e.name, args.params, { apply = args.apply and e.kind == 'write' })
+    -- (a DISCOVERY that declares `executes` is refused up front. A WRITE tactic runs read-only only as a PREVIEW, and its
+    -- declaration is the union over its examples, which APPLY — a preview that opens no door is not refused for what an
+    -- apply would do; the trap below refuses one that does)
+    if not M.WRITABLE and e.kind == 'discovery' and e.executes and #e.executes > 0 then
+        return refuse('executes-on-read-only',
+            ('%s executes (%s: it runs Lua that is not cartograph\'s own, or starts a process), and this host was started read-only')
+                :format(e.name, table.concat(e.executes, ', ')),
+            'run it on a writable host — toolbelt_list shows each entry\'s `executes`')
+    end
+    local res, rwhy, rclass
+    if M.WRITABLE then
+        res, rwhy, rclass = tb.run(store, e.name, args.params, { apply = args.apply and e.kind == 'write' })
+    else
+        local okw, events
+        okw, events, res, rwhy, rclass = doors.watch(tb.EXECUTES, 'trap', tb.run, store, e.name, args.params, { apply = false, entry = e })
+        if #events > 0 then return trapped(events) end
+        if not okw then res, rwhy, rclass = nil, res, 'unbuilt' end -- (watch: ok, events, then the error)
+    end
     if not res then
         return refuse('cannot-run', ('%s: %s'):format(e.name, tostring(rwhy)),
             'the reason names the param or the premise that failed', { class = nn(rclass) })

@@ -179,6 +179,7 @@ end
 local E = {
     name = 'refresh-parity',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'accept', 'repo' },
     measures = 'CART-1439',
     summary = 'the oracle an incremental refresh owes: the world\'s last `history` commits under `sub` replayed as edits on a scratch WORLD (a clean git checkout; restored after), refreshed FULL and INCREMENTAL in two processes, the graph digest (nodes, edges, call resolutions) compared after every step, with each edit\'s interface class (unchanged | added | removed | both) and both paths\' seconds',

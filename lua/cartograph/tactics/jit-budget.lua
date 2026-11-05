@@ -61,6 +61,7 @@ end
 local E = {
     name = 'jit-budget',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize', 'performance' },
     measures = 'CART-1662',
     summary = 'what LuaJIT\'s trace budgets cost a workload: `workload` (Lua returning function (store); @file) in a fresh process per configuration — default | tune (4000 traces / 8 MB) | big (20000 / 256 MB) | off — best of `reps` after a warm run, trace-cache FLUSHES counted, RSS at the end; names the fastest (a batch process\'s choice: jit.opt is process-wide). code = <dir> runs that tree\'s modules',

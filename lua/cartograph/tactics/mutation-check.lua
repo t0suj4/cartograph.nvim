@@ -174,6 +174,7 @@ end
 local E = {
     name = 'mutation-check',
     kind = 'discovery',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'accept', 'repo' },
     measures = 'CART-1174',
     scratch_copy = scratch_copy, -- (shared with `mutant`: the same copy, its history readable and not writable)

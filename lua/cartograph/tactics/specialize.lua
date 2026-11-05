@@ -57,6 +57,7 @@ end
 local E = {
     name = 'specialize',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     measures = 'CART-1445',
     summary = 'specialize ANY Lua function (ref = file::name) to some of its arguments: statics = JSON { param = value }, samples = JSON list of the dynamic arguments per call — the residual text and mix\'s stats, and the residual ACCEPTED against the original (mix\'s own evaluator) on every sample; a refusal is mix\'s located one',

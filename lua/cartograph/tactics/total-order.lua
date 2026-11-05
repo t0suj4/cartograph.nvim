@@ -99,6 +99,7 @@ local SRC = table.concat({
 return {
     name = 'total-order',
     kind = 'write',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     summary = 'make a sort comparator TOTAL: site = file:line of a table.sort (sort-ties reports it), by = tie-break element paths (`.id`, `[1].file`; sort-ties lists the separators) — the final `return L < R` becomes `if L ~= R then return L < R end` + the tie-breaks; without `by` it stops on the tie-break decision',
     params = { site = 'string', by = 'list?' },

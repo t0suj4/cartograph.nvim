@@ -44,6 +44,7 @@ local LJ = {
 return {
     name = 'runtime-facts',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code' },
     summary = 'the facts an interpreter adapter needs, derived from a runtime\'s C tree (src = the dir; omitted = the graph\'s root): each DERIVED, or a gap by kind',
     params = { src = 'string?' },

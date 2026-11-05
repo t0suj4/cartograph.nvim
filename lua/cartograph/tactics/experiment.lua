@@ -45,6 +45,7 @@ end
 local E = {
     name = 'experiment',
     kind = 'discovery',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'accept', 'experiment', 'wind-tunnel' },
     measures = 'CART-1537',
     summary = 'run a DECLARED experiment (decl = @file: a variant, a baseline worktree, instruments — tactic / specs / join / ab — and accept-if-all-pass); the repo\'s batteries live in tools/experiments/',

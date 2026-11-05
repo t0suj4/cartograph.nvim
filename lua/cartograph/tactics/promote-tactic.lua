@@ -23,6 +23,7 @@ end
 return {
     name = 'promote-tactic',
     kind = 'write',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'toolbelt' },
     summary = 'promote a PROJECT tactic into the built-in toolbelt (every session gets it): name, from = the project root; stops on the `promote` decision until confirm = yes',
     params = { name = 'string', from = 'string', into = 'string?', confirm = 'string?' },

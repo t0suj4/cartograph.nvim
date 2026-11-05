@@ -83,6 +83,7 @@ local FXL = vim.tbl_extend('force', FX, {
 return {
     name = 'reshape-accept',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'gate', 'test', 'code' },
     summary = 'does a provenance reshape keep the tests green? verb = rename-field | reshape | hoist-empty, with = its k=v arguments (family / positional / define: comma lists), spec = the spec filter (empty: the whole suite); planned and written in a SCRATCH COPY of repo (default this cartograph), the spec run before and after — the independent oracle for accesses the analysis cannot see',
     params = { verb = 'string', with = 'list?', spec = 'string?', repo = 'string?', keep = 'string?', timeout = 'string?' },

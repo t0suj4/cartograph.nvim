@@ -20,6 +20,7 @@ end
 return {
     name = 'align-family',
     kind = 'write',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code' },
     summary = 'carry an edit made to ONE near-clone to its family: ref = the member, text = its new source, scope = member | class | all | clean',
     params = { ref = 'ref', text = 'string', scope = 'string?' },

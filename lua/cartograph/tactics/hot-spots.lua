@@ -114,6 +114,7 @@ end
 local E = {
     name = 'hot-spots',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'where a workload\'s time goes, UNHINTED: LuaJIT\'s sampling profiler over one run of `workload` (Lua returning function (store); @file), samples attributed to the module FIELD functions holding them — self and inclusive — plus the hottest raw lines; the targets the named discoveries (phase-profile, hot-callers, memo-advisor) take. code = <dir> profiles that tree\'s modules',

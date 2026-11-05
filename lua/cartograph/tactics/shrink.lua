@@ -129,6 +129,7 @@ end]]
 return {
     name = 'shrink',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'gate', 'code' },
     summary = 'the smallest set of files (unit=file) or lines (unit=line) of root for which pred still holds — ddmin; pred = Lua source returning function (dir, items) -> holds, called on a scratch copy of each candidate; glob limits the items, out writes the result',
     params = { root = 'string', pred = 'string', unit = 'string?', glob = 'string?', out = 'string?' },

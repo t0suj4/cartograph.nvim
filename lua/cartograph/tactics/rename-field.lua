@@ -21,6 +21,7 @@ local FAM_B = table.concat({
 return {
     name = 'rename-field',
     kind = 'write',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code' },
     summary = 'rename a record field: base = the base spelling (spec), field -> to, define = the files whose constructors define the record (a,b), accept = name-occupied to move an occupant to a placeholder; OR family = the constructors (file:LINE,…) — by provenance: every access flowtype says those tables reach, under any spelling (world = closed|open)',
     params = { base = 'string?', field = 'string', to = 'string', define = 'list?', accept = 'string?', family = 'list?', world = 'string?' },

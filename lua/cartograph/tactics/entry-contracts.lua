@@ -111,6 +111,7 @@ local FX = {
 return {
     name = 'entry-contracts',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'measure', 'flow', 'code' },
     summary = 'the LEDGER of the entry contracts in force (declared promises about unknown code: by module or site, clauses no-write [, no-callback], src required — the scoped key entry_contracts, or `contracts` = a Lua file returning records, to try some): per contract the whole answers that STAND ON it (dropping it alone changes them: one solve per met contract), the partial answers it GAINS a verdict (none without it; listed in `gain`), and the answers it COSTS (less known under it than without it — past CAP a contract moves saturation; listed in `cost`), the hand-out sites it met, where it was declared; an unmet contract is listed; rows = stands, gains, costs, sites, `id module|site [clauses] where`; mode = closed | open, top = rows',
     params = { mode = 'string?', contracts = 'string?', top = 'string?' },

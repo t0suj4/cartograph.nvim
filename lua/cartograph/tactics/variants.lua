@@ -144,6 +144,7 @@ end }]]
 return {
     name = 'variants',
     kind = 'discovery',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'gate', 'measure' },
     summary = 'compute the same rows under several variants, each in its own process, and diff them by key against the first: claim same (nothing moves) or flagged (what moves is flagged); a control variant must move; repeat_ = N recomputes the baseline in N processes',
     params = { decl = 'string', root = 'string?', args = 'list?', repo = 'string?', timeout = 'string?' },

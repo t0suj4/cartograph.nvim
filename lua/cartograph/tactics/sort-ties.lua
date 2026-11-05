@@ -116,6 +116,7 @@ end
 local E = {
     name = 'sort-ties',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code' },
     measures = 'CART-1442',
     summary = 'determinism without a rerun: every table.sort a workload makes (workload = Lua returning function (store); @file), the sites whose comparator leaves TIES among distinct elements — there the output order is the input order (nondeterministic when that comes from pairs over table keys)',

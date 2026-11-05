@@ -26,6 +26,7 @@ local SRC = table.concat({
 return {
     name = 'lazy-buffer',
     kind = 'write',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     summary = 'the optimizer\'s buffer pass: every append-only buffer (a function-local `local b = {}` / `local b, n = {}, 0` appended to and read only by b[1] and a final table.concat) allocates its table on the SECOND piece, the first kept in a local; files = the files (default every Lua file); nodes = a SCOPE (ids or file::name — e.g. the functions alloc-census found hot): only the buffers inside them',
     params = { files = 'list?', nodes = 'list?' },

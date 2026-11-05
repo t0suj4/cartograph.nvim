@@ -41,6 +41,7 @@ end
 local E = {
     name = 'template-sites',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code' },
     measures = 'CART-1367',
     summary = 'every site where a template matches, with what each hole bound: example = an expression as code (vim.json.encode(x)), holes = its identifiers that are holes (x), files = scope (default: every .lua file of the graph)',

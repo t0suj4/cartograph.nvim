@@ -3576,6 +3576,17 @@ other direction, `txn_load` replays only a step whose verb mints a plan
 re-derives to no plan refuses (`no-plan-minted`) rather than loading nothing
 under `ok`.
 
+**A read-only host runs only cartograph's own code** (CART-1915). Every tactic
+declares what it `executes`:
+- `lua`: a caller's workload, or the tree's functions compiled and called;
+- `process`: the tree's specs, a compiler, or git.
+
+The toolbelt fence pins each declaration to what the tactic's examples actually
+open. `toolbelt_run` on a read-only host refuses a declared executor, and it
+runs everything else under `cartograph.doors`' trap. That includes loading the
+tactic file itself, so a tactic from the project's `.cartograph/tactics` mount
+is refused before its own code runs.
+
 **An empty answer is a typed claim with a reason attached.** `absent`, `refused`,
 `frontier` and `unavailable` mean different things, and reading one as "nothing
 found" is the mistake the envelope exists to prevent.

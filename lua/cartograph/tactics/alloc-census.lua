@@ -142,6 +142,7 @@ local FX = {
 return {
     name = 'alloc-census',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'measure', 'optimize', 'code' },
     summary = 'which TABLE CONSTRUCTORS allocate most under a workload: every {…} under lua/ counted in a scratch copy (a global counter, compile-checked), workload = Lua source run against the copy (arg[1] = its root); top = rows; roster = 1 adds the route a representation change can take (reshapable / escaped / partial / shared)',
     params = { workload = 'string', top = 'string?', roster = 'string?', repo = 'string?', keep = 'string?', timeout = 'string?' },

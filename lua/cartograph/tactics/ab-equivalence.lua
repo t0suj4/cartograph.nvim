@@ -142,6 +142,7 @@ end
 local E = {
     name = 'ab-equivalence',
     kind = 'discovery',
+    executes = { 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'accept', 'repo', 'optimize' },
     measures = 'CART-1444',
     summary = 'does a code change keep a measurement\'s output? measure (Lua returning { measure = fn(store, p) -> string | lines }) run on each corpus by the code at ref (git archive: the tree is never touched) and by the working tree (or ref_b), each side in its own process and cache; sorted = 1 compares as sets; warm = 1 shares caches; timeout = seconds per side; faster = 1 also requires B to be faster (a performance change); a side that is not a cartograph checkout (any Lua project) is run by this toolbelt with its own lua/ first',

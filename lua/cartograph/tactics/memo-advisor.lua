@@ -104,6 +104,7 @@ end
 local E = {
     name = 'memo-advisor',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1441',
     summary = 'repeated work on a repeating argument, in ONE run: targets = module.fn[,…] wrapped while `workload` (Lua returning function (store); @file) runs — per target calls, distinct argument keys (tables by identity) and their KIND (identity | scalar | mixed: the memo residence), time, what a memo would SAVE and its PRICE (bytes; userdata / functions in results). Purity is yours to establish (effects.lua)',

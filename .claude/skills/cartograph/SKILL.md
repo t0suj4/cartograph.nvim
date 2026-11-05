@@ -141,6 +141,18 @@ If re-deriving finds nothing, for example because the tree moved and the
 candidate is gone, the load refuses with `no-plan-minted`. It is never `ok` with
 no plan.
 
+A read-only host runs only cartograph's own code (CART-1915). Each `toolbelt_list`
+row says what its tactic `executes`:
+- `lua`: it runs code that isn't cartograph's own, such as a caller's workload or
+  the tree's functions;
+- `process`: it starts a process, such as the tree's specs, a compiler or git.
+
+On a read-only host, a discovery tactic that declares either is refused with
+`executes-on-read-only`. Everything else runs with those doors trapped, including
+a write tactic's preview and loading a tactic file from the project's mount, and
+a run that opens one is refused the same way. Use a writable host for those
+tactics.
+
 ★ PREVIEW BEFORE YOU SAVE, and the artifact carries a WITNESS: `txn_preview`
 records a sha256 of each after-image it showed you, `txn_save` carries those, and
 `txn_load` dry-runs the freshly derived plan and compares. If the tree moved, the

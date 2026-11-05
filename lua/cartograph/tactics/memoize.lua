@@ -113,6 +113,7 @@ local function load_m(root) return dofile(root .. '/m.lua') end
 return {
     name = 'memoize',
     kind = 'write',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     summary = 'wrap a Lua function in a memo keyed by its arguments (ref = file::name): the body becomes NAME_raw, the header a wrapper answering from the memo — every result kept (nil, multiple values); residence = weak (by identity) | strong | generation (+ generation = <expr>), absent = the memo-residence decision. Purity and unshared results are yours to establish: run ab-equivalence after',
     params = { ref = 'ref', residence = 'string?', generation = 'string?', key = 'list?' },

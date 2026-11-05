@@ -385,6 +385,7 @@ end
 local E = {
     name = 'derive-accept',
     kind = 'discovery',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'accept', 'algebra' },
     measures = 'CART-1483',
     summary = 'does every algebra derivation, COMPILED by mix (all-dynamic), agree with itself interpreted on the arguments a real suite passes? ops = a,b (default all), through = 1 (follow the basis), opaque = M.x,… (through: kept primitives), reuse = eager, cap = samples per op (12), suite = the spec to tap (default the vendored donor suite), plant = op (a planted difference: the negative control); rows carry residual bytes / functions',

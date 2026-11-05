@@ -17,11 +17,18 @@
 -- the toolbelt fence runs every one. An example's `expect` is checked against the run's result:
 --   write:      { status = 'done' | 'stopped' | ..., applied = n?, check = fn(root, result) -> ok, why }
 --   discovery:  { holds = true | false, check = fn(value) -> ok, why }
+-- An entry that EXECUTES declares it (CART-1915): `executes = { 'lua' }`, `{ 'process' }` or both — it runs Lua that is
+-- not cartograph's own (a caller's workload, the tree's functions compiled and called, a tree file), or starts a process
+-- (the tree's specs, a compiler, git). A read-only host refuses a declared executor before it runs, and traps the doors
+-- of an undeclared one while it runs (cartograph.doors). The declaration is PINNED by the toolbelt fence: every example
+-- runs with those doors recorded, and what an entry opens must be what it declares.
 local M = {}
 
 local REQUIRED = { name = 'string', kind = 'string', summary = 'string', examples = 'table' }
 local KINDS = { write = true, discovery = true }
 local TAG = '^[a-z][a-z0-9-]*$'
+local EXECUTES = { lua = true, process = true }
+M.EXECUTES = EXECUTES
 
 --- the BUILT-IN directory, derived from this module's own path
 local function dir()
@@ -144,6 +151,13 @@ function M.load(name, d, root)
             if type(t) ~= 'string' or not t:match(TAG) then
                 return nil, ('%s: tag `%s` is not a lowercase word (%s)'):format(path, tostring(t), TAG), 'unbuilt'
             end
+        end
+    end
+    -- EXECUTES (CART-1915): a list from the closed vocabulary — a malformed one is refused by name, never read as "none"
+    if e.executes ~= nil then
+        if type(e.executes) ~= 'table' then return nil, path .. ': `executes` must be a list of lua | process', 'unbuilt' end
+        for _, x in ipairs(e.executes) do
+            if not EXECUTES[x] then return nil, ('%s: `executes` names `%s`, not lua | process'):format(path, tostring(x)), 'unbuilt' end
         end
     end
     if e.applies ~= nil and type(e.applies) ~= 'function' then return nil, path .. ': `applies` must be a function (subject) -> ok, why', 'unbuilt' end
@@ -556,6 +570,43 @@ function M.run(store, name, params, opts)
         approvals = opts.approvals }
     if e.oracle then ropts.oracle = function (st, res) return e.oracle(st, res, params or {}) end end
     return require('cartograph.tactic').run(store, term, ropts)
+end
+
+--- ★ THE EXECUTES FENCE (CART-1915): run every example of `e` with the lua and process doors RECORDED. -> {
+---   observed = { kind -> { example names } }, skipped = n, failed = { 'example: why' }, mismatch = why | nil }
+--- `mismatch`: an observed kind the entry does not declare, or — when no example was skipped — a declared kind no
+--- example opened (a declaration nothing pins is a claim nobody checks). With a skip, only the first direction holds.
+--- ⚠ Examples prove PRESENCE, never absence: a code path no example takes is not seen, which is why a read-only host
+--- also TRAPS the doors at run time rather than trusting this declaration alone.
+function M.audit_executes(e)
+    local doors = require 'cartograph.doors'
+    local out = { observed = {}, skipped = 0, failed = {} }
+    for _, ex in ipairs(e.examples or {}) do
+        local okw, events, okx, why, res = doors.watch({ lua = true, process = true, trusted = { e.path } }, 'record', M.example, e, ex)
+        if not okw then out.failed[#out.failed + 1] = ('%s: raised %s'):format(ex.name, tostring(events))
+        else
+            if not okx then out.failed[#out.failed + 1] = ('%s: %s'):format(ex.name, tostring(why)) end
+            if res and res.skipped then out.skipped = out.skipped + 1 end
+            for _, k in ipairs(doors.kinds(events)) do
+                out.observed[k] = out.observed[k] or {}
+                table.insert(out.observed[k], ex.name)
+            end
+        end
+    end
+    local declared = {}
+    for _, k in ipairs(e.executes or {}) do declared[k] = true end
+    local why = {}
+    for k, exs in pairs(out.observed) do
+        if not declared[k] then why[#why + 1] = ('opens a %s door (example: %s) and does not declare it'):format(k, exs[1]) end
+    end
+    if out.skipped == 0 then
+        for k in pairs(declared) do
+            if not out.observed[k] then why[#why + 1] = ('declares %s, and no example opens that door'):format(k) end
+        end
+    end
+    table.sort(why)
+    out.mismatch = #why > 0 and table.concat(why, '; ') or nil
+    return out
 end
 
 --- run ONE example of an entry on a fresh temp root: -> ok, why, result

@@ -265,6 +265,7 @@ local function measure_of(mod) return ('return { measure = function () package.l
 return {
     name = 'optimize',
     kind = 'write',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'code', 'optimize' },
     on_stop = 'rollback',
     summary = 'THE OPTIMIZATION LOOP on this world: rewrite = memo (hot-spots -> memo-advisor -> memoize, residence from the key kind) | order (sort-ties -> total-order) | hoist (alloc-census -> the hot provable empty fallbacks -> hoist-empty scoped to their functions; min = their share of the tables, default 0.01) | buffer (alloc-census -> the hot provable append-only buffers -> lazy-buffer scoped to their functions; the same min) — then ab-equivalence of `measure` on `corpus` at HEAD vs the rewritten tree (memo: equal AND faster), rolled back when it fails. workload = what the discoveries run (Lua returning function (store) or { setup, run }; @file). Apply only, on a clean git checkout; stops only on decisions (mixed key kind, several separators). jit = 1 runs jit-budget first and carries what the trace budgets cost as a premise (reported, never written)',

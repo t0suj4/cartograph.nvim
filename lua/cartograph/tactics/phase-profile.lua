@@ -36,6 +36,7 @@ end
 local E = {
     name = 'phase-profile',
     kind = 'discovery',
+    executes = { 'lua', 'process' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'find', 'code', 'optimize' },
     measures = 'CART-1444',
     summary = 'where a workload\'s time goes by named function: targets = module.fn[,…] wrapped for one run of `workload` (Lua returning function (store); @file) — calls, inclusive seconds, share of the run',

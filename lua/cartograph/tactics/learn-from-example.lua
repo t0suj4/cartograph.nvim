@@ -9,6 +9,7 @@ local T = require('cartograph.tactic').T
 return {
     name = 'learn-from-example',
     kind = 'write',
+    executes = { 'lua' }, -- CART-1915: pinned by the toolbelt fence
     tags = { 'toolbelt' },
     summary = 'learn a tactic from ONE example into the project (.cartograph/tactics/<name>.lua), born with the example as its test: name, before, after (strings; @file reads one)',
     params = { name = 'string', before = 'string', after = 'string', summary = 'string?' },

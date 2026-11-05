@@ -350,3 +350,105 @@ test('toolbelt LOOKUP: a malformed tag is refused BY NAME; an entry that does no
     eq(1, counts.optimise); ok(vim.tbl_contains(singles, 'optimise'), 'singletons: ' .. table.concat(singles, ','))
     ok(not vim.tbl_contains(singles, 'optimize'), 'a tag two entries carry is not flagged')
 end)
+
+-- ── what a tactic EXECUTES, and what a read-only host lets it (CART-1915) ────
+-- The CART-0607 audit ran a caller's Lua through door-trap's `workload` on a read-only host. Now an entry DECLARES
+-- `executes` (lua | process), the fence pins the declaration to what its examples open, and a read-only host refuses a
+-- declared executor up front and TRAPS the doors of everything else while it runs.
+
+local doors = require 'cartograph.doors'
+
+test('toolbelt (CART-1915): every entry DECLARES exactly the doors its examples open', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local entries = tb.list()
+    local bad, n = {}, 0
+    for _, e in ipairs(entries) do
+        local a = tb.audit_executes(e)
+        if a.mismatch then bad[#bad + 1] = e.name .. ': ' .. a.mismatch end
+        if e.executes and #e.executes > 0 then n = n + 1 end
+    end
+    eq({}, bad, 'a tactic that executes says so, and says nothing it does not do')
+    ok(n >= 10, 'the fence sees executors at all — not a vacuous pass: ' .. n)
+end)
+
+test('toolbelt (CART-1915): the fence NAMES an undeclared executor and an overclaiming one; a bad vocabulary is refused', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local function put(name, text) local fd = assert(io.open(d .. '/' .. name .. '.lua', 'w')); fd:write(text); fd:close() end
+    put('spawns', [[return { name = 'spawns', kind = 'discovery', summary = 's', examples = { { name = 'runs true', expect = { holds = true } } },
+        measure = function () vim.fn.system({ 'true' }); return 1 end, claim = function () return true end }]])
+    put('compiles', [[return { name = 'compiles', kind = 'discovery', summary = 's', examples = { { name = 'calls a chunk', expect = { holds = true } } },
+        measure = function () return load('return 2')() end, claim = function () return true end }]])
+    put('parses', [[return { name = 'parses', kind = 'discovery', summary = 's', examples = { { name = 'only compiles', expect = { holds = true } } },
+        measure = function () return load('return 2') and 1 end, claim = function () return true end }]])
+    put('overclaims', [[return { name = 'overclaims', kind = 'discovery', executes = { 'lua' }, summary = 's', examples = { { name = 'does nothing', expect = { holds = true } } },
+        measure = function () return 1 end, claim = function () return true end }]])
+    put('badvocab', [[return { name = 'badvocab', kind = 'discovery', executes = { 'net' }, summary = 's', examples = { { name = 'x' } },
+        measure = function () return 1 end, claim = function () return true end }]])
+    local entries, broken = tb.list(d)
+    ok(broken.badvocab and broken.badvocab:find('not lua | process', 1, true), tostring(broken.badvocab))
+    local by = {}
+    for _, e in ipairs(entries) do by[e.name] = tb.audit_executes(e) end
+    ok(by.spawns.mismatch and by.spawns.mismatch:find('process door', 1, true), 'a spawn is named: ' .. tostring(by.spawns.mismatch))
+    ok(by.compiles.mismatch and by.compiles.mismatch:find('lua door', 1, true), 'a CALLED chunk is named: ' .. tostring(by.compiles.mismatch))
+    eq(nil, by.parses.mismatch, 'a chunk compiled and never called opens no door')
+    ok(by.overclaims.mismatch and by.overclaims.mismatch:find('no example opens', 1, true), 'an unpinned claim is named: ' .. tostring(by.overclaims.mismatch))
+    vim.fn.delete(d, 'rf')
+end)
+
+test('toolbelt (CART-1915): a READ-ONLY host runs no caller Lua — declared, undeclared, or mounted from the project', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local agent = require 'cartograph.agent'
+    agent.set_writable(false)
+    local real_load, real_system = _G.load, rawget(vim.fn, 'system')
+    local function marker_workload(m) return ('return function () io.open(%q, "w"):write("x") end'):format(m) end
+
+    -- the CART-0607 shape: door-trap's declared `executes` refuses before anything runs
+    local m1 = vim.fn.tempname()
+    local r = agent.answer(store, 'toolbelt_run', { name = 'door-trap', params = { workload = marker_workload(m1) } })
+    eq('executes-on-read-only', type(r.refusal) == 'table' and r.refusal.rule, vim.inspect(r.refusal))
+    ok(tostring(r.refusal.reason):find('door-trap executes (lua, process', 1, true),
+        'refused BY ITS DECLARATION, before running — not only by the trap: ' .. tostring(r.refusal.reason))
+    eq(0, vim.fn.filereadable(m1), 'and the workload never ran')
+
+    -- the same tactic with its declaration FORGOTTEN: the trap refuses it while it runs
+    local real_tbload = tb.load
+    tb.load = function (...) local e, w, c = real_tbload(...); if e and e.name == 'door-trap' then e.executes = nil end return e, w, c end
+    local m2 = vim.fn.tempname()
+    local ok2, r2 = pcall(agent.answer, store, 'toolbelt_run', { name = 'door-trap', params = { workload = marker_workload(m2) } })
+    tb.load = real_tbload
+    ok(ok2, tostring(r2))
+    eq('executes-on-read-only', type(r2.refusal) == 'table' and r2.refusal.rule, vim.inspect(r2.refusal))
+    ok(tostring(r2.refusal.reason):find('lua door', 1, true), 'the refusal names the door: ' .. tostring(r2.refusal.reason))
+    eq(0, vim.fn.filereadable(m2), 'and the workload never ran')
+    ok(_G.load == real_load and rawget(vim.fn, 'system') == real_system, 'and every door is restored after the trap')
+
+    -- a tactic file in the PROJECT's mount runs code when it is LOADED: refused before that code runs
+    local m3 = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/.cartograph/tactics', 'p')
+    local fd = assert(io.open(root .. '/.cartograph/tactics/planted.lua', 'w'))
+    fd:write(('io.open(%q, "w"):write("x") return { name = "planted", kind = "discovery", summary = "s", examples = { { name = "x" } }, measure = function () return 1 end, claim = function () return true end }'):format(m3))
+    fd:close()
+    local r3 = agent.answer(store, 'toolbelt_run', { name = 'planted' })
+    eq('executes-on-read-only', type(r3.refusal) == 'table' and r3.refusal.rule, vim.inspect(r3.refusal))
+    eq(0, vim.fn.filereadable(m3), 'and the file\'s own code never ran')
+
+    -- a discovery that opens no door still runs read-only
+    local d = agent.answer(store, 'toolbelt_run', { name = 'family-premise', params = { files = { 'fe.lua' } } })
+    eq(true, d.ok and d.result[1].holds, vim.inspect(d.refusal))
+end)
+
+test('toolbelt (CART-1915): a WRITABLE host runs a declared executor, and its row says what it executes', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    project { ['fe.lua'] = FAMILY }
+    local agent = require 'cartograph.agent'
+    agent.set_writable(true)
+    local r = agent.answer(store, 'toolbelt_run', { name = 'door-trap', params = { workload = 'return function () return 1 end' } })
+    agent.set_writable(false)
+    eq(true, r.ok and r.result[1].holds, vim.inspect(r.refusal))
+    local l = agent.answer(store, 'toolbelt_list', {})
+    local row
+    for _, x in ipairs(l.result) do if x.name == 'door-trap' then row = x end end
+    eq({ 'lua', 'process' }, row and row.executes, 'toolbelt_list carries the declaration')
+end)
