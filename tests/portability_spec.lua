@@ -2703,3 +2703,65 @@ test('portability: pair_lost pairs on exactly one structural candidate, and says
     eq(nil, r2.to, 'new.x is not a member of N')
     ok(r2.why:find('does not provide', 1, true), r2.why)
 end)
+
+-- ── a PROTOTYPE BOUND BY A LOOP over data.raw[T] (CART-0648) ───────────────────
+-- `for name, proto in pairs(data.raw["container"]) do proto.x = … end` patches EVERY prototype of type T through the
+-- loop's value binder, and nothing typed the binder, so its writes were invisible — and a loop over a type the target
+-- REMOVED (pairs(nil)) stops the load. Measured over the 196 installed mods: 630 such loops in 85 mods, 445 at module
+-- level, 455 typed by a literal or a field (data.raw.T). This reads the module-level ones with a literal / field type;
+-- a loop inside a function, or one whose type is a variable (Squeak Through: both), is not read yet.
+
+test('portability (CART-0648): a write through a loop binder over data.raw[T] is adjudicated against T', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    local st = factorio_store(table.concat({
+        'for name, proto in pairs(data.raw["container"]) do',
+        '  proto.vehicle_impact_sound = { filename = "x.ogg" }',
+        'end',
+        'for _, p in pairs(data.raw.container) do',
+        '  p.vehicle_impact_sound = { filename = "y.ogg" }',
+        'end',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local lines = {}
+    for _, e in ipairs(res.lost) do
+        if e.prop == 'vehicle_impact_sound' then lines[#lines + 1] = e.line; eq('container', e.typename) end
+    end
+    table.sort(lines)
+    eq({ 2, 5 }, lines, 'both loops\' writes are findings, bracket and field form: ' .. vim.inspect(res.lost))
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability (CART-0648): a loop over a type the target REMOVED is reported — pairs(nil) stops the load', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    local st = factorio_store(table.concat({
+        'for _, ft in pairs(data.raw["flying-text"]) do',
+        '  ft.speed = 1',
+        'end',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local gone
+    for _, g in ipairs(res.gone_type) do if g.typename == 'flying-text' then gone = g end end
+    ok(gone, 'the removed type is a gone_type row: ' .. vim.inspect(res.gone_type))
+    eq(1, gone and gone.line, 'at the loop')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability (CART-0648): the binder is the prototype only INSIDE its loop', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    local st = factorio_store(table.concat({
+        'local proto = { type = "item", name = "x" }',
+        'for _, proto in pairs(data.raw["container"]) do',
+        '  proto.inventory_size = 8',
+        'end',
+        'proto.vehicle_impact_sound = { filename = "z.ogg" }',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    for _, e in ipairs(res.lost) do
+        ok(not (e.prop == 'vehicle_impact_sound' and e.typename == 'container'),
+            'a write after the loop is not on the container binder: ' .. vim.inspect(e))
+    end
+    vim.fn.delete(proto_tmp, 'rf')
+end)

@@ -469,3 +469,41 @@ rows[#rows + 1] = { type = "item", name = "a" }
             'nothing is minted until a registrar says these are prototypes')
     end
 end)
+
+-- ── a prototype bound by a LOOP over data.raw[T] (CART-0648) ──────────────────
+test('reader (CART-0648): a module-level loop over data.raw[T] binds a patch record of type T', function ()
+    local ps = read(table.concat({
+        'for name, proto in pairs(data.raw["container"]) do',
+        '  proto.inventory_size = 8',
+        '  proto.minable.result = "x"',
+        'end',
+        -- (one line: the loop's head shares its line with a MODULE-level statement, the function's own)
+        'local function f() for _, q in pairs(data.raw["furnace"]) do q.energy_usage = "1kW" end end',
+        'for _, r in pairs(data.raw[SOME_TYPE]) do r.x = 1 end',
+        'for _, s in pairs(settings["container"]) do s.y = 1 end',
+    }, '\n'))
+    local p = by_var(ps, 'proto')
+    ok(p, 'the binder is a tracked record: ' .. vim.inspect(ps))
+    eq('loop', p.basis)
+    eq('container', p.patch.type)
+    eq(true, p.patch.each, 'it patches EVERY prototype of the type')
+    eq({ 'inventory_size', 'minable.result' }, paths(p))
+    eq(nil, by_var(ps, 'q'), 'a loop inside a function is not read (yet)')
+    eq(nil, by_var(ps, 'r'), 'nor one whose type is a variable')
+    eq(nil, by_var(ps, 's'), 'and a loop over anything but data.raw is no prototype at all')
+end)
+
+test('reader (CART-0648): a loop binder SHADOWS a same-named local only for the loop\'s extent', function ()
+    local ps = read(table.concat({
+        'local proto = table.deepcopy(data.raw["item"]["iron-plate"])',
+        'for _, proto in pairs(data.raw["container"]) do',
+        '  proto.inventory_size = 8',
+        'end',
+        'proto.stack_size = 50',
+    }, '\n'))
+    local outer, loop
+    for _, p in ipairs(ps) do if p.var == 'proto' then if p.basis == 'loop' then loop = p else outer = p end end end
+    ok(outer and loop, 'both records: ' .. vim.inspect(ps))
+    eq({ 'inventory_size' }, paths(loop), 'the loop body writes the binder')
+    eq({ 'stack_size' }, paths(outer), 'and the write after the loop is the outer local\'s again')
+end)

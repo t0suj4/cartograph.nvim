@@ -2755,7 +2755,10 @@ function M.of_module(store, mod_id)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,
-        bound = M.bound_names(root, src, s.binders) }
+        bound = M.bound_names(root, src, s.binders),
+        -- (the tree and its source, for a reader of a construct the IR does not lower — a generic `for` head,
+        -- prototypes' loop binder, CART-0648)
+        root = root, src = src }
 end
 
 -- NAME-ish leaves, across the languages that declare binders

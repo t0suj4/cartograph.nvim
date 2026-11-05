@@ -361,11 +361,68 @@ end
 ---   registered { line } | nil
 ---   frontiers  { { kind='mutator', callee, line } }
 ---   complete   false when a frontier means the overrides are a lower bound
+-- ── A PROTOTYPE BOUND BY A LOOP (CART-0648) ─────────────────────────────────
+-- `for name, proto in pairs(data.raw["container"]) do proto.x = … end` patches EVERY prototype of the type through the
+-- loop's VALUE binder. The expression IR does not lower a generic `for` head (it is `k = '?'`), so the head is read off
+-- the tree here: a module-level loop — not inside a function — whose iterator is `pairs(<base_root>[T])` or
+-- `pairs(<base_root>.T)` with T a string literal. Census over the 196 installed mods: 630 such loops in 85 mods, 445
+-- at module level, 455 with a literal / field type. ⚠ NOT READ: a loop inside a function (185 — Squeak Through's is),
+-- and a T that is a variable (62, 54 of them bound by an enclosing loop over a config table: a const-fold of that
+-- table's keys, cross-file for Squeak Through). -> { [1-based head line] = { var, type, last = 1-based end line } }
+local tsutil = require 'cartograph.spec.tsutil'
+
+local function loop_binders(root, src, ad)
+    local out = {}
+    if not (root and src) then return out end
+    local function text(n) return vim.treesitter.get_node_text(n, src) end
+    local function str(n) -- a string literal's content, else nil
+        if not n or n:type() ~= 'string' then return nil end
+        for _, c in tsutil.inext, n, -1 do if c:type() == 'string_content' then return text(c) end end
+        return nil
+    end
+    local function base_type(n) -- base_root[T] / base_root.T -> T
+        if not n then return nil end
+        local t = n:type()
+        local tbl = n:field('table')[1]
+        if not (tbl and text(tbl):gsub('%s', '') == ad.base_root) then return nil end
+        local f = n:field('field')[1]
+        if t == 'bracket_index_expression' then return str(f) end
+        if t == 'dot_index_expression' then return f and text(f) or nil end
+        return nil
+    end
+    local function walk(n)
+        local t = n:type()
+        if t == 'function_declaration' or t == 'function_definition' then return end
+        if t == 'for_statement' then
+            local cl = n:named_child(0)
+            if cl and cl:type() == 'for_generic_clause' then
+                local vl, el = cl:named_child(0), cl:named_child(1)
+                local it = el and el:named_child_count() == 1 and el:named_child(0)
+                local callee = it and it:type() == 'function_call' and it:field('name')[1]
+                local args = it and it:field('arguments')[1]
+                if callee and text(callee) == 'pairs' and args and args:named_child_count() == 1 then
+                    local ty = base_type(args:named_child(0))
+                    local val = vl and vl:named_child(1)
+                    if ty and val and val:type() == 'identifier' then
+                        local sr = n:range()
+                        local er = select(3, n:range())
+                        out[sr + 1] = { var = text(val), type = ty, last = er + 1 }
+                    end
+                end
+            end
+        end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
+    end
+    walk(root)
+    return out
+end
+
 function M.of_module(store, mod_id)
     local ad = M.adapter(store)
     if not ad then return nil end
     local eo = expr.of_module(store, mod_id)
     if not eo then return nil end
+    local loops = loop_binders(eo.root, eo.src, ad)
 
     local protos, by_var, order = {}, {}, 0
     -- local -> { proto, path } for a local bound INTO a prototype (CART-0642)
@@ -381,6 +438,17 @@ function M.of_module(store, mod_id)
 
     for _, st in ipairs(eo.fl.stmts or {}) do
         local e, line = st.expr, st.l
+        -- a LOOP BINDER of data.raw[T] (CART-0648): one patch record per loop, tracked by its value binder for the
+        -- loop's extent only (the head arrives as a for_statement row and a stmt row on one line: minted once)
+        local lb = loops[line]
+        if lb and not lb.made then
+            lb.made = true
+            local outer = by_var[lb.var] -- (a same-named local the binder shadows: back in scope after the loop)
+            local p = fresh(lb.var, line, 'loop')
+            p.shadowed = outer
+            p.patch = { type = lb.type, name_computed = true, each = true }
+            p.scope_last = lb.last
+        end
         if e then
             -- 1. a DECLARATION that starts a prototype
             local lhs1 = (e.lhs or {})[1]
@@ -459,6 +527,8 @@ function M.of_module(store, mod_id)
             for _, l in ipairs(e.lhs or {}) do
                 local root, path = target_path(l)
                 local p = root and by_var[root]
+                -- (a loop binder is the prototype only INSIDE its loop, CART-0648)
+                if p and p.scope_last and line > p.scope_last then by_var[root] = p.shadowed; p = p.shadowed end
                 if not p and root and aliases[root] and path then
                     -- resolved through the alias: the write is on the PROTOTYPE, at
                     -- the alias's path joined to this one
