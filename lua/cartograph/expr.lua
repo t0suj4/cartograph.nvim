@@ -919,6 +919,15 @@ function build_core(node, src, lang)
     --      key, so the same call read as two different expressions depending on
     --      whether someone wrapped it in brackets.
     if PAREN[t] then return build(node:named_child(0), src, lang) end
+    -- a bare `word` that is a variable by the language's arithmetic field rule (bash `for (( …; i <= len; … ))`,
+    -- CART-0668) — the same predicate du counts with, so the two sides cannot draw it differently
+    if lang then
+        specs = specs or require('cartograph.providers.treesitter').spec
+        local ar = (specs[lang] or {}).arith_reads
+        if ar and t == ar.leaf and require('cartograph.flow').arith_name(node, src, ar) then
+            return { k = 'name', n = txt(node, src) }
+        end
+    end
     -- ★ A STATEMENT WRAPPER IS NOT A VALUE (CART-0742). A row that is a bare
     -- call — `foo();`, the commonest statement in every C-family language — falls
     -- through `harvest_row` to its whole-node-is-a-value default, so `build` met
@@ -2541,6 +2550,7 @@ local function flow_cfg(lang, s, method)
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
+        arith_reads = s.arith_reads, -- a bare word that is a variable by field (CART-0668)
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
         method = method or false,
@@ -2752,6 +2762,7 @@ function M.of_module(store, mod_id)
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
+        arith_reads = s.arith_reads, -- a bare word that is a variable by field (CART-0668)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,

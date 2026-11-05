@@ -360,6 +360,29 @@ end
 --- case_labels, body_children and leaf_ids are exported.
 function M.head_field(t) return HEADFIELD[t] end
 
+--- Is a bare leaf a variable NAME by the language's arithmetic rule (spec.arith_reads, CART-0668)? A leaf of the
+--- spec's declared type (bash: `word`) under a declared container, arrived through one of its declared FIELDS,
+--- spelled like an identifier — so `${#a[@]}`'s `@` is not claimed. du and the expression IR both answer through
+--- this one predicate.
+---@param arith table|nil  { leaf = <node type>, within = { [container type] = { [field] = true } } }
+function M.arith_name(node, src, arith)
+    if not (arith and arith.leaf and node and node:type() == arith.leaf) then return false end
+    if not vim.treesitter.get_node_text(node, src):match('^[%a_][%w_]*$') then return false end
+    local child, p = node, node:parent()
+    for _ = 1, 24 do
+        if not p then return false end
+        local fields = arith.within and arith.within[p:type()]
+        if fields then
+            for f in pairs(fields) do
+                for _, x in ipairs(p:field(f)) do if x:equal(child) then return true end end
+            end
+            return false
+        end
+        child, p = p, p:parent()
+    end
+    return false
+end
+
 --- The leaf-name set du counts as a read for a language: DFID plus that language's
 --- `df_ids` extension. EXPORTED because the expression IR needs the SAME answer at
 --- harvest time (CART-0402), and a private copy is how this codebase keeps growing
@@ -454,6 +477,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local mods, bindf = lang and lang.mods, lang and lang.binder_fields
     local patf, patr = lang and lang.patf, lang and lang.patr
     local nskip = lang and lang.name_skip -- a field whose leaves are not variables (CART-1121)
+    local arith = lang and lang.arith -- a bare `word` that is a variable by field (CART-0668)
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
     local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
@@ -659,7 +683,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
               elseif k == 11 then cdefpos = not (patread and same(c, patread)) and PAT or false
               elseif k == 12 then cdefpos = (patnode and same(c, patnode)) and PAT or false
               else cdefpos = k end
-              if ids[ct] then
+              if ids[ct] or (arith and ct == arith.leaf and M.arith_name(c, src, arith)) then
                   local nm = txt(c, src)
                   if cdefpos then
                       if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
@@ -1093,6 +1117,7 @@ function M.build(fnnode, src, cfg)
     -- have meant nil-padding at three of the six call sites, which is how a caller ends up
     -- passing the wrong table. One bundle, passed unchanged by every caller.
     local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields, name_skip = cfg.name_skip, -- CART-1121
+        arith = cfg.arith_reads, -- CART-0668
         patf = cfg.pattern and cfg.pattern.fields, patr = cfg.pattern and cfg.pattern.reads } -- CART-0957
     local stmts = {}
     local emit, region, clause -- fwd

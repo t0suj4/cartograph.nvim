@@ -65,7 +65,15 @@ return {
         -- classified. Measured on a 15-line fixture: the switch came out as an arm, each
         -- arm as a plain STATEMENT, and the four assignments inside them were never rows
         -- at all — one arm row carried `def=[a b]` for two separate assignments.
-        ctrl = { case_statement = true },
+        -- (CART-0668) the ARITHMETIC for `for (( i=0; i<n; i++ )); do … done` is a control form with a pre-test:
+        -- its head row owns initializer / condition / update and stops at the `do_group` body. As a plain statement
+        -- du harvested the whole loop body onto the head row (testssl.sh:2413 read `s` from the printf inside it).
+        ctrl = { case_statement = true, c_style_for_statement = true },
+        preloop = { c_style_for_statement = true },
+        -- …and its CONDITION names variables as bare words (`i <= len-16`): a read on both sides (contract
+        -- `arith_reads`). NOT `update`: `i++` / `i+=16` reads AND writes, and du models it as a def — claiming
+        -- it as a read only moves the disagreement into `extra` (measured in CART-0668's notes: 522 vs 513).
+        arith_reads = { leaf = 'word', within = { c_style_for_statement = { condition = true } } },
         clause = { case_item = 'case', case_statement = false },
         -- typed-string SINK: eval's arg IS code — the literal head names
         -- the real callee (the aperture-analyzer side of the eval story)

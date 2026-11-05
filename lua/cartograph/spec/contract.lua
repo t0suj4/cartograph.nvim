@@ -326,6 +326,12 @@ M.SLOTS = {
     -- never as `def`, so without this a loop-bound receiver reads as a free name —
     -- which put a local into externals' "real porting work" group until declared.
     binders = 'ANALYSIS',
+    -- ARITHMETIC NAMES (CART-0668): { leaf = <bare-word node type>, within = { [container type] = { [field] = true } } }
+    -- — a bare leaf under the container, arrived through one of those fields and spelled like an identifier, is a
+    -- variable READ. The leaf type is the SPEC's (the flow walk compares no grammar-specific type itself). bash's
+    -- `for (( i=0; i <= len-16; … ))` spells `len` as a `word`, not a variable_name, so neither du nor the IR read it.
+    -- One predicate (flow.arith_name) for both sides.
+    arith_reads = 'ANALYSIS',
     -- DESTRUCTURING + IMPORT BINDERS (CART-0358): which children of a pattern-ish node
     -- are in DEF position. Distinct from `binders` above, which names whole node types
     -- whose contents bind; this is FIELD-PRECISE, because a pattern has children that

@@ -374,15 +374,23 @@ M.EXPECTED = {
     -- disagree on their own — extra:if_statement 19 -> 27, missing:if_statement 137 -> 141.
     -- Net -185, and ctrlcensus goes from 6 of 6 forms to 7 of 7 with case_item classified
     -- for the first time.
-    bash = { total = 484,
-        ['missing:if_statement'] = 141, ['missing:list'] = 123,
-        ['missing:c_style_for_statement'] = 88, ['extra:if_statement'] = 27,
-        ['binder:elif_clause'] = 23, ['missing:test_command'] = 23,
-        ['missing:variable_assignment'] = 17, ['missing:elif_clause'] = 13,
-        ['both:if_statement'] = 6, ['binder:if_statement'] = 5,
-        ['extra:elif_clause'] = 5, ['missing:do_group'] = 5,
-        ['missing:redirected_statement'] = 4, ['binder:redirected_statement'] = 1,
-        ['binder:while_statement'] = 1, ['both:elif_clause'] = 1,
+    -- recalib 2026-11-05 (THE ARITHMETIC FOR IS A LOOP, CART-0668): 487 -> 394. ⚠ STALE ON STOCK BY 3 FIRST: the
+    -- pin read 484 and stock HEAD reads 487 — extra:while_statement 0 -> 4 had arrived unpinned. Then du stops
+    -- harvesting the loop body onto the head of `for (( … )); do … done` (bash spec ctrl + preloop), and the
+    -- condition's bare words read on both sides (spec arith_reads, one predicate flow.arith_name):
+    --   missing:c_style_for_statement  88 -> 0     (testssl.sh:2413 du read `s` from the printf INSIDE the body)
+    --   missing:do_group                5 -> 7     the bodies are rows now, in the class for-in bodies already had
+    --   binder:elif_clause             23 -> 24    an elif row whose IR already leaks its body (the existing class)
+    --                                              now also sees a nested arithmetic for's `i`, `len` (testssl.sh:6645)
+    bash = { total = 394,
+        ['missing:if_statement'] = 140, ['missing:list'] = 121,
+        ['binder:elif_clause'] = 24, ['missing:test_command'] = 22,
+        ['extra:if_statement'] = 21, ['missing:variable_assignment'] = 16,
+        ['missing:elif_clause'] = 12, ['binder:if_statement'] = 7,
+        ['missing:do_group'] = 7, ['both:if_statement'] = 6,
+        ['extra:elif_clause'] = 5, ['extra:while_statement'] = 4,
+        ['missing:redirected_statement'] = 4, ['both:elif_clause'] = 2,
+        ['binder:redirected_statement'] = 1, ['binder:while_statement'] = 1,
         ['missing:while_statement'] = 1 },
     -- ★ RE-PINNED @ CART-0404's C/C++ half: `binder:declaration` cpp 110 -> 1 and
     -- cppmodern 106 -> 1, `both:declaration` GONE. TWO defects, both C++-only shapes that a
@@ -613,13 +621,16 @@ M.EXPECTED = {
     -- has `expected` counts, so the matrix's default roster visits it and the pin is gated the moment it lands.
     -- Measured twice (matrix --cols expr, jobs 1): identical. ghost was the August headline (595); it reads 580 now.
     -- erlang's 288 `match:` are the named residue (CART-1106), not disagreements.
-    blesh = { total = 1943, ['extra:if_statement'] = 678, ['binder:declaration_command'] = 470,
-        ['missing:c_style_for_statement'] = 149, ['binder:elif_clause'] = 133, ['binder:if_statement'] = 124,
+    -- recalib 2026-11-05 (CART-0668, the arithmetic for is a loop): 1943 -> 1794 — missing:c_style_for_statement
+    -- 149 -> 0, binder:do_group 4 -> 7 (the bodies are rows), binder:if_statement 124 -> 122, extra:if_statement
+    -- 678 -> 677. Stock HEAD read exactly 1943 first.
+    blesh = { total = 1794, ['extra:if_statement'] = 677, ['binder:declaration_command'] = 470,
+        ['binder:elif_clause'] = 133, ['binder:if_statement'] = 122,
         ['extra:while_statement'] = 66, ['extra:elif_clause'] = 62, ['binder:command'] = 40,
         ['missing:test_command'] = 40, ['missing:if_statement'] = 26, ['binder:redirected_statement'] = 25,
         ['binder:list'] = 24, ['missing:elif_clause'] = 23, ['binder:variable_assignments'] = 19,
         ['missing:list'] = 18, ['missing:ternary_expression'] = 14, ['missing:variable_assignment'] = 12,
-        ['binder:do_group'] = 4, ['missing:compound_statement'] = 3, ['both:if_statement'] = 2,
+        ['binder:do_group'] = 7, ['missing:compound_statement'] = 3, ['both:if_statement'] = 2,
         ['missing:do_group'] = 2, ['missing:while_statement'] = 2, ['missing:preproc_function_def'] = 2,
         ['binder:while_statement'] = 1, ['both:ERROR'] = 1, ['missing:ERROR'] = 1, ['missing:binary_expression'] = 1,
         ['missing:redirected_statement'] = 1 },

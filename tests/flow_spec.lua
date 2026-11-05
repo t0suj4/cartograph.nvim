@@ -2232,3 +2232,46 @@ test('flow.classes: a spec can say a base-set node is NOT a clause here', functi
     ok(flow.classes({}).case['case_statement'],
         'a spec that declares nothing is unmoved')
 end)
+
+-- ★ CART-0668. bash's ARITHMETIC for, `for (( init; cond; update )); do … done`, was no control form in the
+-- bash spec, so du read the whole loop as ONE statement: its head row harvested the body (testssl.sh:2413 read
+-- `s` from the printf inside) and missed the condition, whose names are bare `word`s (`i <= len-16`), not
+-- variable_names. Now the spec declares it ctrl + preloop and an arithmetic field rule (arith_reads): the head
+-- reads its condition, the body is its own row, and du and the expression IR agree on the head.
+test('flow (CART-0668): a bash arithmetic for reads its condition on the head row, and the body is its own row', function ()
+    if not parser_available('bash') then skip 'no bash parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local expr = require 'cartograph.expr'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/t.sh', 'w'))
+    fd:write('f() {\n  for (( i=0; i <= len-16 ; i+=16 )); do\n    printf -- "x${s:i:2}"\n  done\n'
+        .. '  for ((j=1; j < ${#arr[@]} ;j++ )); do echo "$x"; done\n}\n')
+    fd:close()
+    store.ingest(ts.extract(root)) -- (expr.of re-parses from disk: the fixture stays until the end)
+    local fid
+    for _, n in ipairs(store.data.nodes) do if n.name == 'f' then fid = n.id end end
+    local eo = expr.of(store, fid)
+    local function set(l) local o = {} for _, x in ipairs(l or {}) do o[x] = true end return o end
+    local head2, body2, head5
+    for _, st in ipairs(eo.fl.stmts) do
+        local u = set(st.use)
+        if st.l == 2 and u.len then head2 = st end
+        if u.s then body2 = st end
+        if st.l == 5 and u.arr then head5 = st end
+    end
+    ok(head2, 'the head row reads the condition\'s bare word `len`: ' .. vim.inspect(vim.tbl_map(function (s) return { s.l, s.def, s.use } end, eo.fl.stmts)))
+    ok(not set(head2 and head2.use).s, 'and NOT the body\'s `s`')
+    ok(body2 and body2 ~= head2, 'the body\'s read is its own row')
+    ok(head5 and not set(head5.use)['@'], '`${#arr[@]}` reads arr, and its `@` is no name')
+    -- the rule is FIELD-scoped: a word in the BODY (a command name, `printf`) is not a variable anywhere
+    for _, st in ipairs(eo.fl.stmts) do ok(not set(st.use).printf, 'a command word is no variable read: line ' .. st.l) end
+    -- both sides of the census agree on the head: the IR reads what du reads (use ∪ rmw)
+    for _, h in ipairs({ head2, head5 }) do
+        local du = set(h.use); for _, x in ipairs(h.rmw or {}) do du[x] = true end
+        local a, b = vim.tbl_keys(du), vim.tbl_keys(set(expr.reads(h.expr)))
+        table.sort(a); table.sort(b)
+        eq(a, b, 'du and the IR agree on a head row')
+    end
+    vim.fn.delete(root, 'rf')
+end)

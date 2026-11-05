@@ -7973,6 +7973,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
                     pattern = spec.pattern,                 -- pattern binding (CART-0957)
                     name_skip = spec.name_skip,             -- a name that is not a variable (CART-1121)
+                    arith_reads = spec.arith_reads,         -- a bare word that is a variable by field (CART-0668)
                     regime = spec.regime, method = method and lang == 'lua' }
                 end
                 if prev and prev.name == name then
