@@ -574,10 +574,15 @@ local function v_node_find(store, args)
             why = 'no node carries this name, but this graph is a PARTIAL ingest — files are still arriving, so the name may simply not have landed yet',
             evidence = NUL } }
     end
+    -- SAY WHAT WAS CHECKED (CART-1906): with unparsed files the verdict still holds — their text
+    -- was searched above and holds no occurrence — but "every file parsed" would be false.
+    local nu = g.frontier.unparsed_files
     return { result = {}, absence = 'absent', absence_why = {
         premise = 'no-such-name',
-        why = ('no node in this graph carries a name matching %q, every file parsed, and the unparsed frontier is empty — the name is not defined here'):format(q),
-        evidence = { names_indexed = vim.tbl_count(store.by_name or {}) } } }
+        why = nu > 0
+            and ('no node in this graph carries a name matching %q, and its text occurs in none of the %d file(s) that never parsed — the name is not defined here'):format(q, nu)
+            or ('no node in this graph carries a name matching %q, every file parsed, and the unparsed frontier is empty — the name is not defined here'):format(q),
+        evidence = { names_indexed = vim.tbl_count(store.by_name or {}), unparsed_files = nu } } }
 end
 
 -- ── verb: node_at ───────────────────────────────────────────────────────────

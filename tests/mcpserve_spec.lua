@@ -153,6 +153,36 @@ test('agent: an empty result NEVER arrives as a bare list — every verb names i
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-1906: node_find's ABSENT verdict was right with unparsed files present (their text is
+-- searched first), but its why said "every file parsed, and the unparsed frontier is empty" —
+-- a coverage claim the same envelope's graph.frontier contradicted. Pinned both ways.
+test('agent: node_find absent says what it checked — it never claims an empty frontier that is not', function ()
+    if not ready() then skip('no treesitter') end
+    if not parser_available('javascript') then skip('no javascript parser') end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/frontier')
+    eq({ 'lib.min.js' }, data.unparsed, 'the fixture has one unparsed file')
+    store.ingest(data)
+    local d = agent.answer(store, 'node_find', { query = 'nosuchnamexyz' })
+    eq('absent', d.absence, 'the text occurs in no unparsed file either, so the name is absent')
+    eq(1, d.graph.frontier.unparsed_files)
+    ok(not d.absence_why.why:find('frontier is empty', 1, true),
+        'the why must not claim an empty frontier: ' .. d.absence_why.why)
+    ok(not d.absence_why.why:find('every file parsed', 1, true),
+        'nor that every file parsed: ' .. d.absence_why.why)
+    ok(d.absence_why.why:find('1 file(s) that never parsed', 1, true),
+        'it says what was searched instead: ' .. d.absence_why.why)
+    eq(1, d.absence_why.evidence.unparsed_files)
+    -- the other side: with nothing unparsed the strong claim is TRUE and stays
+    local root = mkfixture()
+    ingest(root)
+    local d2 = agent.answer(store, 'node_find', { query = 'nosuchnamexyz' })
+    eq('absent', d2.absence)
+    eq(0, d2.graph.frontier.unparsed_files)
+    ok(d2.absence_why.why:find('every file parsed', 1, true), d2.absence_why.why)
+    eq(0, d2.absence_why.evidence.unparsed_files)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('agent: tier_basis decides which side of the axis a NON-empty answer carries', function ()
     if not ready() then skip('no treesitter') end
     local root = mkfixture()
