@@ -13,14 +13,17 @@ only (a person keeps the documented WIP bypass):
      registered with tk must have been filed by it or READ by it (a tool result or user message in its
      transcript), a hash must be a commit or have been read. A guessed reference was never read.
      Cross-filing is fine: what counts is which SESSION filed a ticket, never its project prefix.
+     For a cartograph commit the uncommitted diff's added ticket IDs get the same per-session check: an ID
+     written into a file by an earlier call reaches the commit without being in its text.
   3. Edit / Write: ticket IDs the edit ADDS (IDs only — code is full of hex) go through the same check.
+  A denial's own text never counts as read (it names the refused reference: the retry would pass).
 
 Register in .claude/settings*.json:
   {"hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write",
      "hooks": [{"type": "command", "command": "python3 <repo>/tools/claude-guard.py"}]}]}}
 An internal error lets the call through with a warning on stderr: a broken guard must not brick a session.
 """
-import json, os, re, shlex, sys
+import json, os, re, shlex, subprocess, sys
 
 sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -51,8 +54,9 @@ def strip_heredocs(cmd):
 
 
 def commit_flags(cmd):
-    """(no_verify, stale_msg) over every `git … commit …` segment of the command, heredoc bodies removed."""
-    nv = stale = False
+    """(is_commit, no_verify, stale_msg) over every segment of the command whose git SUBCOMMAND is commit (heredoc
+    bodies removed; `git cat-file -e x^{commit}` is not one)."""
+    found = nv = stale = False
     for seg in re.split(r'&&|\|\||[;\n|]', strip_heredocs(cmd)):
         try:
             tok = shlex.split(seg, comments=True)
@@ -68,6 +72,7 @@ def commit_flags(cmd):
             j += 2 if rest[j] in ('-C', '-c') else 1
         if j >= len(rest) or rest[j] != 'commit':
             continue
+        found = True
         args, k = rest[j + 1:], 0
         while k < len(args):
             a = args[k]
@@ -91,7 +96,16 @@ def commit_flags(cmd):
                             k += 1
                         break
             k += 1
-    return nv, stale
+    return found, nv, stale
+
+
+DENIAL = re.compile(r'refcheck:|refcheck \(|claude-guard:|hook error')
+
+
+def read_text(t):
+    """the tokens of a text the session was shown, minus every line that is (or quotes) a denial: a denial names the
+    reference it refused, and counting it as read would let the identical retry through."""
+    return refcheck.tokens('\n'.join(l for l in t.split('\n') if not DENIAL.search(l)))
 
 
 def line_tokens(raw):
@@ -106,13 +120,13 @@ def line_tokens(raw):
         out = set()
         for b in (c if isinstance(c, list) else [c]):
             if isinstance(b, str):
-                out |= refcheck.tokens(b)
+                out |= read_text(b)
             elif isinstance(b, dict):
                 v = b.get('content') if b.get('type') == 'tool_result' else b.get('text')
                 for x in (v if isinstance(v, list) else [v]):
                     t = x.get('text') if isinstance(x, dict) else x
                     if isinstance(t, str):
-                        out |= refcheck.tokens(t)
+                        out |= read_text(t)
         return out
     if b'"queue-operation"' in raw or b'"queued_command"' in raw:
         try:
@@ -125,7 +139,7 @@ def line_tokens(raw):
             t = o['attachment'].get('prompt')
         else:
             return set()
-        return refcheck.tokens(t) if isinstance(t, str) else set()
+        return read_text(t) if isinstance(t, str) else set()
     return set()
 
 
@@ -178,9 +192,8 @@ def decide(ev, seen=None):
     tool, inp = ev.get('tool_name'), ev.get('tool_input') or {}
     if tool == 'Bash':
         cmd = inp.get('command') or ''
-        is_commit = re.search(r'\bgit\b[^\n]*\bcommit\b', strip_heredocs(cmd)) is not None
+        is_commit, nv, stale = commit_flags(cmd)
         if is_commit and ('cartograph' in cmd or 'cartograph' in (ev.get('cwd') or '')):
-            nv, stale = commit_flags(cmd)
             if nv:
                 return ('claude-guard: `git commit --no-verify` / `-n` skips the pre-commit gates AND the commit-msg '
                         'refcheck; an amend that way committed a stale index once (harness #57). Fix what the hook '
@@ -189,7 +202,17 @@ def decide(ev, seen=None):
                 return ('claude-guard: .git/COMMIT_EDITMSG is STALE after a blocked commit — it can hold the previous '
                         "commit's message (harness #57). Pass the message again through a quoted heredoc.")
         if is_commit or TK_WRITE.search(cmd):
-            return check(cmd, ev, seen) or None
+            why = check(cmd, ev, seen)
+            if not why and is_commit and 'cartograph' in cmd:
+                # an ID written into a file by an EARLIER call reaches the commit without appearing in its text, and
+                # commit-msg checks the diff for existence only — so the session rule runs on the diff here (against
+                # HEAD, not the index: the same command often runs `git add` first)
+                diff = subprocess.run(['git', '-C', refcheck.HERE, 'diff', 'HEAD', '-U0', '--no-color'],
+                                      capture_output=True, text=True).stdout
+                added = '\n'.join(l[1:] for l in diff.split('\n') if l.startswith('+') and not l.startswith('+++'))
+                why = check(added, ev, seen, hashes=False)
+                why = why and why.replace('refcheck: ', 'refcheck (uncommitted diff): ')
+            return why or None
     elif tool in ('Edit', 'Write'):
         new = inp.get('new_string') if tool == 'Edit' else inp.get('content')
         old = inp.get('old_string') if tool == 'Edit' else ''

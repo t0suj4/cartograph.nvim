@@ -22,3 +22,6 @@ tags
 # tools/npmdistill.lua. See spec/profile/node.lua for why it composes rather than
 # being a second profile.
 lua/cartograph/spec/profile/npm-api.mpack
+
+# python bytecode: tools/refcheck.py is imported by tools/claude-guard.py
+__pycache__/
