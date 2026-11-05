@@ -132,3 +132,53 @@ test('gatepredict: a COMPOUND extension counts as its language, not as its tail'
     eq('qqzz', un, 'falls back to the final segment so the bucket can report it')
     ok(not uclaimed, 'but is reported as unclaimed')
 end)
+
+-- ── OUTPUT-NEUTRAL edits (CART-0622) ────────────────────────────────────────
+-- Every extraction change ships with a cache.lua VERSION bump, and cache.lua is an engine file, so the predictor was
+-- disarmed on exactly the commits it exists for: 76 of 84 scored commits read scope=all, cache.lua in 66 of them.
+-- The rule is by CONSTRUCT, never by file: comment text is output-neutral anywhere, and the NUMBER assigned to
+-- cache.lua's `M.VERSION` is (it keys caches and stamps an advisory epoch; extraction never reads it). Decided on the
+-- PARSE: a `--` line inside a long string is code, and a file that does not parse is never neutral.
+
+local CACHE = 'lua/cartograph/cache.lua'
+local BEFORE = 'local M = {}\n-- the cache\nM.VERSION = 156 -- v156: a thing\nfunction M.f(x) return x + 1 end\nreturn M\n'
+
+test('gatepredict (CART-0622): a VERSION bump and comment edits are OUTPUT-NEUTRAL, by construct', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local bump = BEFORE:gsub('M.VERSION = 156 %-%- v156: a thing', 'M.VERSION = 157 -- v157: another. v156: a thing')
+    ok(gp.neutral(CACHE, BEFORE, bump), 'a VERSION bump with its comment is neutral')
+    local comment = BEFORE:gsub('%-%- the cache', '-- the cache, now documented\n-- over two lines')
+    ok(gp.neutral('lua/cartograph/store.lua', BEFORE, comment), 'a comment-only edit is neutral in ANY engine file')
+end)
+
+test('gatepredict (CART-0622): anything else stays an engine change — the rule is never "cache.lua is safe"', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local bumped_and_code = BEFORE:gsub('M.VERSION = 156', 'M.VERSION = 157'):gsub('x %+ 1', 'x + 2')
+    eq(nil, gp.neutral(CACHE, BEFORE, bumped_and_code), 'a code change beside the bump is not neutral')
+    eq(nil, gp.neutral('lua/cartograph/other.lua', BEFORE, (BEFORE:gsub('M.VERSION = 156', 'M.VERSION = 157'))),
+        'VERSION is neutral only in cache.lua: elsewhere it may be read')
+    eq(nil, gp.neutral(CACHE, BEFORE, (BEFORE:gsub('M.VERSION = 156', 'M.VERSION = os.time()'))),
+        'a VERSION that is not a number literal is code')
+    local S1 = 'local Q = [[\n-- a\n]]\nreturn Q\n'
+    eq(nil, gp.neutral(CACHE, S1, (S1:gsub('%-%- a', '-- b'))), 'a `--` line inside a long string is CODE')
+    eq(nil, gp.neutral(CACHE, BEFORE, BEFORE .. 'function (\n'), 'a file that does not parse is never neutral')
+    -- ... even when error recovery still finds its comments and only they differ (an unclosed table: has_error, and
+    -- the comment-stripped tokens are identical)
+    eq(nil, gp.neutral(CACHE, 'local t = { 1, -- x\n 2 \nreturn t\n', 'local t = { 1, -- y\n 2 \nreturn t\n'),
+        'a side with a parse error is never neutral, whatever its comments')
+    -- the construct is the assignment TO M.VERSION: another number in cache.lua is code
+    local WITH_LIMIT = BEFORE:gsub('return M', 'M.LIMIT = 8\nreturn M')
+    eq(nil, gp.neutral(CACHE, WITH_LIMIT, (WITH_LIMIT:gsub('M.LIMIT = 8', 'M.LIMIT = 9'))),
+        'a number assigned to anything but M.VERSION is code')
+end)
+
+test('gatepredict (CART-0622): a neutral file no longer forces scope=all — the other files set it', function ()
+    local known, pl = registry()
+    local neutral = { [CACHE] = 'VERSION bump' }
+    local t = gp.touched({ CACHE, 'lua/cartograph/spec/lua.lua' }, known, pl, neutral)
+    eq('langs', t.scope, 'cache.lua + a lua spec change: the spec sets the scope')
+    ok(t.langs.lua, 'lua is reached')
+    ok(t.why[CACHE]:find('output%-neutral'), t.why[CACHE])
+    eq('none', gp.touched({ CACHE }, known, pl, neutral).scope, 'a bump alone moves nothing')
+    eq('all', gp.touched({ CACHE }, known, pl).scope, 'without the neutral verdict, cache.lua still refuses to subtract')
+end)

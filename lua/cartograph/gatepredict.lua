@@ -105,13 +105,78 @@ function M.corpus_langs(ext_counts, ext_langs)
     return langs, unclaimed
 end
 
+-- ── OUTPUT-NEUTRAL EDITS (CART-0622) ────────────────────────────────────────
+-- Every extraction change ships with a cache.lua VERSION bump, and cache.lua is an engine file, so one bump forced
+-- scope=all and the predictor was disarmed on exactly the commits it exists for: replayed, 76 of 84 scored commits read
+-- scope=all, cache.lua among the files of 66. The rule is by CONSTRUCT, never by file:
+--   · comment text is output-neutral in any Lua file — it cannot change what runs;
+--   · the NUMBER assigned to cache.lua's `M.VERSION` is output-neutral — it keys caches and stamps an advisory epoch
+--     (snapshot.tool_verdict), and extraction never reads it. In any other module a VERSION may be read, so it is not.
+-- Decided on the PARSE, not the text: a `--` line inside a long string is code, and a side that does not parse is
+-- never neutral. A wrong subtraction is the harmful direction for a promise, so every doubt answers "not neutral".
+local NEUTRAL_VERSION_IN = { ['lua/cartograph/cache.lua'] = true }
+local tsutil = require 'cartograph.spec.tsutil'
+
+-- the leaves of a Lua source minus comments: { { type, text, node } }, or nil when it does not parse
+local function leaves(src)
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    if not okp or not parser then return nil end
+    local tree = parser:parse()[1]
+    local root = tree and tree:root()
+    if not root or root:has_error() then return nil end
+    local out = {}
+    local function walk(n)
+        if n:type() == 'comment' then return end
+        if n:child_count() == 0 then
+            out[#out + 1] = { n:type(), vim.treesitter.get_node_text(n, src), n }
+            return
+        end
+        for _, c in tsutil.inext, n, -1 do walk(c) end
+    end
+    walk(root)
+    return out
+end
+
+-- is this leaf the number literal of an assignment `M.VERSION = <number>`?
+local function version_number(leaf, src)
+    if leaf[1] ~= 'number' then return false end
+    local p = leaf[3]:parent()
+    while p and p:type() ~= 'assignment_statement' do
+        if p:type() ~= 'expression_list' then return false end
+        p = p:parent()
+    end
+    if not p then return false end
+    local vars = p:named_child(0)
+    return vars ~= nil and vim.treesitter.get_node_text(vars, src):gsub('%s', '') == 'M.VERSION'
+end
+
+--- is the edit of `path` from `before` to `after` OUTPUT-NEUTRAL? -> a reason, or nil (= treat it as a real change)
+function M.neutral(path, before, after)
+    if type(before) ~= 'string' or type(after) ~= 'string' or not path:match('%.lua$') then return nil end
+    local a, b = leaves(before), leaves(after)
+    if not a or not b or #a ~= #b then return nil end
+    local bumped = false
+    for i = 1, #a do
+        if a[i][1] ~= b[i][1] then return nil end
+        if a[i][2] ~= b[i][2] then
+            if NEUTRAL_VERSION_IN[path] and version_number(a[i], before) and version_number(b[i], after) then
+                bumped = true
+            else
+                return nil
+            end
+        end
+    end
+    return bumped and 'a cache VERSION bump (and comments)' or 'comments only'
+end
+
 --- Which languages/providers can a set of changed repo files affect?
 --- @param changed string[]  repo-relative paths
 --- @param known table  every language the registry knows (lang -> true)
 --- @param provider_langs table  provider -> { lang -> true }, the languages a
 ---   given provider can produce at all. Used to bound a providers/<p>.lua edit.
+--- @param neutral table?  path -> reason, from M.neutral: an output-neutral edit reaches nothing (CART-0622)
 --- @return table { scope, langs, providers (nil = every provider), why }
-function M.touched(changed, known, provider_langs)
+function M.touched(changed, known, provider_langs, neutral)
     local langs, why, all = {}, {}, false
     local providers, n = {}, 0
     local function reach_all(f, reason)
@@ -123,7 +188,9 @@ function M.touched(changed, known, provider_langs)
         local eco = f:match('^lua/cartograph/spec/ecosystem/([%w_%-]+)')
         local prof = f:match('^lua/cartograph/spec/profile/([%w_%-]+)')
         local prov = f:match('^lua/cartograph/providers/([%w_]+)%.lua$')
-        if prov then
+        if neutral and neutral[f] then
+            why[f] = ('output-neutral (%s) — ignored'):format(neutral[f])
+        elseif prov then
             -- a provider edit is bounded to THAT provider; within it, every
             -- language it serves is in play.
             local pl = provider_langs and provider_langs[prov]

@@ -185,7 +185,20 @@ else
     for f in unt:gmatch('[^\n]+') do changed[#changed + 1] = f end
 end
 
-local touched = gp.touched(changed, known, provider_langs)
+-- OUTPUT-NEUTRAL edits (CART-0622): a changed Lua file whose edit is comments only, or cache.lua's VERSION bump, is
+-- judged on the PARSE of HEAD's version against the working tree's; a new file has no HEAD side and is never neutral.
+-- ⚠ ONLY FOR THE WORKING DIFF. `--files` names paths with no base: comparing HEAD to the working tree there reads an
+-- unchanged file as "comments only" (measured: every file of a replayed commit came out neutral), so it is not judged.
+local neutral = {}
+for _, f in ipairs(opt.files and {} or changed) do
+    if f:match('%.lua$') then
+        local before = vim.system({ 'git', '-C', repo, 'show', 'HEAD:' .. f }, { text = true }):wait()
+        local fd = io.open(repo .. '/' .. f, 'r')
+        local after = fd and fd:read('a'); if fd then fd:close() end
+        if before.code == 0 and after then neutral[f] = gp.neutral(f, before.stdout, after) end
+    end
+end
+local touched = gp.touched(changed, known, provider_langs, neutral)
 local pred = gp.predict(inventories, touched)
 
 local SCOPE_SAYS = {
@@ -193,7 +206,7 @@ local SCOPE_SAYS = {
     none = 'no file that can affect extraction changed — no corpus can move',
     langs = 'language-scoped diff — subtraction is possible',
 }
-print(('changed files: %d'):format(#changed))
+print(('changed files: %d%s'):format(#changed, opt.files and ' (from --files: output-neutrality is NOT judged — no base to compare)' or ''))
 print(('scope: %s — %s'):format(touched.scope, SCOPE_SAYS[touched.scope]))
 for _, f in ipairs(changed) do
     if touched.why[f] then print(('  %-52s %s'):format(f, touched.why[f])) end

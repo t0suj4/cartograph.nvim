@@ -123,6 +123,10 @@ for s in git('log', '--format=%h', '--', 'tools/corpora.lua'):gmatch('[^\n]+') d
 end
 
 local scored, skipped, refutations, no_move = 0, 0, {}, 0
+-- (CART-0622) commits whose every lua/cartograph change is OUTPUT-NEUTRAL: their code cannot move a corpus, so a move
+-- there is a DEFERRED RECALIBRATION — or the neutral rule is wrong. Listed, never skipped silently: excluding exactly
+-- the cases the rule decides would make the rule unrefutable here.
+local neutral_only = {}
 local subtracted_total, corpora_total = 0, 0
 print(('replaying %d commits that touch tools/corpora.lua\n'):format(math.min(#shas, limit)))
 
@@ -137,8 +141,27 @@ for idx = 1, math.min(#shas, limit) do
     local moved = moved_by(sha)
     local nmoved = 0
     for _ in pairs(moved) do nmoved = nmoved + 1 end
+    -- OUTPUT-NEUTRAL edits (CART-0622), judged on the parse of the parent's version against this commit's
+    local neutral, nreal = {}, 0
+    for _, f in ipairs(files) do
+        if f:match('%.lua$') then
+            local before, bc = git('show', sha .. '^:' .. f)
+            local after, ac = git('show', sha .. ':' .. f)
+            if bc == 0 and ac == 0 then neutral[f] = gp.neutral(f, before, after) end
+        end
+        if f:match('^lua/cartograph/.*%.lua$') and not neutral[f] then nreal = nreal + 1 end
+    end
 
-    if nlua == 0 then
+    if nlua > 0 and nreal == 0 then
+        local m = {}
+        for k in pairs(moved) do m[#m + 1] = k end
+        table.sort(m)
+        neutral_only[#neutral_only + 1] = { sha = sha, moved = m }
+        if verbose or #m > 0 then
+            print(('  NEUTRAL %s every lua change is output-neutral; moved=[%s]%s'):format(sha, table.concat(m, ','),
+                #m > 0 and ' — a deferred recalibration, or the neutral rule is wrong: CHECK' or ''))
+        end
+    elseif nlua == 0 then
         skipped = skipped + 1
         if verbose then
             local m = {}
@@ -149,7 +172,7 @@ for idx = 1, math.min(#shas, limit) do
         end
     else
         scored = scored + 1
-        local touched = gp.touched(files, known, provider_langs)
+        local touched = gp.touched(files, known, provider_langs, neutral)
         local pred = gp.predict(inventories, touched)
         local imm = {}
         for _, e in ipairs(pred.immovable) do imm[e.corpus] = true end
@@ -180,6 +203,12 @@ end
 print(('\nscored:      %d commits with a lua/cartograph change'):format(scored))
 print(('skipped:     %d pure recalibrations (no code diff — NOT refutations)'):format(skipped))
 print(('  of scored, %d moved no corpus at all (no prediction at stake)'):format(no_move))
+do
+    local with = {}
+    for _, n in ipairs(neutral_only) do if #n.moved > 0 then with[#with + 1] = n.sha .. '[' .. table.concat(n.moved, ',') .. ']' end end
+    print(('neutral:     %d commits whose every lua change is output-neutral (CART-0622), %d of them moved a corpus%s')
+        :format(#neutral_only, #with, #with > 0 and (': ' .. table.concat(with, ' ') .. ' — each a deferred recalibration, or a hole in the rule') or ''))
+end
 if corpora_total > 0 then
     print(('subtraction: %.1f%% of corpus-gates ruled out on average (%d of %d)')
         :format(100 * subtracted_total / corpora_total, subtracted_total, corpora_total))

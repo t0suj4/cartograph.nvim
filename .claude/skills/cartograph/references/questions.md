@@ -401,8 +401,8 @@ section when you use it; the fence only requires that each appears somewhere in 
 - `tools/flowanat.lua` — flowanat — decompose what the BULK of flow/df actually is (the wall-leap follow-up,
 - `tools/foldstratdiff.lua` — foldstratdiff — CROSS-STRATEGY parity for the fold-emit knob ([[cartograph-thin-index]]).
 - `tools/gaps.lua` — gaps — the single-project RESOLUTION work-list: the unresolved callees ranked
-- `tools/gatepredict.lua` — GATE PREDICTION: from a diff, which of the 37 corpus gates CANNOT move?
-- `tools/gatescore.lua` — GATE SCORE: replay history against the predictor and look for REFUTATIONS.
+- `tools/gatepredict.lua` — GATE PREDICTION: from a diff, which of the 37 corpus gates CANNOT move? An OUTPUT-NEUTRAL edit reaches nothing (CART-0622): comments only in any Lua file, or the number assigned to cache.lua's `M.VERSION` — decided on the PARSE (`require('cartograph.gatepredict').neutral(path, before, after)`; a long string's `--` line is code, a side with a parse error is never neutral). Judged on the working diff only; `--files` names no base, so it says so and does not judge.
+- `tools/gatescore.lua` — GATE SCORE: replay history against the predictor and look for REFUTATIONS. Commits whose every lua change is output-neutral are LISTED apart (`neutral:`), each move there a deferred recalibration or a hole in the rule — never skipped silently. Measured 2026-11-05: subtraction 3.8% → 8.8% (scope=all 76 → 44 of the scored commits), 0 refutations.
 - `tools/gen.lua` — The GENERATED-CODE fuzz bed: synthesize a corpus with a seeded generator,
 - `tools/genmatrix.lua` — genmatrix — COMBINATORIAL control-form generation (CART-0405).
 - `tools/gramdiff.lua` — gramdiff — THE PORTING QUESTION, ASKED OF A GRAMMAR (CART-0666).
