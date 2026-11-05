@@ -2811,3 +2811,66 @@ test('portability (CART-0651): reference_diff reports a define 2.0 dropped as LO
     for n in pairs(lost) do ok(not n:find('^defines%.color'), 'a define no version declares is not a removal: ' .. n) end
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── CART-0648 step 2: the loop type is a NAME, and the loop sits in a data-stage FUNCTION ─────────────────────────
+-- Squeak Through's whole mod: `for prototype_type, gap in pairs(prototype_type_gap_requirements)` — a GLOBAL table in
+-- config.lua — then `for name, prototype in pairs(data.raw[prototype_type])`, inside `adjust_collision_boxes`, which
+-- the module calls at its top level. Each configured type is a record, so a type the target REMOVED is gone_type —
+-- the question the mod's correctness rests on (pairs(nil) stops the load).
+local function tree_store(files)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, src in pairs(files) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(src); fd:close() end
+    local st = require 'cartograph.store'
+    st._content_cache = {}
+    local data = require('cartograph.providers.treesitter').extract(root)
+    data.root = data.root or root; data.profile = 'lua-factorio'
+    st.ingest(data)
+    return st, root
+end
+local function gone_types(res) local o = {} for _, g in ipairs(res.gone_type) do o[g.typename] = g end return o end
+
+test('portability (CART-0648): a loop over data.raw[T], T the KEYS of a global table in another file, inside a called function', function ()
+    if not (proto_ready() and pcall(vim.treesitter.language.add, 'lua')) then skip 'no prototype-api artifacts' end
+    local st, root = tree_store({
+        ['config.lua'] = 'gap_requirements = {\n  ["flying-text"] = 0.25,\n  ["container"] = 0.25,\n}\n',
+        ['data-updates.lua'] = 'require "config"\nlocal function adjust()\n  for ptype, gap in pairs(gap_requirements) do\n'
+            .. '    for name, prototype in pairs(data.raw[ptype]) do\n      prototype.collision_box.lefttop[1] = gap\n    end\n  end\nend\nadjust()\n',
+    })
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local g = gone_types(res)
+    ok(g['flying-text'], 'a configured type 2.0 removed is gone_type: ' .. vim.inspect(res.gone_type))
+    eq(nil, g.container, 'and one it kept is not')
+    -- the element write `prototype.collision_box.lefttop[1] = gap` lands on each type's record at its dotted prefix
+    local paths = {}
+    for _, m in ipairs(require('cartograph.prototypes').all(st) or {}) do
+        for _, p in ipairs(m.protos) do
+            if p.basis == 'loop' and p.patch.type == 'container' then for _, o in ipairs(p.overrides) do paths[o.path] = true end end
+        end
+    end
+    ok(paths['collision_box.lefttop'], 'the write through the binder is an override: ' .. vim.inspect(paths))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability (CART-0648): a function nothing at top level calls is not read', function ()
+    if not (proto_ready() and pcall(vim.treesitter.language.add, 'lua')) then skip 'no prototype-api artifacts' end
+    local st, root = tree_store({
+        ['data.lua'] = 'local function never()\n  for _, p in pairs(data.raw["flying-text"]) do\n    p.speed = 1\n  end\nend\n',
+    })
+    local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    eq(nil, gone_types(res)['flying-text'], 'an uncalled function does not run in the data stage')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability (CART-0648): T the VALUES of a same-file array, iterated with ipairs', function ()
+    if not (proto_ready() and pcall(vim.treesitter.language.add, 'lua')) then skip 'no prototype-api artifacts' end
+    local st, root = tree_store({
+        ['data.lua'] = 'local kinds = { "flying-text", "furnace" }\nfor _, k in ipairs(kinds) do\n'
+            .. '  for _, p in pairs(data.raw[k]) do\n    p.energy_usage = "1kW"\n  end\nend\n',
+    })
+    local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    local g = gone_types(res)
+    ok(g['flying-text'], 'the removed type in the array is gone_type: ' .. vim.inspect(res.gone_type))
+    eq(nil, g.furnace)
+    vim.fn.delete(root, 'rf')
+end)

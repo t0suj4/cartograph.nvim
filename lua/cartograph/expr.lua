@@ -2649,7 +2649,10 @@ function M.of(store, fn_id)
     local fl = flow.build(fn, src, cfg)
     return { fl = fl, lang = lang, node = node,
         bound = M.bound_names(fn, src, s.binders),
-        heads = s.pattern and head_facts({ fn }, src, s) or nil }
+        heads = s.pattern and head_facts({ fn }, src, s) or nil,
+        -- (the function's tree and its source, for a reader of a construct the IR does not lower — prototypes'
+        -- loop binder inside a data-stage function, CART-0648)
+        fn = fn, src = src }
 end
 
 --- The language `M.of` would use for a file, or nil when this layer does not

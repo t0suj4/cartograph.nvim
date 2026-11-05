@@ -380,41 +380,115 @@ local function loop_binders(root, src, ad)
         for _, c in tsutil.inext, n, -1 do if c:type() == 'string_content' then return text(c) end end
         return nil
     end
-    local function base_type(n) -- base_root[T] / base_root.T -> T
+    -- base_root[T] / base_root.T -> T (a literal), or nil, <identifier> when T is a NAME (CART-0648 step 2)
+    local function base_type(n)
         if not n then return nil end
         local t = n:type()
         local tbl = n:field('table')[1]
         if not (tbl and text(tbl):gsub('%s', '') == ad.base_root) then return nil end
         local f = n:field('field')[1]
-        if t == 'bracket_index_expression' then return str(f) end
+        if t == 'bracket_index_expression' then
+            local lit = str(f)
+            if lit then return lit end
+            if f and f:type() == 'identifier' then return nil, text(f) end
+            return nil
+        end
         if t == 'dot_index_expression' then return f and text(f) or nil end
         return nil
     end
-    local function walk(n)
+    -- a generic for's iteration: `pairs(X)` / `ipairs(X)` -> 'pairs' | 'ipairs', X's node
+    local function iteration(cl)
+        local el = cl:named_child(1)
+        local it = el and el:named_child_count() == 1 and el:named_child(0)
+        local callee = it and it:type() == 'function_call' and it:field('name')[1]
+        local args = it and it:field('arguments')[1]
+        local how = callee and text(callee)
+        if (how == 'pairs' or how == 'ipairs') and args and args:named_child_count() == 1 then
+            return how, args:named_child(0)
+        end
+    end
+    -- `stack`: the enclosing generic loops, innermost last — { key, val, how, over = <X's text, a NAME only> }
+    local function walk(n, top, stack)
         local t = n:type()
-        if t == 'function_declaration' or t == 'function_definition' then return end
+        if not top and (t == 'function_declaration' or t == 'function_definition') then return end
+        local pushed
         if t == 'for_statement' then
             local cl = n:named_child(0)
             if cl and cl:type() == 'for_generic_clause' then
-                local vl, el = cl:named_child(0), cl:named_child(1)
-                local it = el and el:named_child_count() == 1 and el:named_child(0)
-                local callee = it and it:type() == 'function_call' and it:field('name')[1]
-                local args = it and it:field('arguments')[1]
-                if callee and text(callee) == 'pairs' and args and args:named_child_count() == 1 then
-                    local ty = base_type(args:named_child(0))
-                    local val = vl and vl:named_child(1)
-                    if ty and val and val:type() == 'identifier' then
+                local vl = cl:named_child(0)
+                local how, xn = iteration(cl)
+                local key, val = vl and vl:named_child(0), vl and vl:named_child(1)
+                if how == 'pairs' then
+                    local ty, tname = base_type(xn)
+                    if (ty or tname) and val and val:type() == 'identifier' then
                         local sr = n:range()
                         local er = select(3, n:range())
-                        out[sr + 1] = { var = text(val), type = ty, last = er + 1 }
+                        local e = { var = text(val), type = ty, last = er + 1 }
+                        if tname then
+                            -- T is a NAME: an enclosing loop's binder over a table, or unresolvable (no record)
+                            for i = #stack, 1, -1 do
+                                local L = stack[i]
+                                if L.over and L.key == tname and L.how == 'pairs' then e.from = { tbl = L.over, part = 'keys' } break end
+                                if L.over and L.val == tname then e.from = { tbl = L.over, part = 'values' } break end
+                            end
+                        end
+                        if ty or e.from then out[sr + 1] = e end
                     end
                 end
+                pushed = { key = key and key:type() == 'identifier' and text(key) or nil,
+                    val = val and val:type() == 'identifier' and text(val) or nil, how = how,
+                    over = xn and xn:type() == 'identifier' and text(xn) or nil }
+                stack[#stack + 1] = pushed
             end
         end
-        for _, c in tsutil.inext, n, -1 do walk(c) end
+        for _, c in tsutil.inext, n, -1 do walk(c, false, stack) end
+        if pushed then stack[#stack] = nil end
     end
-    walk(root)
+    walk(root, true, {})
     return out
+end
+
+--- THE KEYS (or the string VALUES) of a table literal bound to `name` — a module-level `local name = { … }` / global
+--- `name = { … }` in `file`, else a GLOBAL of that name defined in another file of the tree (Squeak Through keeps
+--- its 27 type names in config.lua). -> { strings }, or nil when no literal can be found (then no record is minted).
+local function table_strings(store, file, name, part)
+    local function from_rows(rows)
+        for _, st in ipairs(rows or {}) do
+            local e = st.expr
+            local lhs1, rhs1 = e and (e.lhs or {})[1], e and (e.rhs or {})[1]
+            if lhs1 and lhs1.k == 'name' and lhs1.n == name and rhs1 and rhs1.k == 'table' then
+                local out = {}
+                for _, kid in ipairs(rhs1.kids or {}) do
+                    if part == 'keys' and kid.k == 'pair' and kid.key and kid.key.k == 'lit' and type(kid.key.v) == 'string' then
+                        out[#out + 1] = (kid.key.v:gsub('^([\'"])(.*)%1$', '%2'))
+                    elseif part == 'values' and kid.k == 'lit' and type(kid.v) == 'string' then
+                        out[#out + 1] = (kid.v:gsub('^([\'"])(.*)%1$', '%2'))
+                    end
+                end
+                return #out > 0 and out or nil
+            end
+        end
+    end
+    local eo = expr.of_module(store, file)
+    local got = eo and from_rows(eo.fl.stmts)
+    if got then return got end
+    -- a GLOBAL of that name in another file: the graph holds it as a module-level var node
+    for _, n in ipairs(store.data.nodes or {}) do
+        if n.kind == 'var' and n.name == name and n.file ~= file then
+            local mod = store.node(n.file) and n.file or nil
+            local eo2 = mod and expr.of_module(store, mod)
+            got = eo2 and from_rows(eo2.fl.stmts)
+            if got then return got end
+        end
+    end
+    return nil
+end
+
+--- the TYPES a loop entry binds: its literal, or the strings of the table its NAME iterates (nil: unresolvable)
+local function loop_types(store, file, e)
+    if e.type then return { e.type } end
+    if e.from then return table_strings(store, file, e.from.tbl, e.from.part) end
+    return nil
 end
 
 function M.of_module(store, mod_id)
@@ -443,11 +517,19 @@ function M.of_module(store, mod_id)
         local lb = loops[line]
         if lb and not lb.made then
             lb.made = true
-            local outer = by_var[lb.var] -- (a same-named local the binder shadows: back in scope after the loop)
-            local p = fresh(lb.var, line, 'loop')
-            p.shadowed = outer
-            p.patch = { type = lb.type, name_computed = true, each = true }
-            p.scope_last = lb.last
+            local types = loop_types(store, eo.node.file, lb)
+            if types then
+                local outer = by_var[lb.var] -- (a same-named local the binder shadows: back in scope after the loop)
+                local p
+                for i, ty in ipairs(types) do
+                    local q = fresh(i == 1 and lb.var or nil, line, 'loop')
+                    q.var = lb.var
+                    q.patch = { type = ty, name_computed = true, each = true }
+                    q.scope_last = lb.last
+                    if i == 1 then p = q; p.shadowed = outer
+                    else p.fanout = p.fanout or {}; p.fanout[#p.fanout + 1] = q end -- one record per type, every write on each
+                end
+            end
         end
         if e then
             -- 1. a DECLARATION that starts a prototype
@@ -526,6 +608,14 @@ function M.of_module(store, mod_id)
             -- 2. a FIELD OVERRIDE on a tracked var, or a direct PATCH of a base
             for _, l in ipairs(e.lhs or {}) do
                 local root, path = target_path(l)
+                -- (a write through a LOOP binder that ends in an index — `p.collision_box.lefttop[1] = x` — is a write
+                -- at its dotted prefix: the property check needs the property path, not the element, CART-0648)
+                if not root and l.k == 'index' then
+                    local b = l
+                    while b and b.k == 'index' do b = b.b end
+                    local r2, p2 = target_path(b)
+                    if r2 and by_var[r2] and by_var[r2].basis == 'loop' then root, path = r2, p2 end
+                end
                 local p = root and by_var[root]
                 -- (a loop binder is the prototype only INSIDE its loop, CART-0648)
                 if p and p.scope_last and line > p.scope_last then by_var[root] = p.shadowed; p = p.shadowed end
@@ -537,11 +627,13 @@ function M.of_module(store, mod_id)
                 end
                 if p and path then
                     local v, why = literal((e.rhs or {})[1])
-                    p.overrides[#p.overrides + 1] = { path = path, value = v,
+                    local ov = { path = path, value = v,
                         ty = (e.rhs or {})[1] and (e.rhs or {})[1].ty or nil,
                         why = why, line = line,
                         elems = elem_form((e.rhs or {})[1]),
                         keys = key_names((e.rhs or {})[1]) }
+                    p.overrides[#p.overrides + 1] = ov
+                    for _, q in ipairs(p.fanout or {}) do q.overrides[#q.overrides + 1] = ov end
                     if path == 'name' and v then p.name = v end
                 elseif l.k == 'index' and l.b and l.b.k == 'name' and by_var[l.b.n]
                     and (e.rhs or {})[1] and (e.rhs or {})[1].k == 'table' then
@@ -731,6 +823,58 @@ function M.of_module(store, mod_id)
                         p.frontiers[#p.frontiers + 1] =
                             { kind = 'opaque-call', callee = d, line = line }
                         p.complete = false
+                    end
+                end
+            end
+        end
+    end
+    -- ── LOOPS INSIDE A DATA-STAGE FUNCTION (CART-0648 step 2) ──────────────────
+    -- A local function the module CALLS at its top level runs in the data stage, so a loop over data.raw[T] inside it
+    -- patches every prototype of T exactly as a module-level one does (Squeak Through's adjust_collision_boxes; 185 of
+    -- 630 such loops in the installed mods sit in a function). Read for LOOP BINDERS ONLY: a function's other writes
+    -- are not prototype reading's business here, and a function nothing at top level calls is not read at all.
+    local called = {}
+    for _, st in ipairs(eo.fl.stmts or {}) do
+        local e = st.expr
+        local rhs1 = e and (e.rhs or {})[1]
+        local d = rhs1 and rhs1.k == 'call' and expr.dotted(rhs1.f)
+        if d then called[d] = true end
+    end
+    for _, n in ipairs(store.data.nodes or {}) do
+        if n.file == eo.node.file and n.kind == 'function' and called[n.name] then
+            local fo = expr.of(store, n.id)
+            if fo and fo.fn then
+                local floops, fb = loop_binders(fo.fn, fo.src, ad), {}
+                for _, st in ipairs(fo.fl.stmts or {}) do
+                    local lb = floops[st.l]
+                    if lb and not lb.made then
+                        lb.made = true
+                        local types = loop_types(store, eo.node.file, lb)
+                        if types then
+                            local grp = {}
+                            for _, ty in ipairs(types) do
+                                local q = fresh(nil, st.l, 'loop')
+                                q.var, q.fn = lb.var, n.name
+                                q.patch = { type = ty, name_computed = true, each = true }
+                                q.scope_last = lb.last
+                                grp[#grp + 1] = q
+                            end
+                            fb[lb.var] = { grp = grp, last = lb.last }
+                        end
+                    end
+                    local e = st.expr
+                    for _, l in ipairs(e and e.lhs or {}) do
+                        local b = l
+                        while b and b.k == 'index' do b = b.b end -- (an element write is a write at its dotted prefix)
+                        local root, path = target_path(b)
+                        local g = root and fb[root]
+                        if g and path and st.l <= g.last then
+                            local v, why = literal((e.rhs or {})[1])
+                            local ov = { path = path, value = v, why = why, line = st.l,
+                                ty = (e.rhs or {})[1] and (e.rhs or {})[1].ty or nil,
+                                elems = elem_form((e.rhs or {})[1]), keys = key_names((e.rhs or {})[1]) }
+                            for _, q in ipairs(g.grp) do q.overrides[#q.overrides + 1] = ov end
+                        end
                     end
                 end
             end
