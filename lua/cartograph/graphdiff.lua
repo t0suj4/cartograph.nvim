@@ -43,7 +43,8 @@ local M = {}
 local function eattrs(e)
     return {
         tier = e.conf and 'confirmed' or e.proven and 'proven' or e.xlang and 'xlang'
-            or e.tinf and 'typed' or e.stdlib and 'stdlib' or e.inferred and '~' or 'matched',
+            or e.tinf and 'typed' or e.stdlib and 'stdlib' or e.decl and 'declared' -- (CART-0610: a pin)
+            or e.inferred and '~' or 'matched',
         sideeffect = e.sideeffect or nil,
         -- READ EITHER SHAPE: see the note below on nat/atn/at.
         n = e.nat or e.atn or (e.at and #e.at) or nil,

@@ -6,7 +6,7 @@ local tier = require 'cartograph.tier'
 test('tier: LADDER is highest-trust first, matched is the flagless tail', function ()
     local names = {}
     for _, r in ipairs(tier.LADDER) do names[#names + 1] = r.name end
-    eq({ 'confirmed', 'proven', 'xlang', 'typed', 'stdlib', 'inferred', 'matched' }, names)
+    eq({ 'confirmed', 'proven', 'xlang', 'typed', 'stdlib', 'declared', 'inferred', 'matched' }, names)
     eq(nil, tier.LADDER[#tier.LADDER].flag) -- the fallback rung has no flag
 end)
 
@@ -24,11 +24,16 @@ test('tier: of() returns the HIGHEST set flag (precedence, not first-seen)', fun
     eq('stdlib', tier.of({ stdlib = true }))
     eq('stdlib', tier.of({ stdlib = true, inferred = true })) -- stdlib > inferred
     eq('typed', tier.of({ tinf = true, stdlib = true }))      -- typed > stdlib
+    -- a fact a PERSON supplied (CART-0610): below every rung the code or an artifact proved, above a name guess
+    eq('declared', tier.of({ decl = true }))
+    eq('stdlib', tier.of({ stdlib = true, decl = true }))
+    eq('declared', tier.of({ decl = true, inferred = true }))
 end)
 
 test('tier: rank is monotonic and at_least reads it', function ()
     eq(1, tier.rank('confirmed'))
-    eq(7, tier.rank('matched'))
+    eq(8, tier.rank('matched'))
+    ok(tier.rank('stdlib') < tier.rank('declared') and tier.rank('declared') < tier.rank('inferred'))
     eq(nil, tier.rank('nonesuch'))
     ok(tier.rank('proven') < tier.rank('inferred'))
     ok(tier.at_least('proven', 'inferred'))       -- more trusted ≥ less
@@ -43,7 +48,7 @@ test('tier: the ladder covers exactly the fields census/fold read', function ()
     local flags = {}
     for _, r in ipairs(tier.LADDER) do if r.flag then flags[r.flag] = true end end
     eq({ conf = true, proven = true, xlang = true, tinf = true,
-        stdlib = true, inferred = true }, flags)
+        stdlib = true, decl = true, inferred = true }, flags)
 end)
 
 -- regression: census tier counting rides tier.of() now — prove it still bins
@@ -102,7 +107,7 @@ test('tier: an UNGRADED hop is COUNTED, never approximated', function ()
     eq(1, u1, 'it is counted so the caller must render it')
     -- ★ AND THE REAL INSTANCE: the tuple carrier's interpretation hop is
     -- `convention`, which tier.lua lists as a BANKED insertion point that does
-    -- not exist — the ladder is full (7 rungs, fold packs 3 bits). So a real
+    -- not exist (the ladder is 8 rungs since CART-0610, none of them `convention`). So a real
     -- composed relation has an ungraded hop TODAY (CART-0848).
     local f2, u2 = tier.floor({ 'stdlib', 'xlang', 'convention' })
     eq('stdlib', f2, 'the declared hops still produce a floor')
@@ -127,16 +132,33 @@ end)
 -- waits, because every later consumer would otherwise be written against a bare
 -- negative." Three consumers already had been.
 
-test('tier: the ladder is untouched and still exactly seven rungs', function ()
-    -- ★ THE TABLE IS FULL. fold.lua packs M.RANK into a 3-BIT field (1..7, 0
-    -- meaning "no rank recorded"), so an eighth rung would pack as 8 and decode
-    -- as 8 % 8 == 0 — read back as no tier at all. The absence axes are
-    -- deliberately NOT rungs, and this spec is what stops a later hand adding
-    -- one there by reflex.
-    eq(7, #tier.LADDER)
+test('tier: EIGHT rungs, and every one ROUND-TRIPS through the fold (CART-0610)', function ()
+    -- ★ THE TABLE WAS FULL at seven: fold.lua packed M.RANK into a 3-bit field, so an eighth rung packed as 8 and
+    -- decoded as 8 % 8 == 0 — no tier at all. `declared` (a fact a person supplied, CART-0610) widened the field to
+    -- bits 1-4 on ref rows. This test is what makes that capacity a checked fact rather than a comment: every rung,
+    -- alone and with the flags that ride beside it (`tinf` used to set bit 4), comes back from the fold as itself.
+    -- The absence axes are still NOT rungs (tier.ABSENCE / tier.WARRANT), and the count is pinned so one is not
+    -- added here by reflex.
+    eq(8, #tier.LADDER)
     eq('confirmed', tier.LADDER[1].name)
     eq('matched', tier.LADDER[#tier.LADDER].name)
     eq(nil, tier.LADDER[#tier.LADDER].flag, 'the tail rung is the FLAGLESS one')
+    local fold = require 'cartograph.fold'
+    local R = { start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 1 } }
+    local nodes, edges, want = { { id = 'a', name = 'a', kind = 'function', file = 'a.lua' } }, {}, {}
+    for i, r in ipairs(tier.LADDER) do
+        local to = 'n' .. i
+        nodes[#nodes + 1] = { id = to, name = to, kind = 'function', file = 'a.lua' }
+        local e = { from = 'a', to = to, kind = 'ref', at = { R } }
+        if r.flag then e[r.flag] = true end
+        if r.name ~= 'inferred' then e.inferred = r.flag and true or nil end -- a weaker flag beside never wins
+        edges[#edges + 1] = e
+        want[to] = r.name
+    end
+    local bf = require('cartograph.band').from_fold(fold.build({ nodes = nodes, edges = edges, calls = {} }))
+    for to, name in pairs(want) do eq(name, bf:tier('a', to), 'rung ' .. name .. ' round-trips the fold') end
+    local counts = bf:ref_tiers()
+    for _, r in ipairs(tier.LADDER) do eq(1, counts[r.name], 'the histogram bins ' .. r.name) end
 end)
 
 test('tier: the READING axis is a table, not a sentence in a comment', function ()

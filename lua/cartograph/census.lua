@@ -224,11 +224,11 @@ function M.report(data)
         '',
         ('nodes %d: %s'):format(c.nodes.total, kind_line(c.nodes.by_kind)),
         ('edges %d: %s'):format(c.edges.total, kind_line(c.edges.by_kind)),
-        ('ref trust: confirmed %d (%s) · proven %d (%s) · xlang %d · typed %d (%s) · stdlib %d (%s) · ~inferred %d (%s) · name-matched %d (%s)')
+        ('ref trust: confirmed %d (%s) · proven %d (%s) · xlang %d · typed %d (%s) · stdlib %d (%s) · declared %d · ~inferred %d (%s) · name-matched %d (%s)')
             :format(ref.confirmed, pct(ref.confirmed, reftotal),
                 ref.proven, pct(ref.proven, reftotal), ref.xlang,
                 ref.typed, pct(ref.typed, reftotal),
-                ref.stdlib, pct(ref.stdlib, reftotal),
+                ref.stdlib, pct(ref.stdlib, reftotal), ref.declared,
                 ref.inferred, pct(ref.inferred, reftotal),
                 ref.matched, pct(ref.matched, reftotal)),
         ('calls %d: resolved %d (%s) · refused %d (%s) · outside the corpus %d%s')

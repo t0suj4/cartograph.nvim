@@ -20,6 +20,11 @@ Resolution tiers you will see on LSP hover and in the census/ladder: `matched`,
 `typed`, `proven`, `stdlib`, and for the unresolved, the refusal rule plus how many
 candidates it saw.
 
+`declared` (✎ in the call ladder) means a person pinned the target in
+`config.pins` (CART-0610). It ranks below every rung the code or a distilled
+artifact proved and above a `~` name guess. Before CART-0610 a pin read as
+`xlang`, and the call report read it as `proven`.
+
 Gutter classification on file rows: `▶` entry, `○` orphan (no importer, and not
 matched by `entrypoints`).
 

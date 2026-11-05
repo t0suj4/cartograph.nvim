@@ -21,8 +21,8 @@ local M = {}
 -- the edge on this rung; the tail rung is the FLAGLESS one — an edge that
 -- resolved with NO hedge recorded on it. That is the extractor's same-file
 -- exact binder match (providers/treesitter.lua `return same, false`, kept
--- flagless by ref_adder) or a candidate the user pinned out of a refusal
--- (panes/symbols.lua). It is NOT "a bare unique-name match": the bare
+-- flagless by ref_adder). A candidate the user PINNED is no longer here: it is
+-- `declared` (CART-0610). It is NOT "a bare unique-name match": the bare
 -- workspace-unique cross-file match sets `inferred` and is the rung ABOVE it.
 --
 -- ★ THE TAIL POSITION IS A MECHANISM, AND IT CURRENTLY READS AS A VERDICT
@@ -39,13 +39,17 @@ local M = {}
 -- CART-0545 before wiring band federation to it and before changing a number
 -- here — prising rank apart from position is a design decision, not an edit.
 --
--- ★ AND THE TABLE IS FULL. fold.lua's 3-bit rank field encodes 1..7 (0 means
--- "no rank recorded"), and there are exactly 7 rungs. An 8th would pack as
--- 8 and decode as 8 % 8 == 0 — read back as no tier at all. So the insertion
--- points below are one line in THIS file and a widened fold field.
+-- ★ CAPACITY. fold.lua's rank field on a ref row was 3 bits (1..7, 0 = "no
+-- rank recorded") and held exactly 7 rungs; `declared` (CART-0610) widened it
+-- to bits 1-4 (1..15) — in-memory only, the fold is rebuilt per generation, so
+-- nothing on disk migrated. tests/tier_spec.lua round-trips EVERY rung through
+-- the fold, so the capacity is a checked fact now, not this comment.
 --
--- INSERTION POINTS for the banked tiers — a new rung is
--- one line here and every consumer follows:
+-- INSERTION POINTS for the banked tiers — a new rung is one line here, and
+-- most consumers follow. ⚠ NOT ALL: `declared` (CART-0610) found three that keep
+-- their own copy — graphdiff.eattrs (a census KEY, so its spelling is part of
+-- the signature), ladder.lua's call rungs and glyphs, and census's report line.
+-- A new rung edits those too:
 --   · stdlib     ([[cartograph-stdlib-profile]]) profile-backed external
 --     resolution — below the static tiers, above the name-match tiers.
 --   · convention ([[cartograph-modular-specs]], `e.conv`) a pack-declared DSL
@@ -61,13 +65,24 @@ M.LADDER = {
                                                -- the symbol — authoritative (above
                                                -- name-match) but no local def
                                                -- (below the static tiers)
+    { name = 'declared',  flag = 'decl' },     -- a fact a PERSON SUPPLIED
+                                               -- (CART-0610): a config pin names
+                                               -- the target of a call the code
+                                               -- cannot resolve. Below stdlib —
+                                               -- a profile at least ships as a
+                                               -- distilled artifact, a pin is one
+                                               -- person's assertion — and above a
+                                               -- name guess. It used to land on
+                                               -- `xlang` (the key-match path made
+                                               -- the edge), which the call report
+                                               -- then read as PROVEN.
     { name = 'inferred',  flag = 'inferred' }, -- ~ unique-name hypothesis: the
                                                -- workspace-unique CROSS-FILE
                                                -- guess (~10% wrong,
                                                -- [[cartograph-linker]])
     { name = 'matched' },                      -- no flag at all: resolved
                                                -- WITHOUT a hedge (same-file
-                                               -- exact binder, or user-pinned).
+                                               -- exact binder).
                                                -- Last because M.of needs the
                                                -- flagless rung last — NOT
                                                -- because it is the weakest.
@@ -116,9 +131,8 @@ end
 
 -- ══ THE TWO ABSENCE AXES ═══════════════════════════════════════════════════
 -- The ladder above grades a POSITIVE answer. Neither axis below is a rung on
--- it, and neither is comparable with it: `M.LADDER` is FULL (fold.lua packs a
--- 3-bit rank, 7 rungs, an 8th decodes as none) and a negative is a different
--- question. runtime-topology/02 says it in one line — "Not a new rung — a
+-- it, and neither is comparable with it: a negative is a different question
+-- (and `M.LADDER`'s rank is a packed field — fold.lua — not a free-form list). runtime-topology/02 says it in one line — "Not a new rung — a
 -- second field."
 --
 -- ★★★ THERE ARE TWO QUESTIONS, NOT ONE, and merging them is the confusion this

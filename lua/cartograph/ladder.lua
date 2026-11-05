@@ -43,17 +43,21 @@ local M = {}
 -- about; this report renders it below `linked`.
 -- 'confirmed': observed live at runtime (self://loaded, MCP) — the SOUND
 -- top rung, above even a static oracle (proven).
-local RUNGS = { 'confirmed', 'proven', 'linked', 'typed', 'inferred',
+-- 'declared': a person PINNED the target (config.pins, CART-0610) — below every rung the code proved, above a name
+-- guess, as on tier.lua's ladder. Read off the pin's ref edge (`decl`), the way `proven` is read off xlang/proven.
+local RUNGS = { 'confirmed', 'proven', 'linked', 'typed', 'declared', 'inferred',
     'dynamic', 'refused', 'frontier' }
 M.RUNGS = RUNGS
 
 -- which rung a single call sits on. `edge_proven` = a set of
 -- "from\31to" the oracle/xlang marked proven (from store).
-local function rung_of(c, proven)
+local function rung_of(c, proven, declared)
     if callrec.to(c) then
         if c.conf then return 'confirmed' end -- observed live: sound top rung
-        if proven and callrec.fn(c) and proven[callrec.fn(c) .. '\31' .. callrec.to(c)] then return 'proven' end
+        local k = callrec.fn(c) and (callrec.fn(c) .. '\31' .. callrec.to(c))
+        if proven and k and proven[k] then return 'proven' end
         if c.tinf then return 'typed' end
+        if declared and k and declared[k] then return 'declared' end
         return c.inferred and 'inferred' or 'linked'
     end
     if c.dynamic then return 'dynamic' end
@@ -65,25 +69,27 @@ M.rung_of = rung_of
 -- proven set: xlang edges and oracle-resolved edges carry a marker on
 -- the ref edge (xlang=true) or the graph capability says an oracle ran
 local function proven_set(store)
-    local set = {}
+    local set, decl = {}, {}
     for _, e in ipairs(store.data.edges or {}) do
         if e.kind == 'ref' and (e.xlang or e.proven) then
             set[e.from .. '\31' .. e.to] = true
+        elseif e.kind == 'ref' and e.decl then
+            decl[e.from .. '\31' .. e.to] = true
         end
     end
-    return set
+    return set, decl
 end
 
 --- Distribution over one function's outgoing calls (by id) or, with
 --- no id, the whole graph. Returns { rung -> count, total = n }.
 function M.tally(store, id)
-    local proven = proven_set(store)
+    local proven, declared = proven_set(store)
     local out = { total = 0 }
     for _, r in ipairs(RUNGS) do out[r] = 0 end
     -- per-fn: the SITE axis (Band); whole-graph: the raw call array
     local calls = id and store.topo():sites(id) or (store.data.calls or {})
     for _, c in ipairs(calls) do
-        local r = rung_of(c, proven)
+        local r = rung_of(c, proven, declared)
         out[r] = out[r] + 1
         out.total = out.total + 1
     end
@@ -93,7 +99,7 @@ end
 --- A one-line summary (the fn-view header, the ladder report top).
 function M.summary(t)
     local parts = {}
-    local glyph = { confirmed = '⏺', proven = '✓', linked = '→', typed = 'T',
+    local glyph = { confirmed = '⏺', proven = '✓', linked = '→', typed = 'T', declared = '✎',
         inferred = '~', dynamic = '$', refused = '?', frontier = '·' }
     for _, r in ipairs(RUNGS) do
         if t[r] > 0 then parts[#parts + 1] = ('%s%d'):format(glyph[r], t[r]) end
@@ -193,6 +199,7 @@ function M.report(store)
         proven = 'proven (oracle / cross-language)',
         linked = 'linked (a binding, or same scope, plain)',
         typed = 'typed (graph-VM return-type summary)',
+        declared = 'declared (a person pinned the target: config.pins)',
         inferred = 'inferred (~ unique name)',
         dynamic = 'dynamic (unseeable frontier)',
         refused = 'refused (ambiguous fork)',

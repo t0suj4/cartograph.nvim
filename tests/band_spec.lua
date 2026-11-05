@@ -52,13 +52,14 @@ end)
 test('band: tier is the FULL canonical ladder, identical on both backends', function ()
     local D = {
         root = '/x',
-        nodes = { node('a'), node('b'), node('c'), node('d'), node('e'), node('g') },
+        nodes = { node('a'), node('b'), node('c'), node('d'), node('e'), node('g'), node('h') },
         edges = {
             { from = 'a', to = 'b', kind = 'ref', at = { R } },                  -- matched
             { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } },  -- inferred
             { from = 'a', to = 'd', kind = 'ref', proven = true, at = { R } },    -- proven
             { from = 'a', to = 'e', kind = 'ref', tinf = true, at = { R } },      -- typed
             { from = 'a', to = 'g', kind = 'ref', stdlib = true, at = { R } },    -- stdlib
+            { from = 'a', to = 'h', kind = 'ref', decl = true, at = { R } },      -- declared (a pin, CART-0610)
         },
         calls = {},
     }
@@ -71,10 +72,11 @@ test('band: tier is the FULL canonical ladder, identical on both backends', func
         eq('proven', b:tier('a', 'd'))   -- the upper rungs no longer collapse
         eq('typed', b:tier('a', 'e'))
         eq('stdlib', b:tier('a', 'g'))
+        eq('declared', b:tier('a', 'h'))  -- the 8th rung: bits 1-4 on a ref row
         eq(nil, b:tier('b', 'c'))        -- no such edge
     end
     -- the ref-tier HISTOGRAM (aggregate), identical on both backends
-    local want = { matched = 1, inferred = 1, proven = 1, typed = 1, stdlib = 1 }
+    local want = { matched = 1, inferred = 1, proven = 1, typed = 1, stdlib = 1, declared = 1 }
     eq(want, bs:ref_tiers())
     eq(want, bf:ref_tiers())
 end)

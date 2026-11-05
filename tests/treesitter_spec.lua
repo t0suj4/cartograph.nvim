@@ -1095,6 +1095,23 @@ test('php: functions, qualified methods, requires, hook fan-out', function ()
         if c.callee == '$h' then pinned = c end
     end
     ok(pinned and pinned.to == byname2.compute.id, 'pin names the target')
+    -- ★ A TARGET A PERSON TYPED IS NOT A FACT THE CODE PROVED (CART-0610). The pin's ref edge used to be made by the
+    -- key-match path, `xlang = true` — the 3rd rung, above typed and stdlib — and the call report read it as PROVEN.
+    -- It is `declared` now: below every rung the code or an artifact proved, above a name guess.
+    local tier, ladder = require 'cartograph.tier', require 'cartograph.ladder'
+    local pe
+    for _, e in ipairs(data2.edges) do
+        if e.kind == 'ref' and e.to == byname2.compute.id and e.from == pinned.fn then pe = e end
+    end
+    eq('declared', pe and tier.of(pe), 'the pinned edge is DECLARED, not ' .. tostring(pe and tier.of(pe)))
+    local hooked = 0
+    for _, e in ipairs(data2.edges) do
+        if e.kind == 'ref' and e.from == byname2.on_boot.id and tier.of(e) == 'xlang' then hooked = hooked + 1 end
+    end
+    eq(2, hooked, 'and a real key-matched hook edge stays xlang')
+    store.ingest(data2)
+    local t = ladder.tally(store)
+    eq(1, t.declared, 'the call report counts the pinned call as declared, not proven')
 end)
 
 test('frontier: minified bundles are opaque but reachable by text search', function ()

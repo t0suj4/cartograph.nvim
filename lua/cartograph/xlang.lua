@@ -471,6 +471,21 @@ function M.link(data, bindings, opts)
         e.inferred = nil -- the key match outranks a name hypothesis
         if at and fresh_site(e, at) then e.at[#e.at + 1] = at end
     end
+    -- ★ A PIN'S EDGE IS DECLARED, NOT KEY-MATCHED (CART-0610). The pin loop below used addref, so a target A PERSON
+    -- TYPED became `xlang = true` — the 3rd rung, above typed and stdlib — and ladder.lua's proven set (xlang or proven)
+    -- reported the pinned call as PROVEN. A supplied fact gets its own rung, `declared`; a key match that already made
+    -- the same edge keeps its own (stronger) flag, because the rung is the highest flag set.
+    local function addpin(from, to, at)
+        local k = from .. '\31' .. to
+        local e = refEdge[k]
+        if not e then
+            e = { from = from, to = to, kind = 'ref', at = {} }
+            refEdge[k] = e
+            data.edges[#data.edges + 1] = e
+        end
+        e.decl = true
+        if at and fresh_site(e, at) then e.at[#e.at + 1] = at end
+    end
     local regEdge = {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
@@ -551,7 +566,7 @@ function M.link(data, bindings, opts)
                 if match then
                     callrec.set(c, 'to', target.id)
                     callrec.set(c, 'dynamic', nil)
-                    if callrec.fn(c) then addref(callrec.fn(c), target.id,
+                    if callrec.fn(c) then addpin(callrec.fn(c), target.id,
                         key_range(c, pin.to)) end
                     hit = hit + 1
                     stats.pinned = stats.pinned + 1
