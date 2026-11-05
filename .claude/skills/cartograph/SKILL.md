@@ -134,6 +134,13 @@ Where the file can go is fenced (CART-1911):
 - Any other path, a `..` segment, or a symlink that leads out is refused with
   `outside-plans-dir`.
 
+`txn_load` replays a recipe's single step only if its verb mints a plan, i.e. one
+of the `txn_plan_*` planners (CART-1912). Anything else refuses with
+`unreplayable-step`, so a hand-edited recipe cannot undo, apply or run a tactic.
+If re-deriving finds nothing, for example because the tree moved and the
+candidate is gone, the load refuses with `no-plan-minted`. It is never `ok` with
+no plan.
+
 ★ PREVIEW BEFORE YOU SAVE, and the artifact carries a WITNESS: `txn_preview`
 records a sha256 of each after-image it showed you, `txn_save` carries those, and
 `txn_load` dry-runs the freshly derived plan and compares. If the tree moved, the

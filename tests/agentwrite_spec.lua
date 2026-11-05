@@ -1895,3 +1895,95 @@ test('agentwrite (CART-1911): a WRITABLE host may also save inside the project r
     eq('ORIGINAL', slurp(outside .. '/victim.txt'):gsub('\n$', ''), 'and the file is untouched')
     permit(false)
 end)
+
+-- ── what a recipe may replay (CART-1912) ────────────────────────────────────
+-- txn_save only ever writes a PLANNER's invocation, but txn_load answered
+-- whatever verb the file named — and a file can come from anywhere. Measured
+-- (CART-0607): a recipe stepping txn_undo rolled back an applied edit on load,
+-- with no preview; on a read-only host a recipe stepping toolbelt_run ran Lua and
+-- answered ok with plan = nil. A step now replays only if its verb MINTS A PLAN
+-- (the verbs stash_plan records, never a hand list), and a step whose answer
+-- holds no plan refuses.
+
+--- a recipe file of `pid`, its step rewritten to `step` (nil: left as saved)
+local function recipe_with(pid, step)
+    local s = call('txn_save', { plan = pid })
+    ok(s.ok, 'the recipe saved: ' .. vim.inspect(s.refusal))
+    local path = s.result[1].path
+    if step then
+        local art = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+        art.steps = { step }
+        vim.fn.writefile({ vim.json.encode(art) }, path)
+    end
+    return path
+end
+
+local function refused_as(d, rule)
+    return d.ok == false and type(d.refusal) == 'table' and d.refusal.rule == rule
+end
+
+test('agentwrite (CART-1912): a recipe stepping txn_undo does NOT roll back an applied edit', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['src.lua'] = SRC_LUA, ['use.lua'] = USE_LUA }
+    ingest(root)
+    local p = call('txn_plan_moveset', { seed = { idof('M.dbl') }, dest = 'lib/math.lua' })
+    eq(true, p.ok, 'planned: ' .. vim.inspect(p.refusal))
+    local path = recipe_with(p.subject.plan, { verb = 'txn_undo', args = {} })
+    eq(true, call('txn_preview', { plan = p.subject.plan }).ok)
+    eq(true, call('txn_apply', { plan = p.subject.plan }).ok, 'the edit applied')
+    eq(1, vim.fn.filereadable(root .. '/lib/math.lua'), 'and created its module')
+
+    local l = call('txn_load', { path = path })
+    ok(refused_as(l, 'unreplayable-step'), 'a non-planner step REFUSES: ' .. vim.inspect(l.refusal))
+    eq(1, vim.fn.filereadable(root .. '/lib/math.lua'), 'and the applied edit is still on disk')
+    ok(not read(root, 'src.lua'):find('function M.dbl', 1, true), 'the source still lacks the moved function')
+
+    -- a planner step FIRST and the undo second: one step is all txn_save writes, so a second refuses
+    -- rather than being silently ignored (or, by a later reader, replayed)
+    local art = vim.json.decode(table.concat(vim.fn.readfile(path), '\n'))
+    art.steps = { { verb = 'txn_plan_annotate', args = { node = idof('M.keep'), text = 'note' } },
+        { verb = 'txn_undo', args = {} } }
+    vim.fn.writefile({ vim.json.encode(art) }, path)
+    l = call('txn_load', { path = path })
+    ok(refused_as(l, 'unreplayable-step'), 'a two-step recipe REFUSES: ' .. vim.inspect(l.refusal))
+    os.remove(path)
+    permit(false)
+end)
+
+test('agentwrite (CART-1912): on a READ-ONLY host a recipe stepping toolbelt_run runs nothing', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    eq(true, p.ok, 'planned read-only: ' .. vim.inspect(p.refusal))
+    local marker = vim.fn.tempname()
+    local path = recipe_with(p.subject.plan, { verb = 'toolbelt_run', args = { name = 'door-trap',
+        params = { workload = ('return function () io.open(%q, "w"):write("x") end'):format(marker) } } })
+    local l = call('txn_load', { path = path })
+    ok(refused_as(l, 'unreplayable-step'), 'a non-planner step REFUSES: ' .. vim.inspect(l.refusal))
+    eq(0, vim.fn.filereadable(marker), 'and the Lua it carried never ran')
+    os.remove(path)
+end)
+
+test('agentwrite (CART-1912): a planner step that mints NO plan refuses rather than answering ok with plan = nil', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    eq(true, p.ok, 'planned: ' .. vim.inspect(p.refusal))
+    local path = recipe_with(p.subject.plan)
+    -- the tree moves: the redundancy is gone, so re-deriving finds no candidate
+    write(root, 'm.lua', { 'local M = {}', 'function M.f(x, y)', '  local a = x + y', '  return a', 'end',
+        'function M.g(x) return M.f(x, 1) end', 'return M' })
+    ingest(root)
+    local again = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    ok(again.ok and again.subject.plan == nil or again.subject.plan == vim.NIL,
+        'premise: the planner itself answers with no plan here: ' .. vim.inspect(again.subject))
+    local l = call('txn_load', { path = path })
+    ok(refused_as(l, 'no-plan-minted'),
+        'a load that holds no plan REFUSES: ok=' .. tostring(l.ok) .. ' ' .. vim.inspect(l.refusal))
+    os.remove(path)
+end)

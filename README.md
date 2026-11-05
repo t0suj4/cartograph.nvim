@@ -3570,7 +3570,11 @@ changed files named — because the difference is not wrong, it is unreviewed, a
 `txn_save` has no write permission of its own, so where it may write is fenced
 (CART-1911). It writes to the plans directory under `stdpath('state')`, and a
 writable host may also write inside the project root. Any other path, a `..`
-segment, or a symlink that leads out is refused (`outside-plans-dir`).
+segment, or a symlink that leads out is refused (`outside-plans-dir`). In the
+other direction, `txn_load` replays only a step whose verb mints a plan
+(CART-1912), so a hand-edited recipe cannot undo or run anything. A step that
+re-derives to no plan refuses (`no-plan-minted`) rather than loading nothing
+under `ok`.
 
 **An empty answer is a typed claim with a reason attached.** `absent`, `refused`,
 `frontier` and `unavailable` mean different things, and reading one as "nothing

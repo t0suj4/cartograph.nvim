@@ -3045,6 +3045,22 @@ local function v_txn_load(store, args)
         return refuse('unreadable-recipe', 'the recipe carries no step',
             'this file was not written by txn_save')
     end
+    -- ★★ ONLY A VERB THAT MINTS A PLAN IS REPLAYED (CART-1912). txn_save only ever writes a planner's
+    -- invocation, but the FILE can come from anywhere, and this used to answer whatever verb it named:
+    -- measured, a recipe stepping txn_undo rolled back an applied edit on load with no preview, and on a
+    -- read-only host one stepping toolbelt_run ran its Lua. The set is DERIVED from the table stash_plan's
+    -- invocations are drawn from, never listed here — a new planner joins it by being registered there.
+    -- ⚠ ONE STEP, as txn_save writes: a second would be replayed by nobody and reported by nothing.
+    local replayable = {}
+    for _, verb in pairs(VERB_OF_FAMILY) do replayable[verb] = true end
+    if not replayable[step.verb] or #art.steps ~= 1 then
+        local names = vim.tbl_keys(replayable); table.sort(names)
+        return refuse('unreplayable-step',
+            #art.steps ~= 1 and ('the recipe carries %d steps; txn_save writes exactly one'):format(#art.steps)
+                or ('the recipe steps `%s`, which mints no plan — a recipe replays only a planner (%s)')
+                    :format(tostring(step.verb), table.concat(names, ', ')),
+            'this file was not written by txn_save; call that verb directly if it is what you meant')
+    end
     -- ★ RE-DERIVED, NOT RESTORED. The verb runs again against THIS graph, so a
     -- tree that moved either re-plans cleanly or refuses on the planner's own
     -- terms — there is no stale offset to smuggle across, because nothing about
@@ -3057,6 +3073,16 @@ local function v_txn_load(store, args)
             'the recipe records what to ask for; the answer is the graph\'s')
     end
     local pid = d.subject and d.subject.plan
+    -- ⚠ ok WITH NO PLAN IS NOT A LOAD (CART-1912). A planner that re-derives to nothing (the tree moved and
+    -- the candidate is gone) answers ok with an absence; passing that through as a successful load handed
+    -- the caller plan = nil under ok = true. Nothing is held, so the load refuses and carries the reason.
+    if pid == nil or pid == NUL then
+        return refuse('no-plan-minted',
+            ('re-deriving %s minted no plan here: %s'):format(step.verb,
+                tostring(d.absence_why and (type(d.absence_why) == 'table' and (d.absence_why.why or vim.inspect(d.absence_why))
+                    or d.absence_why) or d.absence or 'no plan handle in the answer')),
+            'the tree no longer offers what this recipe asked for; re-plan against it')
+    end
     -- ★★★ THE WITNESS CHECK — what makes "derive the plan from the recipe" safe
     -- for a REVIEW handoff. Re-derivation answers "ask for this again"; a review
     -- promised "apply what I read". Those differ exactly when the tree moved
