@@ -109,4 +109,7 @@ return {
     mint = api ~= nil, mint_path = mint_path, sigs = sigs,
     sig_kind = api and 'factorio' or nil,
     global2class = api_g2c, api_members = api_members, api_complete = api_complete,
+    -- 1.1's `defines` tree (CART-0651): BOTH sides must enumerate it, or a define a dependency mod adds (stdlib's
+    -- defines.color) reads as one 2.0 dropped — 1.1 would answer it by the namespace prefix, 2.0 by the tree
+    enums = api and api.enums or nil,
 }

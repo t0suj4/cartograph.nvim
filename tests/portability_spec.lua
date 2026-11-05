@@ -2765,3 +2765,49 @@ test('portability (CART-0648): the binder is the prototype only INSIDE its loop'
     end
     vim.fn.delete(proto_tmp, 'rf')
 end)
+
+-- ── `defines` ENUMERATED (CART-0651 (c)) ──────────────────────────────────────
+-- `defines` is a closed, documented, versioned set of value namespaces, and every `defines.x` read used to land in
+-- "PRESENT, or not adjudicable" — the root known, its members not. The 2.0 artifact now carries the tree (enums), so a
+-- chain through it is decided segment by segment.
+test('portability (CART-0651): a chain through `defines` is adjudicated per segment against the enumerated tree', function ()
+    local pm = require 'cartograph.spec.profile'
+    local prof = pm.load('lua-factorio')
+    if not prof then skip 'no lua-factorio profile' end
+    -- (the artifact is checked in: a profile WITHOUT the tree is a distiller regression, never a skip)
+    ok(prof.enums and prof.enums.defines, 'the 2.0 artifact carries the defines tree (tools/factoriodistill.lua)')
+    eq('member of defines.events', port.provides(prof, 'defines.events.on_tick'), 'a present value')
+    eq('member of defines.control_behavior', port.provides(prof, 'defines.control_behavior.inserter'),
+        'a nested namespace (subkeys) is a member too')
+    eq(nil, port.provides(prof, 'defines.circuit_connector_id'), '2.0 dropped this define: absent, not hedged')
+    eq(nil, port.provides(prof, 'defines.events.on_nothing_at_all'), 'nor a value no namespace holds')
+    eq('absent', port.ref_reason(prof, 'defines.circuit_connector_id.combinator_input'))
+    ok(port.provides(prof, 'game.print'), 'and the runtime classes answer as before')
+end)
+
+test('portability (CART-0651): reference_diff reports a define 2.0 dropped as LOST, and one it kept as kept', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio-11') and pm.load('lua-factorio')) then skip 'factorio profiles not both present' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = refs_fixture('local function a(e)\n'
+        .. '  local id = defines.circuit_connector_id.combinator_input\n'
+        .. '  local c = defines.color.green\n'
+        .. '  if e.name == defines.events.on_tick then return id, c end\nend\n'
+        .. 'return { a = a }\n')
+    store.ingest(ts.extract(root))
+    local res = port.reference_diff(store, 'lua-factorio-11', 'lua-factorio')
+    ok(res ~= nil, 'the diff ran')
+    local lost = {}
+    for _, e in ipairs(res.lost) do lost[e.name] = e end
+    local cc
+    for n, e in pairs(lost) do if n:find('^defines%.circuit_connector_id') then cc = e end end
+    ok(cc, 'the dropped define is lost: ' .. vim.inspect(vim.tbl_keys(lost)))
+    for n in pairs(lost) do ok(not n:find('^defines%.events'), 'a kept define is not work: ' .. n) end
+    -- ★ and a define NEITHER version has — stdlib's `defines.color`, added by a dependency mod (Nanobots) — is not
+    -- "lost in 2.0": with only the 2.0 tree enumerated, 1.1's namespace prefix had answered it and the diff called it a
+    -- removal. Both trees enumerated, it is absent on both sides: no change, no work for the port to do.
+    for n in pairs(lost) do ok(not n:find('^defines%.color'), 'a define no version declares is not a removal: ' .. n) end
+    vim.fn.delete(root, 'rf')
+end)

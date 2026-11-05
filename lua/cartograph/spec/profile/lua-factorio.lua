@@ -226,4 +226,7 @@ return {
     -- suggestion that matches one is correct platform usage and an ad-hoc
     -- reimplementation of one is a real finding ([[greenspun-is-suggestive]]).
     templates = api_templates,
+    -- the `defines` VALUE NAMESPACES, enumerated (CART-0651): path -> { member = true }. A chain through them is
+    -- statically followable (no receiver), so portability adjudicates `defines.x.y` instead of hedging at the root.
+    enums = api and api.enums or nil,
 }

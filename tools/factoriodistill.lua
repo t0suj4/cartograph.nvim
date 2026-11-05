@@ -301,6 +301,29 @@ for _, fn in ipairs(api.global_functions or {}) do
     n_free = n_free + 1
 end
 
+-- ── THE `defines` TREE, ENUMERATED (CART-0651 (c)) ──────────────────────────
+-- `defines` is a closed, documented, versioned set of value namespaces (defines.events.on_tick, defines.inventory.
+-- chest), and without it every `defines.x` read was "PRESENT, or not adjudicable" — the root known, the members not.
+-- enums[path] = { member = true } for the root and every nested namespace (a define's `values`, and its `subkeys`,
+-- which are namespaces of their own: defines.control_behavior.inserter …). A VALUE has no entry: it is a leaf.
+-- ⚠ KEPT APART FROM global2class / members on purpose: those are the 9 global OBJECTS, and the minting path and the
+-- class consumers read them as classes with receivers; a define is no receiver.
+local enums = {}
+local function enum_of(path, list)
+    local set = enums[path] or {}
+    enums[path] = set
+    for _, d in ipairs(list or {}) do
+        set[d.name] = true
+        if d.subkeys or d.values then
+            local sub = path .. '.' .. d.name
+            enums[sub] = enums[sub] or {}
+            for _, v in ipairs(d.values or {}) do enums[sub][v.name] = true end
+            if d.subkeys then enum_of(sub, d.subkeys) end
+        end
+    end
+end
+if api.defines then enum_of('defines', api.defines) end
+
 local profile = {
     schema = 1, runtime = RUNTIME, lang = 'lua',
     version = api.application_version, api_version = api.api_version,
@@ -348,6 +371,8 @@ local profile = {
     -- finding, and an ad-hoc one that DUPLICATES one is a real finding.
     templates = templates,
     free = free, free_sigs = free_sigs,
+    -- the `defines` value namespaces, enumerated (CART-0651): path -> { member = true }; nil when the document has none
+    enums = next(enums) and enums or nil,
 }
 
 local out = here .. '/../lua/cartograph/spec/profile/' .. RUNTIME .. '.mpack'

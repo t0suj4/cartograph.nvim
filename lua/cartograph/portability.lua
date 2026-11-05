@@ -70,11 +70,37 @@ local ext_lang
 --- answered) or nil. Several sources because profile artifacts differ: a
 --- distilled zig std is free-function-heavy, a hand-authored Factorio profile is
 --- namespace-heavy, and an RBS-derived one is signature-keyed.
+--- A dotted chain through ENUMERATED VALUE NAMESPACES (prof.enums, `defines` — CART-0651): -> 'present', path |
+--- 'absent', path .. '.' .. seg | nil when the root is not an enumerated namespace. A namespace is CLOSED (the vendor's
+--- documented set), so a missing member is absence, not a hedge; the walk stops at a LEAF (a value) or at a segment
+--- that is not a plain name (`defines.events[k]`), where what follows is not the namespace's to answer.
+function M.enum_walk(prof, name)
+    local enums = prof and prof.enums
+    local root, rest = (name or ''):match('^([%w_]+)%.(.+)$')
+    if not (enums and root and enums[root]) then return nil end
+    -- (the answer names the namespace that HOLDS the last segment checked: `defines.events.on_tick` is a member of
+    -- defines.events, `defines.control_behavior.inserter` a member of defines.control_behavior)
+    local path, holder = root, root
+    for seg in rest:gmatch('[^%.]+') do
+        if not seg:match('^[%w_]+$') then return 'present', holder end
+        if not enums[path][seg] then return 'absent', path .. '.' .. seg end
+        holder = path
+        local sub = path .. '.' .. seg
+        if not enums[sub] then return 'present', holder end -- a leaf value: nothing below it to check
+        path = sub
+    end
+    return 'present', holder
+end
+
 function M.provides(prof, name)
     if not (prof and name and name ~= '') then return nil end
     if prof.vocab and prof.vocab[name] then return 'vocab' end
     if prof.free and prof.free[name] then return 'free fn' end
     if prof.sigs and prof.sigs[name] then return 'signature' end
+    -- an ENUMERATED VALUE NAMESPACE answers for every segment (CART-0651): `defines.events.on_tick` is followable
+    local ev, epath = M.enum_walk(prof, name)
+    if ev == 'present' then return 'member of ' .. epath end
+    if ev == 'absent' then return nil end
     local root, rest = name:match('^([%w_]+)[%.:#]+(.+)$')
     if root then
         -- A FULLY ENUMERATED CLASS ANSWERS FOR ITSELF, and must be consulted BEFORE
@@ -1880,6 +1906,10 @@ end
 function M.ref_reason(prof, name)
     local root, member = name:match('^([%w_]+)%.([%w_]+)')
     if not root then return 'unknown-root' end
+    -- a chain through an enumerated value namespace (`defines`) is decided segment by segment (CART-0651)
+    local ev = M.enum_walk(prof, name)
+    if ev == 'absent' then return 'absent' end
+    if ev == 'present' then return 'unenumerated-namespace' end
     local cls = (prof.global2class or {})[root]
     if cls and (prof.api_complete or {})[cls] then
         if member and not (prof.api_members or {})[cls .. '::' .. member] then
