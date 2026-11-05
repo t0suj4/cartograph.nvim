@@ -3630,6 +3630,13 @@ local function build(store, opts)
                     if not m then m = {}; G7.GR[gid] = m end
                     local q = m[nm]
                     if not q then q = new(); edge(G7.gread(nm), q); m[nm] = q end
+                    -- (`arg` in a vararg function is PUC 5.1's arg table when the function never names `...` — read here as
+                    -- a global; the dump decides it once the whole body is walked, CART-1924)
+                    if nm == 'arg' and fnstack[#fnstack] and fnstack[#fnstack].vararg then
+                        local f = fnstack[#fnstack]
+                        f.argreads = f.argreads or {}
+                        f.argreads[#f.argreads + 1] = q
+                    end
                     return q
                 end
                 return p
@@ -3638,7 +3645,7 @@ local function build(store, opts)
             -- caller's arguments are — it was a fresh empty port per use, so `local _, ns = ...; ns.f()` read whole)
             if t == 'vararg_expression' then
                 local f = fnstack[#fnstack]
-                if f then return f.vararg end
+                if f then f.dots = true; return f.vararg end -- (dots: it NAMES `...` — no 5.1 `arg` table, CART-1924)
                 if G7.HOSTWALK then return new() end
                 return (G7.chunkva(file))
             end
@@ -3863,6 +3870,15 @@ local function build(store, opts)
                 -- (each value to its position: `return i, c` — tsutil.inext's — the second is the node. A call last
                 -- forwards its values: up to MULTI of them)
                 local vals = exprs(el, fp and MULTI or 1)
+                -- (a LAST value `...` spreads into every result from its position: the dump says so, CART-1924)
+                if fp and el then
+                    local list_ = el:type() == 'expression_list'
+                    local nlast = list_ and el:named_child_count() or 1
+                    local last = list_ and nlast > 0 and el:named_child(nlast - 1) or (not list_ and el)
+                    if last and last:type() == 'vararg_expression' and (not fp.retspread or nlast < fp.retspread) then
+                        fp.retspread = nlast
+                    end
+                end
                 for i, v in ipairs(vals) do
                     if fp and PTAG and not fp.inst then puse(v, 'ret', i) end
                     if fp then
@@ -4147,7 +4163,9 @@ local function build(store, opts)
             if on() then
                 if args.fenv then G7.gap('setfenv', { callee })
                 else
-                    G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, list(args) })
+                    -- (the argument list keeps `spread`: a last argument that spreads, for the dump's spread marker, CART-1924)
+                    local al = list(args); al.spread = args.spread
+                    G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, al })
                     local k = G7.NEXTC and G7.W and G7.cur()
                     local l = k and G7.REC.fns[k]
                     if l then G7.INSAT[G7.NEXTC] = { k, #l - 1 } end

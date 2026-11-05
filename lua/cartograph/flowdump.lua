@@ -18,7 +18,12 @@
 --   when its root is not a repository's top level)
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
---     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ] } ... ],
+--     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ],
+--       vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--       (VARARGS, CART-1924: `vararg` names the slot — still params' last; `spread` each call / pcall / ret whose last
+--       operand spreads from that 1-based position into every parameter / result from there and the callee's vararg,
+--       tagged `vararg:spread`; `argtable` under ver 51 a vararg function that never names `...` — PUC 5.1's `arg`
+--       table, whose reads are the gap `vararg-arg`)
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
 --                  ctx = nil, live = nil,
 --                  taint = { ports, seeds, from } },
@@ -370,7 +375,11 @@ function M.build(rec, X, sink)
             if ins[3] == '[]' then return { 'storeDyn', V(ins[2]), ins[5] and V(ins[5]) or vim.NIL, V(ins[4]) } end
             return { 'store', V(ins[2]), F(ins[3]), V(ins[4]) }
         elseif op == 'call' or op == 'pcall' then
-            return { op, vars(ins[2]), V(ins[3]), vars(ins[4]) }
+            -- (the POSITIONAL arguments only: the recorded list may carry `spread`, which the dump states apart — a mixed
+            -- table here made LD an object where the JSON has an array, CART-1924)
+            local as = {}
+            for i, a in ipairs(ins[4]) do as[i] = a end
+            return { op, vars(ins[2]), V(ins[3]), vars(as) }
         elseif op == 'keys' then return { 'keys', V(ins[2]), V(ins[3]) }
         -- (RAW accesses, FLOW-0090: a constructor's field, pairs' / next's value)
         elseif op == 'storeRaw' then
@@ -393,10 +402,19 @@ function M.build(rec, X, sink)
     end
     -- functions
     local fjson = {}
-    local function emitfn(name, params, self, body, tags)
-        fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s}'):format(FN(name), jarr(vars(params)),
-            V(self), jarr(body), jarr(tags))
-        if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags } end
+    -- (VARARGS, CART-1924 / flowpath FLOW-0047: `va` names the vararg slot — still the last of params, so a reader that
+    -- ignores the key reads what it always did; `spread` [[index, position]] each call / pcall / ret whose last operand
+    -- spreads from that 1-based position; `argtable` a vararg function under ver 51 that never names `...`: PUC 5.1's
+    -- implicit `arg` table)
+    local function emitfn(name, params, self, body, tags, va)
+        va = va or {}
+        local extra = (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
+            .. (va.spread and #va.spread > 0 and (',"spread":' .. jarr(va.spread)) or '')
+            .. (va.argtable and ',"argtable":true' or '')
+        fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s%s}'):format(FN(name), jarr(vars(params)),
+            V(self), jarr(body), jarr(tags), extra)
+        if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags,
+            vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
     end
     local keys = {}
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
@@ -453,13 +471,32 @@ function M.build(rec, X, sink)
         end
         local fp = byname[name]
         local params = {}
+        -- (a call / pcall whose last argument spreads: its dumped index and the position, tagged, CART-1924)
+        local spreads = {}
+        for i, ins in ipairs(rec.fns[name] or {}) do
+            if (ins[1] == 'call' or ins[1] == 'pcall') and type(ins[4]) == 'table' and ins[4].spread and map[i - 1] then
+                spreads[#spreads + 1] = { map[i - 1], ins[4].spread }
+                tags[#tags + 1] = { map[i - 1], 'vararg:spread' }
+            end
+        end
+        local va = { spread = spreads }
         if fp then
             for i, p in ipairs(fp.params) do params[i] = p end
-            if fp.vararg then params[#params + 1] = fp.vararg end
+            if fp.vararg then params[#params + 1] = fp.vararg; va.vararg = fp.vararg end
             body[#body + 1] = { 'ret', vars(fp.rets or { fp.ret }) }
+            if fp.retspread then
+                spreads[#spreads + 1] = { #body - 1, fp.retspread }
+                tags[#tags + 1] = { #body - 1, 'vararg:spread' }
+            end
+            -- (PUC 5.1's `arg`: a vararg function that never names `...` has a local `arg` = { ... , n = … }; flowtype
+            -- reads `arg` there as a global, so each such read is a GAP — LUA_COMPAT_VARARG, 5.1 only)
+            if fp.vararg and not fp.dots and X.LUAVER == 51 then
+                va.argtable = true
+                if fp.argreads and #fp.argreads > 0 then rec.gaps[#rec.gaps + 1] = { fn = name, kind = 'vararg-arg', vars = vars(fp.argreads) } end
+            end
         end
         local self = fp and fp.dself or X.CHUNKSELF and X.CHUNKSELF[name] or newvar() -- (by the walk where it has one, CART-1825)
-        emitfn(name, params, self, body, tags)
+        emitfn(name, params, self, body, tags, va)
         if fp then fp._dumpself = self end
         byname[name] = byname[name] or false
         sitesof[name] = sitesof[name] or {}

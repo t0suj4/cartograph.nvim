@@ -1644,6 +1644,8 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
           ['lua/my/mod.lua'] = 'local M = {}\nfunction M.run(q) return use and q end\nreturn M\n', exp = 'pkg-modules' },
         -- (a function reached only through a DYNAMIC cell of a table handed to an unresolved callee: hdyn)
         { ['m.lua'] = CLASSES .. 'local t = {}\nt[UNKNOWN_K] = function (q) return use(q) end\nUNRESOLVED_FN(t)\n' },
+        -- (the vararg markers — a slot, a spread call / pcall / ret, a 5.1 arg table: CART-1924)
+        { ['m.lua'] = CLASSES .. 'local function va(x, ...) local p, q = ... return p, q end\nlocal function sp(...) return 1, va(...) end\nlocal function old(...) return arg end\nprint(va(a, b, b), sp(a), old(b), pcall(va, a))\n' },
         -- (a call into a host model: host_models)
         { ['m.lua'] = CLASSES .. 'debug.getregistry().obj = a\nprint(use(debug.getregistry().obj))\n',
           hostmodels = { test = 'local REG = {}\nreturn { ["debug#getregistry"] = function () return REG end }\n' } },
@@ -1661,7 +1663,8 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
             local proj = { functions = {}, sites = {}, names = { fields = D.names.fields },
                 solution = { v = s.v, top = s.top, h = s.h, hdyn = s.hdyn, htop = s.htop, taint = { ports = s.taint.ports, escaped = s.taint.escaped } },
                 contracts = { library_sites = c.library_sites, package_loaded_sites = c.package_loaded_sites, host_models = c.host_models, ext_channel = c.ext_channel, clauses = c.clauses } }
-            for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags } end
+            for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags,
+                vararg = f.vararg, spread = f.spread, argtable = f.argtable } end -- (the vararg markers, CART-1924)
             for i, x in ipairs(D.sites) do proj.sites[i] = { id = x.id, kind = x.kind, label = x.label, fn = x.fn, host = x.host } end
             same = vim.deep_equal(vim.json.decode(vim.json.encode(LD)), vim.json.decode(vim.json.encode(proj)))
         end
@@ -1722,4 +1725,68 @@ test('flowdump: a dump solves at GC pause 110 and restores the caller\'s pause (
     ok(ok1, 'the dump solved')
     eq({ 110, 175, 130 }, seen, 'the pause during each dump')
     eq(175, after, 'the caller\'s pause is back afterwards')
+end)
+
+-- (CART-1924, for flowpath FLOW-0047: the dump wrote a function's vararg port as an ordinary LAST PARAMETER and a call
+-- whose last argument is `...` as an ordinary argument list, so the checker bound arguments by position and a solution
+-- missing the third argument's site in `q` of `local p, q = ...` passed the certificate. Now: the vararg slot is NAMED
+-- per function, a spread call / pcall / ret names its instruction and the position it spreads from (and carries the tag
+-- `vararg:spread`, so today's checker classifies a failure there), and under ver 51 a vararg function that never names
+-- `...` has PUC 5.1's `arg` table — flowtype reads `arg` there as a global, so a read of it is a GAP)
+local VARARGS = table.concat({
+    'local function va(x, ...) local p, q = ... return p, q end',
+    'local function sp(...) return va(...) end',
+    'local function rs(...) return 1, ... end',
+    'local function old(...) return arg end',
+    'local function fixed(z) return z end',
+    'local function pc(...) return pcall(va, ...) end',
+    'print(va(a, b, b), sp(a), rs(a), old(a), fixed(a), pc(a))' }, '\n') .. '\n'
+
+local function fn_named(D, nm)
+    for _, F in ipairs(D.functions) do
+        local name = D.names.functions[F.id + 1] or ''
+        if name:match('[^%w_]' .. nm .. '$') or name == nm or name:match('[^%w_]' .. nm .. '[^%w_]') then return F, name end
+    end
+end
+
+test('flowdump (CART-1924): the vararg slot is named, a spread call / pcall / return says where it spreads, 5.1 arg is stated', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(VARARGS)
+    eq(51, D.ver)
+    local va, fixed = fn_named(D, 'va'), fn_named(D, 'fixed')
+    ok(va and fixed, 'found the functions: ' .. vim.inspect(D.names.functions))
+    eq(va.params[#va.params], va.vararg, 'va names its vararg slot, still the last of params')
+    eq(nil, fixed.vararg, 'a fixed-arity function has no vararg slot')
+    local function spread_on(F, op)
+        for _, s in ipairs(F.spread or {}) do
+            if F.body[s[1] + 1][1] == op then
+                local tagged = false
+                for _, t in ipairs(F.tags) do if t[1] == s[1] and t[2] == 'vararg:spread' then tagged = true end end
+                return s[2], tagged
+            end
+        end
+    end
+    local sp = fn_named(D, 'sp')
+    local pos, tagged = spread_on(sp, 'call')
+    eq(1, pos, '`va(...)` spreads from its first argument: ' .. vim.inspect(sp.spread))
+    ok(tagged, 'and the call carries vararg:spread')
+    ok(spread_on(fn_named(D, 'pc'), 'pcall'), '`pcall(va, ...)` is a spread pcall')
+    eq(2, (spread_on(fn_named(D, 'rs'), 'ret')), '`return 1, ...` spreads from result 2')
+    eq(nil, va.spread, 'va spreads nothing')
+    local old = fn_named(D, 'old')
+    eq(true, old.argtable, 'a vararg function that never names `...` has 5.1\'s arg table')
+    eq(nil, va.argtable, 'one that names `...` does not')
+    local gap = false
+    for _, g in ipairs(D.gaps) do if g.kind == 'vararg-arg' and g.fn == old.id and #g.vars > 0 then gap = true end end -- (naming the read's port)
+    ok(gap, 'and its read of `arg` is a GAP, not a global read: ' .. vim.inspect(D.gaps))
+    -- under 5.2 (Factorio's profile) there is no `arg` table: `arg` IS a global read there
+    local root = tree({ ['m.lua'] = CLASSES .. VARARGS })
+    store.ingest(ts.extract(root))
+    store.data.profile = 'lua-factorio'
+    local D52 = vim.json.decode(flowtype.solve(store, { open = false, dump = true }).dump)
+    vim.fn.delete(root, 'rf')
+    eq(52, D52.ver)
+    local old52 = fn_named(D52, 'old')
+    eq(nil, old52.argtable, 'no arg table under 5.2')
+    for _, g in ipairs(D52.gaps) do ok(g.kind ~= 'vararg-arg', 'and no vararg-arg gap under 5.2') end
 end)
