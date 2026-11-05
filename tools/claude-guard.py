@@ -16,6 +16,9 @@ only (a person keeps the documented WIP bypass):
      For a cartograph commit the uncommitted diff's added ticket IDs get the same per-session check: an ID
      written into a file by an earlier call reaches the commit without being in its text.
   3. Edit / Write: ticket IDs the edit ADDS (IDs only — code is full of hex) go through the same check.
+  4. Edit / Write on a file with MORE THAN ONE HARD LINK is denied (the-harness-is-unguarded #53/#59): tracked files are
+     hard-linked into job snapshots, so an in-place write changes every copy. Break the link first —
+     `cp -p f f.unlink.tmp && mv f.unlink.tmp f` — and retry. (A write made from a shell script is not seen here.)
   A denial's own text never counts as read (it names the refused reference: the retry would pass).
 
 Register in .claude/settings*.json:
@@ -214,6 +217,16 @@ def decide(ev, seen=None):
                 why = why and why.replace('refcheck: ', 'refcheck (uncommitted diff): ')
             return why or None
     elif tool in ('Edit', 'Write'):
+        path = inp.get('file_path') or ''
+        try:
+            links = os.stat(path).st_nlink
+        except OSError:
+            links = 1  # a new file has no other copy
+        if links > 1:
+            q = shlex.quote(path)
+            return ('claude-guard: %s has %d hard links — an in-place %s would change every copy (job snapshots share '
+                    'the inode; harness #53/#59). Break the link first: cp -p %s %s.unlink.tmp && mv %s.unlink.tmp %s'
+                    % (path, links, tool, q, q, q, q))
         new = inp.get('new_string') if tool == 'Edit' else inp.get('content')
         old = inp.get('old_string') if tool == 'Edit' else ''
         if tool == 'Write':
