@@ -1109,6 +1109,8 @@ return {
     -- unique @stereotype impl.
     -- Same two shapes as super_query, in both clauses — `implements Foo` and
     -- `implements Foo<T>`, `interface J extends K` and `interface J<T> extends K<T>`.
+    -- And a RECORD's or an ENUM's `implements` (CART-0671): `record IndexVersion(…) implements VersionId<IndexVersion>`
+    -- had no supertype at all — 101 calls on elasticsearch server reach VersionId's default methods only through it.
     iface_query = [=[
         (class_declaration
             name: (identifier) @ichild
@@ -1118,6 +1120,14 @@ return {
             name: (identifier) @ichild
             (extends_interfaces (type_list [ (type_identifier) @iface
                                              (generic_type (type_identifier) @iface) ]))) @idecl
+        (record_declaration
+            name: (identifier) @ichild
+            (super_interfaces (type_list [ (type_identifier) @iface
+                                           (generic_type (type_identifier) @iface) ]))) @idecl
+        (enum_declaration
+            name: (identifier) @ichild
+            (super_interfaces (type_list [ (type_identifier) @iface
+                                           (generic_type (type_identifier) @iface) ]))) @idecl
     ]=],
     entry_names = { main = true },
     -- An annotation registers the member iff its NAME says so — see
@@ -1203,7 +1213,15 @@ return {
     stdlib_prefixes = { 'System.', 'String.', 'Objects.', 'List.',
         'Map.', 'Set.', 'Collections.', 'Arrays.', 'Optional.',
         'Stream.', 'Integer.', 'Long.', 'Math.', 'Files.', 'Paths.' },
-    import_query = [=[ (import_declaration (scoped_identifier) @path) ]=],
+    -- ★ THE BOUND NAME (CART-0671): Java has no import aliasing, so `import a.b.C;` binds the LAST path segment and
+    -- `import static a.b.C.m;` the member — the second pattern's @bind, merged into the site's edge. Its anchor `.`
+    -- (the scoped identifier is the declaration's LAST named child) keeps the WILDCARDS out: `import a.b.*;` and
+    -- `import static a.b.C.*;` end in an `asterisk` and bind no name — guessing one is the fabrication fabcensus counts
+    import_reexports = false, -- (an import is a dependency, never a re-export: a binding reaches its own file, CART-0671)
+    import_query = [=[
+        (import_declaration (scoped_identifier) @path)
+        (import_declaration (scoped_identifier name: (identifier) @bind) @path .)
+    ]=],
     -- the importer's source root, from its own `package` declaration (see JAVA_BASENAMES)
     import_context = function (tsroot, src, file)
         local pkg = ''

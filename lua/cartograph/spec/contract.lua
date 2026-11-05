@@ -152,6 +152,7 @@ M.SLOTS = {
     -- 'directory' when an import names a PACKAGE DIR (go) rather than a file.
     -- Absent = file, which is what lua/javascript/rust/haskell mean.
     import_unit = 'IMPORTS',
+    import_reexports = 'IMPORTS', -- (false: an import is a dependency, never a re-export — java, CART-0671)
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
     -- WHAT KIND OF IMPORT THE SITE IS (CART-0510), keyed on the import
     -- expression's NODE TYPE: { once = <re-executes?>, soft = <failure is

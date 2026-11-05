@@ -7408,7 +7408,7 @@ end
 --- itself, a file it RE-EXPORTS (a barrel, up to two hops), or a file sharing its
 --- import UNIT (a go package directory, where an import names a directory and one
 --- representative file stands for it).
-local function binding_index(edges)
+local function binding_index(edges, hier)
     local bind_of, imports_of = {}, {}
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.from and e.to then
@@ -7429,7 +7429,78 @@ local function binding_index(edges)
     --- everywhere admits any two files that happen to share a folder, which in a
     --- file-per-module language is most of them; a fixture in a flat tempdir caught
     --- it immediately. The caller passes its own language's answer.
-    local function reaches(from, to, dir_unit)
+    --- ⚠ AND A RE-EXPORT IS DECLARED TOO (`spec.import_reexports = false`, CART-0671): a Java import is a DEPENDENCY,
+    --- never a re-export. Walking import hops there admitted whatever the bound class's file happens to import:
+    --- `LegacyReaderContext::indexShard` (inherited from ReaderContext, same package, imported by nobody) became
+    --- RecoveryTarget::indexShard, two imports away — 25 calls on elasticsearch server resolved elsewhere, every
+    --- witness wrong. What a CLASS binding reaches is its file and its SUPERTYPES' files — `extends` and `implements`,
+    --- transitively, by the project's own declarations (`hier`: data.extends / data.implements and the exact index's
+    --- `Class::member` keys). Own-file-only had blocked `IndexVersion::onOrAfter`, a default method of the VersionId
+    --- interface it implements. A supertype outside the tree (RuntimeException) reaches nothing: the call is refused
+    local supermemo
+    -- (BY FILE, NOT BY SIMPLE NAME: `Script` is also ValuesSource's nested Bytes.Script / Numeric.Script and `Index` is
+    -- RecoveryState's nested Index extends Timer — a hierarchy keyed by the simple name merged them, and a call on
+    -- org.elasticsearch.script.Script reached FieldMapper.java by that coincidence. A class is (file, name); its
+    -- supertype clauses are the ones its own file declares for it; a supertype's simple name resolves as Java does —
+    -- a class of the same file, the file's own import bind, else a class of the same package (directory). A wildcard
+    -- import names no class: nothing is reached through it, the call is refused)
+    local function superfiles(from, cls)
+        if not supermemo then
+            supermemo = { cache = {} }
+            local ext, impl, exact -- (not `hier and hier()`: an `and` keeps ONE value of a call's several)
+            if hier then ext, impl, exact = hier() end
+            local up, defines, files_of = {}, {}, {}
+            -- (a supertype's simple name: the last segment of a qualified `a.b.C` — the queries capture the bare type
+            -- identifier, so `Listener<R>` arrives as `Listener`)
+            local function simple(t) return (t or ''):match('([%w_$]+)%s*$') end
+            local function place(c, f)
+                if not (c and f) then return end
+                local d = defines[f]; if not d then d = {}; defines[f] = d end; d[c] = true
+                local fo = files_of[c]; if not fo then fo = {}; files_of[c] = fo end; fo[f] = true
+            end
+            local function link(f, c, p)
+                if not (f and c and p) then return end
+                place(c, f)
+                local k = f .. '\0' .. c
+                local l = up[k]; if not l then l = {}; up[k] = l end; l[#l + 1] = p
+            end
+            for _, e in ipairs(ext or {}) do link(e.file, e.child, simple(e.parent)) end
+            for _, e in ipairs(impl or {}) do link(e.file, e.child, simple(e.iface)) end
+            for k, list in pairs(exact or {}) do
+                local c = type(k) == 'string' and k:match('^([%w_$]+)::')
+                if c then for _, nd in ipairs(list) do place(c, nd.file) end end
+            end
+            supermemo.up, supermemo.defines, supermemo.files_of = up, defines, files_of
+        end
+        local key = from .. '\0' .. tostring(cls)
+        local hit = supermemo.cache[key]
+        if hit then return hit end
+        hit = {}
+        local up, defines, files_of = supermemo.up, supermemo.defines, supermemo.files_of
+        local function where(f, p) -- the files the simple name p names, seen from file f
+            if defines[f] and defines[f][p] then return { f } end
+            local b = bind_of[f] and bind_of[f][p]
+            if b then return { b } end
+            local dir, out = f:match('^(.*)/[^/]*$') or '', {}
+            for g in pairs(files_of[p] or {}) do if (g:match('^(.*)/[^/]*$') or '') == dir then out[#out + 1] = g end end
+            return out
+        end
+        local seen, q = { [key] = true }, { { from, cls } }
+        local i = 1
+        while i <= #q do
+            local f, c = q[i][1], q[i][2]; i = i + 1
+            for _, p in ipairs(up[f .. '\0' .. c] or {}) do
+                for _, g in ipairs(where(f, p)) do
+                    local k2 = g .. '\0' .. p
+                    if not seen[k2] then seen[k2] = true; hit[g] = true; q[#q + 1] = { g, p } end
+                end
+            end
+        end
+        supermemo.cache[key] = hit
+        return hit
+    end
+    local function reaches(from, to, dir_unit, noreexp, cls)
+        if noreexp then return cls ~= nil and superfiles(from, cls)[to] == true end
         if from == to then return true end
         if dir_unit
             and (from:match('^(.*)/[^/]*$') or '') == (to:match('^(.*)/[^/]*$') or '') then
@@ -9699,7 +9770,7 @@ local MATCH_OPTS = { match_limit = 65536 }
     -- the monkey-patch fence: mark foreign assignments now that every file's
     -- imports are known, then let a module's own declaration win the key
     drop_overrides(nodes, edges, exact, tail)
-    local bind_of, binding_reaches = binding_index(edges)
+    local bind_of, binding_reaches = binding_index(edges, function () return data.extends, data.implements, exact end)
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
     local _prs = pstart()
@@ -10031,8 +10102,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                         -- binding only says which package the receiver lives in — hugo's metadecoders.Default.Unmarshal…
                         -- went blocked the moment its import resolved, CART-1580)
                         local deep = name:match('^[%w_]+[%.:][%w_]+[%.:]') ~= nil
-                        fits = (deep or tgt ~= n.file) and binding_reaches(tgt, n.file,
-                            spec and spec.import_unit == 'directory')
+                        -- (a CLASS binding — no re-exports, CART-0671 — makes only the bound class's own member the
+                        -- direct case: another class of the same file is reached as a supertype or not at all)
+                        local noreexp = spec and spec.import_reexports == false
+                        local direct = tgt == n.file and (not noreexp or (n.name or ''):sub(1, #recv + 2) == recv .. '::')
+                        fits = (deep or not direct) and binding_reaches(tgt, n.file,
+                            spec and spec.import_unit == 'directory', noreexp, recv)
                     end
                 end
                 return fits
@@ -10822,7 +10897,7 @@ function M.relink(data, touched, opts)
         data.edges[#data.edges + 1] = e
     end
     local regstale = {}
-    local bind_of, binding_reaches = binding_index(data.edges)
+    local bind_of, binding_reaches = binding_index(data.edges, function () return data.extends, data.implements, exact end)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     M._set_clink(data.nodes, data.edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
     local function resolve(name, file)
@@ -11081,8 +11156,12 @@ function M.relink(data, touched, opts)
                         -- binding only says which package the receiver lives in — hugo's metadecoders.Default.Unmarshal…
                         -- went blocked the moment its import resolved, CART-1580)
                         local deep = name:match('^[%w_]+[%.:][%w_]+[%.:]') ~= nil
-                        fits = (deep or tgt ~= n.file) and binding_reaches(tgt, n.file,
-                            spec and spec.import_unit == 'directory')
+                        -- (a CLASS binding — no re-exports, CART-0671 — makes only the bound class's own member the
+                        -- direct case: another class of the same file is reached as a supertype or not at all)
+                        local noreexp = spec and spec.import_reexports == false
+                        local direct = tgt == n.file and (not noreexp or (n.name or ''):sub(1, #recv + 2) == recv .. '::')
+                        fits = (deep or not direct) and binding_reaches(tgt, n.file,
+                            spec and spec.import_unit == 'directory', noreexp, recv)
                     end
                 end
                 return fits
