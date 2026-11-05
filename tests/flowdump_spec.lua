@@ -1903,3 +1903,66 @@ test('flowdump: debug.sethook calls its hook — the event a string, the hook fo
     eq({ 'host:sethook', 'host:sethook', 'host:sethook:c', 'host:sethook:r' }, tags)
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- (CART-1956, from CART-1949 / flowpath FLOW-0049: debug.setlocal / getlocal by name were the gap debug-local, a
+-- refusal; the dump now carries them as COPIES over the frame the solve's frame_locals names)
+test('flowdump: debug.setlocal / getlocal are copies over the named frame\'s locals, not a gap (CART-1956)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local a, b = {}, {}',
+        'local function f() local o = b; debug.setlocal(1, 1, a); return o end',
+        'local function set2() debug.setlocal(2, 1, a) end',
+        'local function g() local p = b; local n, v = debug.getlocal(1, 1); return v end',
+        'local function get2() local _, w = debug.getlocal(2, 1); return w end',
+        'local function late() local q = {}; return q end',
+        'return f, set2, g, get2, late' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    for _, gp in ipairs(D.gaps) do ok(gp.kind ~= 'debug-local', 'no frame gap: ' .. vim.inspect(gp)) end
+    local site = {}
+    for _, s in ipairs(D.sites) do site[s.label] = s.id end
+    local A, Bt = site['tbl:m.lua:0:13'], site['tbl:m.lua:0:17']
+    ok(A and Bt, 'a and b have sites')
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    -- each frame call: its value / result variable and the copies that name it, in the calling function's body
+    local per = {}
+    for _, fn in ipairs(D.functions) do
+        for _, ins in ipairs(fn.body) do
+            if ins[1] == 'call' then
+                for _, o in ipairs(V[ins[3]] or {}) do
+                    local lab
+                    for l, id in pairs(site) do if id == o then lab = l end end
+                    if lab == 'native:debug.setlocal' then per[fn.id] = { fn = fn, op = 'set', val = ins[4][3] } end
+                    if lab == 'native:debug.getlocal' then per[fn.id] = { fn = fn, op = 'get', res = ins[2][2] } end
+                end
+            end
+        end
+    end
+    local fnof = {}
+    for _, st in ipairs(D.sites) do if st.kind == 'function' then fnof[st.label] = st.fn end end
+    local set1, set2, get1 = per[fnof['m.lua::f@1']], per[fnof['m.lua::set2@2']], per[fnof['m.lua::g@3']]
+    ok(set1 and set2 and get1, 'three frame calls, one per function: ' .. vim.inspect(vim.tbl_keys(per)))
+    local function copies(c)
+        local n = 0
+        for _, ins in ipairs(c.fn.body) do
+            if ins[1] == 'copy' and ((c.op == 'set' and ins[3] == c.val) or (c.op == 'get' and ins[2] == c.res)) then
+                n = n + 1
+                if c.op == 'set' then ok(vim.tbl_contains(V[ins[2]] or {}, A), 'the local holds the value') end
+            end
+        end
+        return n
+    end
+    eq(1, copies(set1), 'level 1: the calling function\'s one local')
+    -- (and every one of them holds a: also g's n, declared AFTER set2 was walked — the solve had missed it, CART-1956)
+    ok(copies(set2) >= 8, 'level 2: every function\'s locals (coarse, as the solve)')
+    eq(3, copies(get1), 'getlocal(1): the calling function\'s three locals (p, n, v) into the second result')
+    ok(vim.tbl_contains(V[get1.res] or {}, Bt), 'getlocal\'s value holds b')
+    -- (an any-frame getlocal reads a local declared AFTER it was walked: late's q)
+    local get2, Q = per[fnof['m.lua::get2@4']], nil
+    for l, id in pairs(site) do if l:find('^tbl:m%.lua:5:') then Q = id end end
+    ok(get2 and Q and vim.tbl_contains(V[get2.res] or {}, Q), 'getlocal(2) reads late\'s q')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

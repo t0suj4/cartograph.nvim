@@ -1646,14 +1646,24 @@ local function build(store, opts)
             end
             return out
         end
+        G7.frame_locals = frame_locals -- (the dump's copies take the same frame: CART-1956)
+        -- (ANY frame — not a literal level 1 — is every function's locals, ALSO one walked after this call: the model
+        -- runs by name at the walk, and `set2() debug.setlocal(2, …) end` before `function g() local n …` missed n — a
+        -- wrong whole answer the dump's copies exposed, CART-1956. G7.ANYFRAME: declare links each later local)
+        local function anyframe(rl, nplain)
+            local ctx = G7.DBGCTX[rl[1]]
+            return not (ctx and ctx.lvl == 1 and ctx.nargs == nplain)
+        end
         M0['debug#setlocal'] = function (a, rl)
             local vs = { a[3], a[4] } -- (the value: 3rd without a thread, 4th with one)
             for _, q in ipairs(frame_locals(rl, 3)) do for _, v in pairs(vs) do edge(v, q) end end
+            if anyframe(rl, 3) then for _, v in pairs(vs) do G7.ANYFRAME[#G7.ANYFRAME + 1] = { v, true } end end
             addobj(rl[1], STR)
         end
         M0['debug#getlocal'] = function (a, rl)
             addobj(rl[1], STR)
             if rl[2] then for _, q in ipairs(frame_locals(rl, 2)) do edge(q, rl[2]) end end
+            if rl[2] and anyframe(rl, 2) then G7.ANYFRAME[#G7.ANYFRAME + 1] = { rl[2], false } end
         end
         M0['debug#upvaluejoin'] = function (a)
             if not (a[1] and a[3]) then return end
@@ -2134,6 +2144,7 @@ local function build(store, opts)
     G7.NAMEDRUN['table#move'] = true -- (by name it ran nothing: the model runs, CART-1814)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
+    G7.LOCCALLS = {} -- (debug.setlocal / getlocal calls by name, for the dump: CART-1956)
     if G7.EXP['refl-nocap'] then G7.PORTFILE, G7.REFLFILE = {}, {} else G7.PORTFILE, G7.REFLFILE = nil, nil end
     -- (refl-scope, CART-1817: the region flag — set before a port saturates, it makes the port a region top; set after,
     -- the port stays an ordinary saturation, counted in G7.RGLATE)
@@ -2151,6 +2162,7 @@ local function build(store, opts)
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
+    G7.ANYFRAME = {} -- ({ port, true: a setlocal value into every local | false: a getlocal result out of it }, CART-1956)
     G7.LIBSITES, G7.PKGL = {}, {}
     do -- (the analysed code's Lua version, from its profile: 5.2+ changes comparison semantics, CART-1802)
         local okp, prf = pcall(function () return store.data.profile and require('cartograph.spec.profile').load(store.data.profile) end)
@@ -2727,6 +2739,9 @@ local function build(store, opts)
             local fk = fnstack[#fnstack] and fnstack[#fnstack].id or ('chunk:' .. file)
             local l = G7.LOCALS[fk]; if not l then l = {}; G7.LOCALS[fk] = l end
             l[#l + 1] = q
+            if G7.ANYFRAME[1] then -- (an any-frame setlocal / getlocal seen before this local existed, CART-1956)
+                G7.mu(function () for _, e in ipairs(G7.ANYFRAME) do if e[2] then edge(e[1], q) else edge(q, e[1]) end end end)
+            end
             return q
         end
         -- ★ AN UNCONDITIONAL RAISE ENDS ITS BLOCK (CART-1745): a statement calling the GLOBAL `error` never returns, so
@@ -3527,9 +3542,12 @@ local function build(store, opts)
                     -- (the DEBUG mutators have no path of their own: by name their model runs too, CART-1803)
                     if g0 and not G7.NAMEDRUN[k0] then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
                     -- (an UPVALUE call by name is translated by the dump into copies over the functions the solution
-                    -- lists — G7.UPVCALLS, CART-1813; a frame (setlocal / getlocal) stays a gap)
+                    -- lists — G7.UPVCALLS, CART-1813; a FRAME call (setlocal / getlocal) into copies over the frame's locals
+                    -- the solve's frame_locals names — G7.LOCCALLS, CART-1956: it had stayed the gap debug-local)
                     if g0 and G7.UPVGAP[k0] == 'debug-upvalue' then
                         if G7.REC then G7.UPVCALLS[#G7.UPVCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
+                    elseif g0 and G7.UPVGAP[k0] == 'debug-local' then
+                        if G7.REC then G7.LOCCALLS[#G7.LOCCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
                     elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
                     -- (debug.setfenv by NAME ran nothing: it sets f's environment as setfenv does, CART-1813)
@@ -6517,7 +6535,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

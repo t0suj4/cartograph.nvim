@@ -103,8 +103,9 @@
 --   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name whose function argument is past CAP —
 --   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
 --   lists (CART-1803, CART-1813).
---   `debug-local`: a debug.setlocal / getlocal call by name — the solve flows the value into (out of) the locals of the
---   frame its level names (a literal 1: the calling function; else any function's); the IR has no frame op (CART-1804).
+--   debug.setlocal / getlocal by name are COPIES into (out of) the locals of the frame their level names — a literal 1:
+--   the calling function's; else every function's — as the solve flows them (CART-1804; the gap `debug-local` until
+--   CART-1956).
 -- * `labels` (CART-1801): which contract clauses each value's derivation rests on — flowlabels.lua, a fixpoint over this
 --   IR and solution (flowpath's probes/slice read forwards; seeds: its contracts_of table, plus globals-never-escape on a
 --   named _G cell and libraries-never-escape on a library load). `clauses` names the bits; `v` [var, mask], `h` [site,
@@ -291,6 +292,25 @@ function M.build(rec, X, sink)
             local u2 = ups_of(a[3])
             if not u2 then rec.gap(u.fn, 'debug-upvalue', a)
             else for _, x in ipairs(u1) do for _, y in ipairs(u2) do rec.ins(u.fn, { 'copy', x, y }); rec.ins(u.fn, { 'copy', y, x }) end end end
+        end
+    end
+    -- ★ FRAME CALLS AS COPIES (CART-1956): debug.setlocal / getlocal by name write / read the locals of the frame their
+    -- level names — the solve's frame_locals: a literal level 1 and no thread, the calling function's locals; else every
+    -- function's. The value (3rd argument, 4th with a thread: both, as the solve) is copied into each, and each into
+    -- getlocal's SECOND result (the first is the name). Sorted: frame_locals walks a table keyed by function id
+    for _, u in ipairs(X.LOCCALLS or {}) do
+        local a, r = u.args, u.res
+        if u.op == 'debug#setlocal' then
+            local qs = X.FRAMELOCALS(r, 3)
+            table.sort(qs)
+            for _, q in ipairs(qs) do
+                if a[3] then rec.ins(u.fn, { 'copy', q, a[3] }) end
+                if a[4] then rec.ins(u.fn, { 'copy', q, a[4] }) end
+            end
+        elseif u.op == 'debug#getlocal' and r[2] then
+            local qs = X.FRAMELOCALS(r, 2)
+            table.sort(qs)
+            for _, q in ipairs(qs) do rec.ins(u.fn, { 'copy', r[2], q }) end
         end
     end
     local out = {}
