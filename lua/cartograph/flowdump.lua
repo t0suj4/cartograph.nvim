@@ -19,7 +19,18 @@
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ],
---       vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--       upvalues = [var...], vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--       (UPVALUES, CART-1958: the variables the function CAPTURES from enclosing functions — an outer local it reads or
+--       writes, also through a function nested inside it (each function between the local's and the reader captures
+--       it), the walk's own scope lookup (fp.ups; what debug.setupvalue writes, CART-1803). Always present, `[]` when
+--       none: a file chunk, `init`, a synthetic function (a hooksecurefunc wrapper) capture nothing. A captured local is
+--       ONE variable for every function that names it — one cell per activation of the function that declares it, not
+--       of the reader. OWNERSHIP: a variable is F's own (fresh per activation) iff it occurs in F — params, self,
+--       vararg, body — in NO other function (init included), and is not in F.upvalues. ⚠ "occurs in F and is not an
+--       upvalue" is NOT enough: the solve shares variables PROGRAM-WIDE that several functions name without capturing
+--       them — a module's result (`mod:<file>`), the globals / library / type holders, the unknown-code channel, a
+--       cached global read — one cell, never per activation. Measured on the self tree (lua/, closed): 9,611 functions,
+--       20,025 upvalue entries, 23,666 such shared non-captured variables)
 --       (VARARGS, CART-1924: `vararg` names the slot — still params' last; `spread` each call / pcall / ret whose last
 --       operand spreads from that 1-based position into every parameter / result from there and the callee's vararg,
 --       tagged `vararg:spread`; `argtable` under ver 51 a vararg function that never names `...` — PUC 5.1's `arg`
@@ -450,13 +461,14 @@ function M.build(rec, X, sink)
     -- implicit `arg` table)
     local function emitfn(name, params, self, body, tags, va)
         va = va or {}
-        local extra = (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
+        local ups = vars(va.upvalues or {})
+        local extra = ',"upvalues":' .. jarr(ups) .. (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
             .. (va.spread and #va.spread > 0 and (',"spread":' .. jarr(va.spread)) or '')
             .. (va.argtable and ',"argtable":true' or '')
         fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s%s}'):format(FN(name), jarr(vars(params)),
             V(self), jarr(body), jarr(tags), extra)
         if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags,
-            vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
+            upvalues = ups, vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
     end
     local keys = {}
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
@@ -521,9 +533,11 @@ function M.build(rec, X, sink)
                 tags[#tags + 1] = { map[i - 1], 'vararg:spread' }
             end
         end
-        local va = { spread = spreads }
+        local va = { spread = spreads, upvalues = {} }
         if fp then
             for i, p in ipairs(fp.params) do params[i] = p end
+            for up in pairs(fp.ups or {}) do va.upvalues[#va.upvalues + 1] = up end -- (CART-1958: what it CAPTURES)
+            table.sort(va.upvalues)
             if fp.vararg then params[#params + 1] = fp.vararg; va.vararg = fp.vararg end
             body[#body + 1] = { 'ret', vars(fp.rets or { fp.ret }) }
             if fp.retspread then

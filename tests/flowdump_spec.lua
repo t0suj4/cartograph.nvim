@@ -1646,6 +1646,8 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
         { ['m.lua'] = CLASSES .. 'local t = {}\nt[UNKNOWN_K] = function (q) return use(q) end\nUNRESOLVED_FN(t)\n' },
         -- (the vararg markers — a slot, a spread call / pcall / ret, a 5.1 arg table: CART-1924)
         { ['m.lua'] = CLASSES .. 'local function va(x, ...) local p, q = ... return p, q end\nlocal function sp(...) return 1, va(...) end\nlocal function old(...) return arg end\nprint(va(a, b, b), sp(a), old(b), pcall(va, a))\n' },
+        -- (a closure capturing an outer local: upvalues, CART-1958)
+        { ['m.lua'] = CLASSES .. 'local function cap() return a end\nlocal function cap2() return function () return b end end\nprint(use(cap()), cap2())\n' },
         -- (a call into a host model: host_models)
         { ['m.lua'] = CLASSES .. 'debug.getregistry().obj = a\nprint(use(debug.getregistry().obj))\n',
           hostmodels = { test = 'local REG = {}\nreturn { ["debug#getregistry"] = function () return REG end }\n' } },
@@ -1664,6 +1666,7 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
                 solution = { v = s.v, top = s.top, h = s.h, hdyn = s.hdyn, htop = s.htop, taint = { ports = s.taint.ports, escaped = s.taint.escaped } },
                 contracts = { library_sites = c.library_sites, package_loaded_sites = c.package_loaded_sites, host_models = c.host_models, ext_channel = c.ext_channel, clauses = c.clauses } }
             for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags,
+                upvalues = f.upvalues, -- (what it captures, CART-1958)
                 vararg = f.vararg, spread = f.spread, argtable = f.argtable } end -- (the vararg markers, CART-1924)
             for i, x in ipairs(D.sites) do proj.sites[i] = { id = x.id, kind = x.kind, label = x.label, fn = x.fn, host = x.host } end
             same = vim.deep_equal(vim.json.decode(vim.json.encode(LD)), vim.json.decode(vim.json.encode(proj)))
@@ -2016,4 +2019,49 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
     D = solve('local t = {}\ndebug.setmetatable(t, { __index = {} })\nreturn t\n')
     eq(0, gaps(D), 'a table target: no gap')
     ok(D.contracts.clauses['function-no-metatable'], 'and the clause stands')
+end)
+
+-- (CART-1958, flowpath FLOW-0147: a captured local is ONE variable for every function naming it, and nothing said
+-- which of a function's variables it captures. Each function entry carries `upvalues`, present even when empty)
+test('flowdump: each function lists the variables it CAPTURES (upvalues), always present (CART-1958)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'local n',
+        'local function inc(v) local old = n; n = v; return old end',
+        'inc(A); local y = inc(B)',
+        'local function outer() local k = A; return function () return function () return k end end end',
+        'local function pure(p) local q = p; return q end',
+        'local function two() return B, A, n end',
+        'return y, outer, pure, two' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    -- (the key on EVERY function entry, in the text: an empty JSON array decodes like an absent key)
+    local nkeys = select(2, R.dump:gsub('"upvalues":%[', ''))
+    eq(#D.functions, nkeys, 'every function entry has the key')
+    local F = {}
+    for i, nm in ipairs(D.names.functions) do F[nm] = D.functions[i] end
+    for _, nm in ipairs({ 'chunk:m.lua', 'init', 'm.lua::pure@5' }) do
+        ok(F[nm] and #F[nm].upvalues == 0, nm .. ' captures nothing: ' .. vim.inspect(F[nm] and F[nm].upvalues))
+    end
+    local inc = F['m.lua::inc@2']
+    eq(1, #inc.upvalues, 'inc captures n alone')
+    local n = inc.upvalues[1]
+    ok(not vim.tbl_contains(inc.params, n), 'n is not inc\'s parameter')
+    local wrote = false
+    for _, ins in ipairs(inc.body) do if ins[1] == 'copy' and ins[2] == n and ins[3] == inc.params[1] then wrote = true end end
+    ok(wrote, 'and it is the variable `n = v` writes')
+    -- (each function between the local's and the reader captures it: outer's two nested functions both list k)
+    local mid, inner = F['m.lua::outer#ret@4'], F['m.lua::fn#ret@4']
+    ok(mid and inner and #mid.upvalues == 1 and mid.upvalues[1] == inner.upvalues[1], 'the middle and the innermost function capture k')
+    local outer = F['m.lua::outer@4']
+    ok(outer and #outer.upvalues == 1 and outer.upvalues[1] ~= mid.upvalues[1], 'outer captures A, not its own k')
+    -- (sorted, as every list in the dump: the dump is compared byte for byte)
+    local two = F['m.lua::two@6']
+    ok(two and #two.upvalues == 3, 'two captures A, B and n')
+    local sorted = vim.deepcopy(two.upvalues); table.sort(sorted)
+    eq(sorted, two.upvalues, 'in ascending order')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
