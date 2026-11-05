@@ -702,7 +702,9 @@ end
 --- Out: `visibility-undeclared` and `not-a-function` are about whether DELETION
 --- is licensed, not about whether a caller was missed — they ride as notes.
 local CALLER_BLOCKERS = { unparsed = true, ['refusal-shadow'] = true, escapes = true,
-    ['name-occurs-again'] = true, unreadable = true }
+    ['name-occurs-again'] = true, unreadable = true,
+    -- (a definition another file can name: the name in another file, or no index to look — CART-0673)
+    ['name-occurs-elsewhere'] = true, ['mention-index-absent'] = true }
 
 --- WHY A CALLER LIST IS EMPTY, as a named classifier rather than an inline
 --- branch — because `cone` asks the SAME question. A cone over `usedby` is empty
@@ -746,7 +748,11 @@ local function callers_empty(store, n)
         -- refusal record kept 8 of its candidates and the premise read only the
         -- 8. It now covers the elided tail, and SAYS it does — a reader who
         -- doubts this verdict knows exactly which of five things to go and test.
-        why = 'no ref edge in this graph targets this node, and every premise that could hide one held: the file parsed, the name occurs only at its own definition, it never reaches a value position, no refused call lists it among its candidates, and no refused call spelling this name kept fewer candidates than it saw',
+        -- (the occurrence clause names its SCOPE: it read the defining file, and every other file only where another
+        -- file can name the definition — CART-0673: "only at its own definition" had been read repo-wide)
+        why = n.exported == false
+            and 'no ref edge in this graph targets this node, and every premise that could hide one held: the file parsed, the name occurs in its file only at its own definition (no other file can name it: it is file-local), it never reaches a value position, no refused call lists it among its candidates, and no refused call spelling this name kept fewer candidates than it saw'
+            or 'no ref edge in this graph targets this node, and every premise that could hide one held: the file parsed, the name occurs only at its own definition in its file and in no other file, it never reaches a value position, no refused call lists it among its candidates, and no refused call spelling this name kept fewer candidates than it saw',
         evidence = NUL }, notes
 end
 

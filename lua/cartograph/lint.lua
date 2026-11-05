@@ -1841,6 +1841,34 @@ function M.alibi(store)
                     { lines = hits })
             end
         end
+        -- ★ AND IN THE OTHER FILES, where another file CAN reach it (CART-0673). The occurrence test above reads the
+        -- defining file only — the whole question for a file-local definition, none of it for one another file can name:
+        -- a member called on an untyped receiver, reflection, a framework. Style.getOptlckVersion occurs once in
+        -- Style.java and in 246 other files, and the verdict had said "the name occurs only at its own definition". A
+        -- file-local def (exported == false) skips this: no other file can name it. The scope confines it as the
+        -- resolver does (another WoW addon's mention reaches nothing here)
+        if n.exported ~= false then
+            local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
+            if tl and n.file then
+                if not (store.has_mention_index and store.has_mention_index()) then
+                    blocker('mention-index-absent', 'unavailable',
+                        'another file can name this definition and this graph has no identifier mention index, so whether one does cannot be read (the thin index skips the pass that builds it)',
+                        { capability = 'mention index' })
+                else
+                    local files = (store.scopes and store.scopes()) and store.mentioning_in(tl, n.file) or store.mentioning(tl)
+                    local others = {}
+                    for _, f in ipairs(files or {}) do if f ~= n.file then others[#others + 1] = f end end
+                    if #others > 0 then
+                        table.sort(others)
+                        local shown = {}
+                        for i = 1, math.min(10, #others) do shown[i] = others[i] end
+                        blocker('name-occurs-elsewhere', 'frontier',
+                            ('the name occurs in %d other file(s) and another file can name this definition — a reference the graph did not resolve (a member on an untyped receiver, reflection, a framework) may be among them'):format(#others),
+                            { files = shown, n_files = #others })
+                    end
+                end
+            end
+        end
         if n.exported == nil then
             blocker('visibility-undeclared', 'unavailable',
                 'this language declares no visibility rule (spec.exported_def), so "file-local" cannot be read from the source',

@@ -298,3 +298,47 @@ test('agent: an undeclared absence kind is an envelope bug, not a new kind', fun
     eq('unprobed', env.warrant)
     eq('nothing', tiers.licenses(env.warrant))
 end)
+
+-- (CART-0673: the occurrence premise read the DEFINING FILE only, and the absent verdict said "the name occurs only at its
+-- own definition" — Style.getOptlckVersion occurred once in Style.java and in 246 other files. A definition another file
+-- can name now checks the other files: the name there is a frontier; a file-local one is decided by its file, and the
+-- wording says which scope it read)
+test('agentq: a definition another file can name is not absent while another file mentions it; a file-local one is (CART-0673)', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    w('a.lua', 'local M = {}\nfunction M.helper() return 1 end\nfunction M.quiet() return 3 end\nlocal function lone() return 2 end\nreturn M\n')
+    -- (b names `helper` without a resolvable call: a member of an untyped value — and `lone`, its own local of that
+    -- name, which cannot be a's file-local lone)
+    w('b.lua', 'local cfg = ...\nlocal x = cfg.helper\nlocal lone = 4\nreturn x, lone\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local agent = require 'cartograph.agent'
+    local function callers(name)
+        for _, n in ipairs(store.data.nodes) do
+            if n.name == name and n.file == 'a.lua' then return agent.answer(store, 'edges_callers', { node = n.id }), n end
+        end
+    end
+    local h = callers('M.helper')
+    eq('frontier', h.absence, 'helper: b.lua mentions it — ' .. vim.inspect(h.absence_why))
+    eq('name-occurs-elsewhere', h.absence_why.premise)
+    eq(1, h.absence_why.evidence.n_files)
+    eq({ 'b.lua' }, h.absence_why.evidence.files)
+    local q = callers('M.quiet')
+    eq('absent', q.absence, 'quiet: no file but its own names it')
+    ok(q.absence_why.why:find('in no other file', 1, true), 'and the clause says it read the other files: ' .. q.absence_why.why)
+    local l, ln = callers('lone')
+    -- (no mention index — the thin index: a definition another file can name cannot be cleared, a file-local one can)
+    local hmi = store.has_mention_index
+    store.has_mention_index = function () return false end
+    local qt = callers('M.quiet')
+    local lt = callers('lone')
+    store.has_mention_index = hmi
+    eq('unavailable', qt.absence, 'quiet without an index: unavailable, not absent')
+    eq('mention-index-absent', qt.absence_why.premise)
+    eq('absent', lt.absence, 'a file-local def needs no index')
+    eq(false, ln.exported, 'the fixture\'s local function is file-local')
+    eq('absent', l.absence, 'a file-local def is decided by its own file')
+    ok(l.absence_why.why:find('file-local', 1, true), 'and says why the other files were not read')
+    vim.fn.delete(root, 'rf')
+end)
