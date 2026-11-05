@@ -227,6 +227,13 @@ ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
   `peak` (strongest). **The same field name means opposite things across surfaces**,
   which is why it is published. `peak` answers "is there any support"; `floor`
   answers "how good is the worst of these".
+- `prov` (on each `edges_callers` / `edges_callees` row) — WHICH RESOLVER landed the
+  edge, a sorted list over its call sites: `base` (the name lookup), `super`,
+  `typed_receiver`, `alias` … or `not-a-call` (a reference, no call record). Not a
+  strength claim — the tier is that. Two rows of one tier with different `prov` are
+  different mechanisms: `inferred` + `super` is the chain working, `inferred` +
+  `base` beside a refused sibling is a name match the chain could not decide
+  (CART-0683).
 - `notes` — disclosures that are not refusals. `ref-caveat` (a ref resolved with
   drift), `headline-scope`, `tier-order-disputed`, `staged`.
 - Addressing: every verb taking an `id` also takes a durable `ref`

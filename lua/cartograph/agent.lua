@@ -836,6 +836,39 @@ local function callees_empty(n, refused, external, unresolved, self_calls)
         evidence = NUL }
 end
 
+--- ★ WHICH RESOLVER LANDED AN EDGE (CART-0683): the `prov` of the call records behind a ref edge — `base` (the
+--- exact / name-match lookup), `super`, `typed_receiver`, `alias` … (treesitter.lua RESOLVE_PASSES' names). The tier
+--- stays the headline; prov is the MECHANISM behind it, an observation about which resolver ran, not a strength claim.
+--- `inferred` covered both "matched by name" and "matched by name BECAUSE THE SUPER CHAIN WAS UNAVAILABLE" — a working
+--- analyzer and a bug — and the generic-supertype defect (31% of extends, 38% of implements) was invisible in every
+--- edges_callers answer until prov=super against refused=ambiguous named it. A row's edge may merge several call
+--- sites, so prov is the SORTED SET of their provenances; `not-a-call` when no call record lies behind the edge (a
+--- mention). Memoized ON THE STORE OBJECT per generation and data table — never a module-level cache (CART-0823)
+local function edge_provs(store, from, to)
+    local data, gen = store.data or {}, store.generation or 0
+    local c = store._edge_prov
+    if not (c and c.gen == gen and c.data == data) then
+        local idx = {}
+        local cv = require('cartograph.callview').of(data)
+        for i = 1, cv.n do
+            local t, f = cv.get(i, 'to'), cv.get(i, 'fn')
+            if t and f then
+                local k = f .. '\31' .. t
+                local set = idx[k]; if not set then set = {}; idx[k] = set end
+                set[cv.get(i, 'prov') or 'unstamped'] = true
+            end
+        end
+        c = { gen = gen, data = data, idx = idx }
+        store._edge_prov = c
+    end
+    local set = c.idx[from .. '\31' .. to]
+    if not set then return { 'not-a-call' } end
+    local l = {}
+    for p in pairs(set) do l[#l + 1] = p end
+    table.sort(l)
+    return l
+end
+
 local function v_edges_callers(store, args)
     local n, bad, refnote = subject_node(store, args)
     if not n then return bad end
@@ -846,7 +879,7 @@ local function v_edges_callers(store, args)
         -- a ref edge's tier IS its resolution tier: read it, never re-derive
         local t = band:tier(from, n.id) or 'matched'
         ts[#ts + 1] = t
-        rows[#rows + 1] = noderow(store, from, { tier = t,
+        rows[#rows + 1] = noderow(store, from, { tier = t, prov = edge_provs(store, from, n.id),
             sites = #(store.occurrences(from, n.id) or {}) })
     end
     if #rows > 0 then
@@ -870,7 +903,7 @@ local function v_edges_callees(store, args)
     for _, to in ipairs(band:callees(n.id)) do
         local t = band:tier(n.id, to) or 'matched'
         ts[#ts + 1] = t
-        rows[#rows + 1] = noderow(store, to, { tier = t,
+        rows[#rows + 1] = noderow(store, to, { tier = t, prov = edge_provs(store, n.id, to),
             sites = #(store.occurrences(n.id, to) or {}) })
     end
     local refused, external, unresolved, notes, self_calls = callee_sites(band, n.id)
@@ -3846,7 +3879,7 @@ M.VERBS = {
         run = v_node_at,
     },
     edges_callers = {
-        summary = 'who calls this — each row with its own resolution tier',
+        summary = 'who calls this — each row with its own resolution tier and `prov`, the resolvers that landed its edge (base, super, typed_receiver, … ; not-a-call for a reference)',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },
@@ -3854,7 +3887,7 @@ M.VERBS = {
         run = v_edges_callers,
     },
     edges_callees = {
-        summary = 'what this calls — each row with its own resolution tier; refused and external sites ride as notes',
+        summary = 'what this calls — each row with its own resolution tier and `prov` (which resolvers landed the edge); refused and external sites ride as notes',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },

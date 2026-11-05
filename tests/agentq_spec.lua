@@ -342,3 +342,46 @@ test('agentq: a definition another file can name is not absent while another fil
     ok(l.absence_why.why:find('file-local', 1, true), 'and says why the other files were not read')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-0683: a caller / callee row carries `prov` — WHICH resolver landed its edge — beside its tier. Two rows of the
+-- same tier `inferred`, one landed by the base name lookup and one by the super chain, were indistinguishable: a
+-- working analyzer and a bug looked the same in every edges_callers answer)
+test('agentq: caller and callee rows carry prov — the resolver behind the edge, beside its tier (CART-0683)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, t)
+        vim.fn.mkdir(vim.fs.dirname(root .. '/' .. rel), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    local J = 'src/main/java/'
+    w(J .. 'p/b/Base.java', 'package p.b;\npublic class Base { public void reg(int x) {} public void solo(int x) {} }\n')
+    w(J .. 'p/q/Other.java', 'package p.q;\npublic class Other { public void reg(int x) {} }\n')
+    w(J .. 'p/a/Sub.java', 'package p.a;\nimport p.b.Base;\npublic class Sub extends Base { void g() { reg(1); } void h() { solo(2); } }\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    vim.fn.delete(root, 'rf')
+    local agent = require 'cartograph.agent'
+    local id = {}
+    for _, n in ipairs(store.data.nodes) do id[n.name] = n.id end
+    local function row(verb, subj, other)
+        for _, r in ipairs(agent.answer(store, verb, { node = id[subj] }).result) do if r.name == other then return r end end
+    end
+    local viasuper, viabase = row('edges_callers', 'Base::reg', 'Sub::g'), row('edges_callers', 'Base::solo', 'Sub::h')
+    ok(viasuper and viabase, 'both caller rows')
+    eq(viasuper.tier, viabase.tier, 'the same tier — which is why the tier alone could not tell them apart')
+    eq({ 'super' }, viasuper.prov, 'reg: ambiguous by name (Other.reg), landed by the super chain')
+    eq({ 'base' }, viabase.prov, 'solo: unique by name, landed by the base lookup')
+    eq({ 'super' }, row('edges_callees', 'Sub::g', 'Base::reg').prov, 'and on the callee side')
+    -- (a ref edge no call record lies behind — a function REFERENCE — says so, never an empty list)
+    local root2 = vim.fn.tempname(); vim.fn.mkdir(root2, 'p')
+    local fd = assert(io.open(root2 .. '/m.lua', 'w'))
+    fd:write('local M = {}\nlocal function helper() return 1 end\nfunction M.user() local cb = helper; return cb end\nfunction M.caller() return helper() end\nreturn M\n')
+    fd:close()
+    local d2 = ts.extract(root2); d2.root = root2
+    store.ingest(d2)
+    vim.fn.delete(root2, 'rf')
+    id = {}
+    for _, n in ipairs(store.data.nodes) do id[n.name] = n.id end
+    eq({ 'not-a-call' }, row('edges_callers', 'helper', 'M.user').prov, 'a reference, not a call')
+    eq({ 'base' }, row('edges_callers', 'helper', 'M.caller').prov, 'the call beside it')
+end)
