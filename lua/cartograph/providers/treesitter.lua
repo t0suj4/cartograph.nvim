@@ -6503,6 +6503,33 @@ local function reduce_mentions(file, buf, L)
         local best = at_line(line, col)
         return best and best.id
     end
+    -- does a function CONTAINING (line, col) bind `name` itself (fnRanges[].b, CART-0629)? Not when the target IS one
+    -- of that function's bindings of the name: the target itself, or a plain function def written INSIDE it, which
+    -- rebinds the local (`def f(wraps=None): if wraps is None: def wraps(): …; Mock(wraps=wraps)` — the mention may be
+    -- that def; an object-literal method `locked: function` binds no local, so it does not count). The index
+    -- name -> binding ranges is built on first use.
+    local bindIdx
+    local function binds_name(name, line, col, target)
+        if not bindIdx then
+            bindIdx = {}
+            for _, r in ipairs(ranges) do
+                for _, nm in ipairs(r.b or {}) do
+                    local l = bindIdx[nm]
+                    if not l then l = {}; bindIdx[nm] = l end
+                    l[#l + 1] = r
+                end
+            end
+        end
+        for _, r in ipairs(bindIdx[name] or {}) do
+            local rebound = target.rebinds and target.file == file and target.line >= r.s and target.line <= r.e
+            if r.id ~= target.id and not rebound
+                and (line > r.s or (line == r.s and (r.sc or 0) <= col))
+                and (line < r.e or (line == r.e and (r.ec == nil or col < r.ec))) then
+                return true
+            end
+        end
+        return false
+    end
     local useEdge, regEdge = {}, {}
     local wmode = buf.wmode
     local gpmap
@@ -6600,6 +6627,12 @@ local function reduce_mentions(file, buf, L)
             -- (a same-file def NESTED in another function is that function's: a mention outside it names no such fn —
             -- `pcall(require, m)` had reached another function's `local require = function () end`, CART-1562)
             if u and u.file == file and not M._visible_from(u.id, ranges, sr, sc) then u = nil end
+            -- ★ A NAME A FUNCTION BINDS ITSELF IS THAT BINDING (CART-0629). A mention inside a function whose params or
+            -- own locals name it — that function, or any enclosing one — is the binding, never a top-level function of
+            -- the name: `def same(dir): return len(dir)` had linked `same -> dir` at the parameter and at `len(dir)`.
+            -- The lexical guard above fences only CROSS-file and only where a spec declares scopes; this needs neither,
+            -- because the binder lists ride the ranges (fnRanges[].b). Absence beats a fabricated target.
+            if u and binds_name(name, sr, sc, u) then u = nil end
             if u and not (u.file == file and sr == u.line) then
                 local from = fn_at(sr, sc)
                 local at = { start = { line = sr, char = sc },
@@ -6933,7 +6966,7 @@ function M.lookups(nodes, root, narrow, edges)
         elseif (n.kind == 'function' or n.kind == 'method')
             and not n.decl and count[n.name] == 1 then
             fn_unique[n.name] = { id = n.id, file = n.file,
-                line = atr.sl(n.range) }
+                line = atr.sl(n.range), rebinds = (n.kind == 'function' and not n.cbarg) or nil } -- (CART-0629)
         elseif n.kind == 'var' and not n.sql and not n.ctype then
             -- interface types/macros (ctype) are browse-only, not use targets
             var_named[n.name] = var_named[n.name] or {}
@@ -8082,8 +8115,19 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- closure on the call's own line, so every such registration was
                 -- attributed to its own argument — 7 self-loops on
                 -- bravest-new-world the moment lua closures became nodes.
+                -- (b: the names this function BINDS itself — its params and its own locals — so the mention pass never
+                -- links a mention of one of them to a top-level function of that name, CART-0629; it travels with the
+                -- range to parallel workers, so both paths decide alike)
+                local fnode = nodes[#nodes]
+                local binds
+                if fnode and fnode.id == id and (fnode.params or fnode.locals) then
+                    binds = {}
+                    for _, p in ipairs(fnode.params or {}) do if type(p) == 'string' then binds[#binds + 1] = p end end
+                    for _, l in ipairs(fnode.locals or {}) do if type(l) == 'string' then binds[#binds + 1] = l end end
+                    if #binds == 0 then binds = nil end
+                end
                 table.insert(fnRanges[file], { s = sp.start.line, sc = sp.start.char, ec = sp['end'].char, -- (ec: CART-1590)
-                    e = sp['end'].line, id = id })
+                    e = sp['end'].line, id = id, b = binds })
                 if not torn and not aname then
                     exact[name] = exact[name] or {}
                     table.insert(exact[name], nodes[#nodes])
@@ -10422,7 +10466,9 @@ local MATCH_OPTS = { match_limit = 65536 }
         for name, fns in pairs(exact) do
             if #fns == 1 then
                 fn_unique[name] = { id = fns[1].id, file = fns[1].file,
-                    line = atr.sl(fns[1].range), node = fns[1] }
+                    line = atr.sl(fns[1].range), node = fns[1],
+                    -- (a plain function def — not a field / method value — BINDS its name where it is written, CART-0629)
+                    rebinds = (fns[1].kind == 'function' and not fns[1].cbarg) or nil }
             end
         end
         local var_named = {}
