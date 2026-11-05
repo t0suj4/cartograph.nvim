@@ -143,6 +143,36 @@ test('federation over the WIRE: a host that dies is UNAVAILABLE — a band-level
     ok(never.unavailable and never.unavailable:find('did not start', 1, true), tostring(never.unavailable))
 end)
 
+test('federation: a PORT row carries the 1-based SOURCE line, and remote_band turns it back into the call record\'s', function ()
+    if not ready() then skip 'no javascript parser' end
+    local root = tree()
+    local fed = ts.extract(root, { profile = 'node', profile_mint = false })
+    local st = require 'cartograph.store'
+    st.ingest(vim.deepcopy(fed))
+    local answer = require('cartograph.agent').answer(st, 'ports', {})
+    -- the source line of each port, read off SRC itself: the agent surface is 1-based like every other verb (CART-1954)
+    local lines = vim.split(SRC, '\n', { plain = true })
+    local seen = 0
+    for _, r in ipairs(answer.result) do
+        if r.callee == 'setTimeout' then
+            seen = seen + 1
+            ok(lines[r.line] and lines[r.line]:find('setTimeout', 1, true), ('line %s is not the call\'s line'):format(tostring(r.line)))
+        end
+    end
+    eq(1, seen, 'the fixture\'s setTimeout port was answered')
+    -- the same answer through remote_band (an in-process client): its calls are call records again, line for line
+    local remote = F.remote_band { client = { call = function () return vim.deepcopy(answer) end }, root = root }
+    eq(nil, remote.unavailable, tostring(remote.unavailable))
+    local function sites(calls)
+        local out = {}
+        for _, c in ipairs(calls) do if c.ext and not c.to then out[#out + 1] = ('%s %s:%s'):format(c.full, c.fn, tostring(c.line)) end end
+        table.sort(out); return out
+    end
+    local want = sites(fed.calls)
+    ok(#want >= 5, 'a non-vacuous oracle')
+    eq(want, sites(remote.calls), 'the remote band\'s call lines equal the local extraction\'s')
+end)
+
 -- ── 9c: PEER PROJECTS — an engine band EXPORTS its registrations, a mods band's unresolved calls are its PORTS ───────
 test('federation 9c: a C++ engine band\'s API_FCT registrations link a Lua band\'s calls — equal to the MERGED graph\'s xlang edges', function ()
     local function has(l) return pcall(vim.treesitter.get_string_parser, '', l) end

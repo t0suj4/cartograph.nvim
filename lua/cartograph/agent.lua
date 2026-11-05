@@ -2542,9 +2542,12 @@ function M._v_ports(store)
     local rows = {}
     for i = 1, cv.n do
         if not cv.get(i, 'to') and type(cv.get(i, 'ext')) == 'table' then
-            local e = cv.get(i, 'ext')
+            local e, line = cv.get(i, 'ext'), cv.get(i, 'line')
+            -- the call record's line is 0-based; the agent surface is 1-based like every other verb (CART-1954) —
+            -- federation.remote_band turns it back into a call record
             rows[#rows + 1] = { fn = nn(cv.get(i, 'fn')), callee = nn(cv.get(i, 'callee')), full = nn(cv.get(i, 'full')),
-                ext = { why = nn(e.why), inferred = nn(e.inferred) }, line = nn(cv.get(i, 'line')), file = nn(cv.get(i, 'file')) }
+                ext = { why = nn(e.why), inferred = nn(e.inferred) }, line = type(line) == 'number' and line + 1 or nn(line),
+                file = nn(cv.get(i, 'file')) }
         end
     end
     local keys = {}
@@ -4151,7 +4154,7 @@ M.VERBS = {
         run = v_txn_plan_transplant,
     },
     ports = {
-        summary = 'this graph\'s PORTS: every call its band honestly left unresolved that a profile DISPOSED (callee, full, the disposition, the enclosing fn, line), plus the band identity (root, profile, a stamp of its file stamps). A client mounts this host as a band and derives the cross-band linkage itself; only ports cross the wire, never bodies',
+        summary = 'this graph\'s PORTS: every call its band honestly left unresolved that a profile DISPOSED (callee, full, the disposition, the enclosing fn, the 1-based line), plus the band identity (root, profile, a stamp of its file stamps). A client mounts this host as a band and derives the cross-band linkage itself; only ports cross the wire, never bodies',
         subject = 'graph',
         tier_basis = 'observation',
         absences = { 'absent' },

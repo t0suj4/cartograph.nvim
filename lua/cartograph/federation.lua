@@ -70,7 +70,11 @@ function M.remote_band(spec)
     res = denull(res)
     local subject = res.subject or {}
     local calls = {}
-    for _, r in ipairs(res.result or {}) do calls[#calls + 1] = r end
+    -- a port row's line is the agent surface's 1-based line; a call record's is 0-based (CART-1954)
+    for _, r in ipairs(res.result or {}) do
+        if type(r.line) == 'number' then r.line = r.line - 1 end
+        calls[#calls + 1] = r
+    end
     return { root = subject.root or spec.root or '?', nodes = {}, edges = {}, calls = calls, band_kind = 'remote',
         profile = subject.profile, remote = { stamp = subject.stamp, minted = subject.minted, absence = res.absence } }
 end
