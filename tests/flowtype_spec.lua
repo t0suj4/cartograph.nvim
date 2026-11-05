@@ -2115,29 +2115,31 @@ end)
 -- a setmetatable target that may hold a function links its __index to the tables only; debug.setmetatable may set one)
 test('flowtype: a setmetatable target holding a function gives the function no prototype; debug.setmetatable does (CART-1838)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
-    local root = tree({
-        ['a.lua'] = table.concat({
-            'local idx = { m = function () return 1 end }',
-            'local mt = { __index = idx }',
-            'local function set(x) setmetatable(x, mt) end',
-            'local t = {}',
-            'local function f() end',
-            'set(t)',
-            'set(f)',
-            'local function g() end',
-            'debug.setmetatable(g, mt)',
-            'return t, f, g' }, '\n') .. '\n',
-    })
-    store.ingest(ts.extract(root))
-    local R = flowtype.solve(store, { open = false, ctx = false, exp = 'expose' })
-    local I = R.internals
-    local function obj(pat) for o, n in pairs(I.obinfo) do if tostring(n):find(pat) then return o end end end
-    local idx, t, f, g = obj('^tbl:a.lua:0:'), obj('^tbl:a.lua:3:'), obj('::f@4$'), obj('::g@7$')
-    vim.fn.delete(root, 'rf')
-    ok(idx and t and f and g, 'objects found')
+    -- (two trees: debug.setmetatable on a function sets the metatable of EVERY function, CART-1957 — in one tree it
+    -- would give f the prototype too, which is Lua's semantics)
+    local function solve(lines)
+        local root = tree({ ['a.lua'] = table.concat(lines, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, ctx = false, exp = 'expose' })
+        vim.fn.delete(root, 'rf')
+        local I = R.internals
+        local function obj(pat) for o, n in pairs(I.obinfo) do if tostring(n):find(pat) then return o end end end
+        return I, obj
+    end
+    local HEAD = { 'local idx = { m = function () return 1 end }', 'local mt = { __index = idx }',
+        'local function set(x) setmetatable(x, mt) end', 'local t = {}', 'local function f() end', 'set(t)', 'set(f)' }
+    local plain = vim.list_extend(vim.deepcopy(HEAD), { 'return t, f' })
+    local I, obj = solve(plain)
+    local idx, t, f = obj('^tbl:a.lua:0:'), obj('^tbl:a.lua:3:'), obj('::f@4$')
+    ok(idx and t and f, 'objects found')
     ok(I.protos[t] and I.protos[t][idx], 'the table takes __index')
     ok(not (I.protos[f] and I.protos[f][idx]), 'the function set reached does not')
-    ok(I.protos[g] and I.protos[g][idx], 'debug.setmetatable\'s function does')
+    local dbg = vim.list_extend(vim.deepcopy(HEAD), { 'local function g() end', 'debug.setmetatable(g, mt)', 'return t, f, g' })
+    I, obj = solve(dbg)
+    idx, f = obj('^tbl:a.lua:0:'), obj('::f@4$')
+    local g = obj('::g@7$')
+    ok(g and I.protos[g] and I.protos[g][idx], 'debug.setmetatable\'s function does')
+    ok(I.protos[f] and I.protos[f][idx], 'and so does every other function: the type\'s metatable (CART-1957)')
 end)
 
 -- (CART-1838 (experiment no-getfenv0: the plain union): getfenv(0) is the thread's environment — not every environment a setfenv set. MySales

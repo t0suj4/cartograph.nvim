@@ -1101,11 +1101,13 @@ local function build(store, opts)
             stores[x] = i
         end
         -- (a FUNCTION has no metatable of its own — setmetatable raises on one — so `\1mt` never lands on it: a generic
-        -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710)
+        -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710. Except through
+        -- a port debug.setmetatable marked (G7.DBGMT): the function TYPE's metatable, CART-1957 — a call of such a
+        -- function then also runs __call, which Lua does not: an over-approximation, only on such a tree)
         -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761)
         for o in each(x) do
             local tn = TNAME[o]
-            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt') and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
+            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt' and not G7.DBGMT[x]) and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
         end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
@@ -1612,6 +1614,7 @@ local function build(store, opts)
             if a[1] then G7.DBGMT[a[1]] = true end
             M0['setmetatable'](a, rl)
             if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
+            if a[1] and a[2] then G7.FNMTPEND[#G7.FNMTPEND + 1] = { a[1], a[2] } end -- (on a FUNCTION: every function's, CART-1957)
         end
         M0['debug#getmetatable'] = function (a, rl)
             if not a[1] then return end
@@ -2161,6 +2164,8 @@ local function build(store, opts)
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
+    G7.FNMTPEND = {} -- (debug.setmetatable targets and their metatables: the function TYPE's metatable, CART-1957)
+    G7.TYPEMTCALLS = {} -- (debug.setmetatable calls by name, for the dump's debug-typemeta gap: CART-1957)
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.ANYFRAME = {} -- ({ port, true: a setlocal value into every local | false: a getlocal result out of it }, CART-1956)
     G7.LIBSITES, G7.PKGL = {}, {}
@@ -3551,6 +3556,8 @@ local function build(store, opts)
                     elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
                     -- (debug.setfenv by NAME ran nothing: it sets f's environment as setfenv does, CART-1813)
+                    -- (debug.setmetatable by name: the dump names a target that is no table / string — CART-1957)
+                    if g0 and k0 == 'debug#setmetatable' and G7.REC then G7.TYPEMTCALLS[#G7.TYPEMTCALLS + 1] = { fn = G7.cur(), args = aps } end
                     if g0 and k0 == 'debug#setfenv' and aps[1] and aps[2] then
                         edge(aps[2], G7.FENVP)
                         G7.FENV[#G7.FENV + 1] = { port = aps[1], env = aps[2] }
@@ -4491,6 +4498,34 @@ local function build(store, opts)
         end
         G7.STRPEND = {}
         if grew then solve() end
+    end
+    -- ★ A FUNCTION'S METATABLE IS ITS TYPE'S (CART-1957, flowpath FLOW-0049): debug.setmetatable(f, mt) on a function sets
+    -- the metatable of EVERY function — one per type, as for strings. The setmeta above wrote f's own closure only, so
+    -- `h.foo` on another function read nothing: a whole answer of nothing, certified under function-no-metatable. Where
+    -- the target may hold a function (or is past CAP), every function object gets mt's __index as a prototype, once the
+    -- receivers are final, and mt in its slot (an operator on a function, its __add …, is not followed); the dump
+    -- withholds the clause
+    -- (G7.FNMT). A number /
+    -- boolean / nil target has no object here: the dump's gap debug-typemeta names it (CART-1957)
+    if #G7.FNMTPEND > 0 then
+        local fos
+        for _, q in ipairs(G7.FNMTPEND) do
+            local y, hit = q[1], top[q[1]] or false
+            if not hit then for o in each(y) do if fnports[o] then hit = true; break end end end
+            if hit then
+                G7.FNMT = true
+                if not fos then fos = {}; for o in pairs(fnports) do fos[#fos + 1] = o end; table.sort(fos) end
+                local idx = field(q[2], '__index')
+                -- (each port marked as debug.setmetatable's: a Lua link to a function is made only there, CART-1838; and
+                -- mt in the function's slot — what the core's setmeta writes, the dump's closedness — though a `\1mt` LOAD
+                -- on a function still reads nothing, CART-1754)
+                for _, o in ipairs(fos) do
+                    local sp = new(); G7.DBGMT[sp] = true; addobj(sp, o); proto(sp, idx, true); storec(sp, '\1mt', q[2])
+                end
+            end
+        end
+        G7.FNMTPEND = {}
+        if G7.FNMT then solve() end
     end
     -- ★ FINALIZERS, DEFERRED (CART-1707): each setmetatable's `\1mt.__gc` load was 29 M of w2's 39 M load visits
     -- (solve 41 -> 76 s) for a handler no WoW addon defines. A finalizer exists only where a metatable — read after the
@@ -6535,7 +6570,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

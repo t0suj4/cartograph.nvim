@@ -1966,3 +1966,54 @@ test('flowdump: debug.setlocal / getlocal are copies over the named frame\'s loc
     ok(get2 and Q and vim.tbl_contains(V[get2.res] or {}, Q), 'getlocal(2) reads late\'s q')
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- (CART-1957, from CART-1949 / flowpath FLOW-0049: debug.setmetatable on a value that is no table sets its TYPE's
+-- metatable. On a function: every function reads through its __index — `h.foo` on another function had read nothing, a
+-- whole answer certified under function-no-metatable. The dump names the call (gap debug-typemeta) and withholds the
+-- clause; a number target holds no object: the gap alone)
+test('flowdump: debug.setmetatable on a function is every function\'s; a scalar target is a named gap (CART-1957)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function solve(src)
+        local root = tree({ ['m.lua'] = src })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        return vim.json.decode(R.dump), R
+    end
+    local function gaps(D) local n = 0; for _, gp in ipairs(D.gaps) do if gp.kind == 'debug-typemeta' then n = n + 1 end end; return n end
+    local function foo_targets(D) -- (what the dump's `load _ h foo` holds, by site label)
+        local lab, V, fid = {}, {}, nil
+        for _, st in ipairs(D.sites) do lab[st.id] = st.label end
+        for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+        for i, nm in ipairs(D.names.fields) do if nm == 'foo' then fid = i - 1 end end
+        local out = {}
+        for _, fn in ipairs(D.functions) do
+            for _, ins in ipairs(fn.body) do
+                if ins[1] == 'load' and ins[4] == fid then for _, o in ipairs(V[ins[2]] or {}) do out[#out + 1] = lab[o] end end
+            end
+        end
+        return out
+    end
+    local FN = 'local function g() return {} end\n%s\nlocal h = function () end\nlocal r = h.foo()\nreturn r\n'
+    for _, form in ipairs({ 'debug.setmetatable(function () end, { __index = { foo = g } })',
+            'local dsm = debug.setmetatable\ndsm(function () end, { __index = { foo = g } })' }) do
+        local D = solve(FN:format(form))
+        ok(not D.contracts.clauses['function-no-metatable'], form .. ': the clause is withheld')
+        local t = foo_targets(D)
+        ok(#t == 1 and tostring(t[1]):find('::g@0', 1, true), form .. ': h.foo is g: ' .. vim.inspect(t))
+        eq(0, flowcheck.check(D).failed, form .. ': closed')
+        -- (and EVERY function holds mt in its slot, not only the target: h's closure)
+        local hs
+        for _, st in ipairs(D.sites) do if st.label:find('^m%.lua::h@') then hs = st.id end end
+        local slot = {}
+        for _, e in ipairs(D.solution.h) do if e[1] == hs and e[2] == 100 then slot = e[3] end end
+        ok(hs and #slot >= 1, form .. ': h\'s closure has the metatable in its slot: ' .. vim.inspect({ hs, slot }))
+        if form:find('^debug') then eq(1, gaps(D), 'by name: the call is a named gap') end
+    end
+    local D = solve('debug.setmetatable(0, { __index = {} })\nlocal y = (5).foo\nreturn y\n')
+    eq(1, gaps(D), 'a number target: the gap')
+    ok(D.contracts.clauses['function-no-metatable'], 'no function target: the clause stands')
+    D = solve('local t = {}\ndebug.setmetatable(t, { __index = {} })\nreturn t\n')
+    eq(0, gaps(D), 'a table target: no gap')
+    ok(D.contracts.clauses['function-no-metatable'], 'and the clause stands')
+end)

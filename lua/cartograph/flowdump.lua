@@ -103,6 +103,9 @@
 --   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name whose function argument is past CAP —
 --   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
 --   lists (CART-1803, CART-1813).
+--   `debug-typemeta`: a debug.setmetatable call by name whose target is no table or string — a function (the solve links
+--   every function to the metatable's __index: no IR op says "every value of a type"), a number / boolean / nil (no
+--   object: the solve reads nothing through it), or past CAP (CART-1957).
 --   debug.setlocal / getlocal by name are COPIES into (out of) the locals of the frame their level names — a literal 1:
 --   the calling function's; else every function's — as the solve flows them (CART-1804; the gap `debug-local` until
 --   CART-1956).
@@ -293,6 +296,21 @@ function M.build(rec, X, sink)
             if not u2 then rec.gap(u.fn, 'debug-upvalue', a)
             else for _, x in ipairs(u1) do for _, y in ipairs(u2) do rec.ins(u.fn, { 'copy', x, y }); rec.ins(u.fn, { 'copy', y, x }) end end end
         end
+    end
+    -- ★ A TYPE'S METATABLE (CART-1957): debug.setmetatable(v, mt) on a value that is no table sets the metatable of its
+    -- whole TYPE. On a string the solve applies it to the string library; on a function to every function (prototype
+    -- links the IR's one `setmeta` does not carry); a number / boolean / nil holds no object, and nothing reads through
+    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds nothing (a scalar or nil
+    -- literal) or holds a function — the IR cannot say "every value of this type"
+    for _, u in ipairs(X.TYPEMTCALLS or {}) do
+        local t = u.args[1]
+        local gap = not t or (X.top and X.top[t]) or false
+        if not gap then
+            local any = false
+            for o in X.each(t) do any = true; if X.fnports[o] then gap = true; break end end
+            if not any then gap = true end
+        end
+        if gap then rec.gap(u.fn, 'debug-typemeta', u.args) end
     end
     -- ★ FRAME CALLS AS COPIES (CART-1956): debug.setlocal / getlocal by name write / read the locals of the frame their
     -- level names — the solve's frame_locals: a literal level 1 and no thread, the calling function's locals; else every
@@ -1016,6 +1034,7 @@ function M.build(rec, X, sink)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
                     and not (k == 'loader-args' and #(X.CHUNKINIT or {}) == 0)
                     and not (k == 'host-handlers' and (X.HANDLERCALLS or 0) == 0)
+                    and not (k == 'function-no-metatable' and X.FNMT)
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end
             end
             table.sort(ks)
