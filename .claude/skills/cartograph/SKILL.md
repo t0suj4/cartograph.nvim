@@ -42,6 +42,15 @@ own tree: of 266 dead-code findings, **7 were `absent` and 229 were `refused`** 
 the 7 licensed a deletion. A tool that returned `[]` for all 266 would have been
 wrong 97% of the time, and silently.
 
+⚠ That split belongs to its population (lint's dead-code findings, which consult
+alibis, on our own Lua tree: no DI, ORM, reflection or XML wiring). **`absent` from
+`edges_callers` is not a deletion licence on a framework-wired repo** — Spring beans,
+JPA entities, reflection, XML-wired handlers are called with no caller edge. Before
+deleting on such a repo, read the answer's `notes` (`alive-otherwise`) and treat a
+public member as live unless something stronger than "no caller edge" says otherwise.
+A definition another file can name is a `frontier` (`name-occurs-elsewhere`) while
+another file mentions its name (CART-0673, CART-0681).
+
 **Never collapse these into "no results".** If you report an absence to a user,
 report which one.
 

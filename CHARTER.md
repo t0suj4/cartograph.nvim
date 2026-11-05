@@ -152,6 +152,20 @@ licensed a deletion. A tool returning a bare `[]` for all 266 would have been
 wrong 97% of the time, silently. This is the single most load-bearing rule in
 the project.
 
+That split is a property of its POPULATION, not of the mechanism: lint's
+dead-code findings (which consult the alibi list) on cartograph's own Lua tree
+(no DI container, no ORM, no reflection, no XML wiring), at the time it was
+measured. Re-measured 2026-11-05 with the same oracle: our `lua/` now yields 12
+findings, 0 `absent`; big-app.spring (a Spring PERFORMANCE DEMO — 29 REST
+controllers, no JPA, mostly generated classes: not a framework-wired
+application) yields 10,208, 0 `absent` (9,690 `unavailable`: Java has no escape
+analysis). A calibration on a real framework-wired application is still owed.
+`edges_callers` is a DIFFERENT oracle — "who calls this", no alibis — and its
+`absent` is not a deletion licence where reachability is framework-mediated
+(DI, ORM, reflection, XML wiring): an entity's getter has no caller edge and is
+called by Hibernate. Since CART-0673 a definition another file can name is a
+`frontier` while any other file mentions its name (CART-0681).
+
 **The schema is closed.** Six node kinds, four edge kinds. A new axis is a new
 predicate value, not a new kind. When something does not fit, the answer is
 almost always that it is an edge you have not named yet.
