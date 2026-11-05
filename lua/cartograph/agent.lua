@@ -2909,6 +2909,67 @@ local function plans_dir()
     return vim.fn.stdpath('state') .. '/cartograph/' .. PLAN_DIR
 end
 
+--- ★ WHERE A RECIPE MAY LAND (CART-1911). txn_save carries no `mutates` — the handoff
+--- must work on a READ-ONLY host — and its `path` went straight to io.open(path, 'w'),
+--- so over MCP any caller could overwrite any file this process can write (the CART-0607
+--- audit overwrote a file outside the project from a read-only host). In the cockpit a
+--- human typed the path; over the wire nobody did.
+---
+--- The bases: the plans directory always; the project root too, but only on a WRITABLE
+--- host — a host that may edit the project may also leave a recipe in it, and no host
+--- writes anywhere else. A relative path is a name under the plans directory. The
+--- lexical rule is txn.contained's (CART-0577: no absolute remainder, no `..` segment);
+--- it does not resolve symlinks, so this adds the two checks it disclaims: the deepest
+--- existing directory on the way must really lie under the base, and the target itself
+--- must not be a symlink (io.open follows one).
+--- @return string? path, table? refusal
+local function save_path(store, want, e)
+    local dir = plans_dir()
+    if not want or want == '' then
+        vim.fn.mkdir(dir, 'p')
+        return ('%s/%s-%d.json'):format(dir, tostring(e.family or 'plan'), os.time())
+    end
+    local bases = { dir }
+    local root = store.data and store.data.root
+    if M.WRITABLE and root and root ~= '' then bases[#bases + 1] = root end
+    local function no(why)
+        return nil, refuse('outside-plans-dir', why,
+            M.WRITABLE and ('omit `path`, or name a file under %s or inside the project root'):format(dir)
+                or ('omit `path`, or name a file relative to %s — a read-only host writes nowhere else'):format(dir))
+    end
+    local base, rel
+    if want:match('^/') or want:match('^%a:[/\\]') then
+        for _, b in ipairs(bases) do
+            if want:sub(1, #b + 1) == b .. '/' then base, rel = b, want:sub(#b + 2); break end
+        end
+        if not base then
+            return no(('%s is outside %s'):format(want, M.WRITABLE and 'the plans directory and the project root'
+                or 'the plans directory (this host is read-only)'))
+        end
+    else
+        base, rel = dir, want
+    end
+    local okc, why = require('cartograph.txn').contained(rel)
+    if not okc then return no(why) end
+    if base == dir then vim.fn.mkdir(dir, 'p') end
+    local real_base = vim.uv.fs_realpath(base)
+    if not real_base then return no(('%s does not exist'):format(base)) end
+    local full = base .. '/' .. rel
+    -- the deepest directory on the way that already exists: mkdir must not create through a link that leads out
+    local probe = vim.fs.dirname(full)
+    while #probe > #base and not vim.uv.fs_stat(probe) do probe = vim.fs.dirname(probe) end
+    local real = vim.uv.fs_realpath(probe)
+    if not real or (real ~= real_base and real:sub(1, #real_base + 1) ~= real_base .. '/') then
+        return no(('%s leads out of %s through a symbolic link'):format(want, base))
+    end
+    local st = vim.uv.fs_lstat(full)
+    if st and st.type == 'link' then
+        return no(('%s is a symbolic link; a recipe is written to a plain file'):format(want))
+    end
+    vim.fn.mkdir(vim.fs.dirname(full), 'p')
+    return full
+end
+
 local function v_txn_save(store, args)
     local e, bad = held_plan(store, args.plan)
     if not e then return bad end
@@ -2932,11 +2993,8 @@ local function v_txn_save(store, args)
         -- did a human see anything. Its absence is honest, not a default.
         reviewed = e.reviewed,
     })
-    local path = args.path
-    if not path or path == '' then
-        vim.fn.mkdir(plans_dir(), 'p')
-        path = ('%s/%s-%d.json'):format(plans_dir(), tostring(e.family or 'plan'), os.time())
-    end
+    local path, outside = save_path(store, args.path, e)
+    if not path then return outside end
     local okj, body = pcall(vim.json.encode, art)
     if not okj then
         return refuse('unencodable-recipe', ('the invocation could not be encoded: %s')
@@ -4174,7 +4232,7 @@ M.VERBS = {
             { name = 'plan', type = 'string', required = true,
                 desc = 'a plan handle from a txn_plan_* verb' },
             { name = 'path', type = 'string',
-                desc = 'where to write it (default: stdpath(state)/cartograph/plans/)' },
+                desc = 'where to write it (default: stdpath(state)/cartograph/plans/). A relative name lands under that directory; a read-only host writes nowhere else, a writable one also inside the project root — anything else, a `..` or a symlink leading out REFUSES' },
         },
         run = v_txn_save,
     },

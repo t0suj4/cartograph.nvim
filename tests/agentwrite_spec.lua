@@ -1789,3 +1789,109 @@ test('agentwrite: a preview carries the GUARD VERDICTS — an inline says every 
     ok(gv.why:match('0 failed'), gv.why)
     permit(false)
 end)
+
+-- ── where a saved recipe may land (CART-1911) ───────────────────────────────
+-- txn_save carries no `mutates`: planning needs no write capability, so the
+-- handoff has to work on a read-only host. But its `path` went straight to
+-- io.open(path, 'w'), so over MCP any caller could overwrite any file this
+-- process can write. The rule now: a READ-ONLY host writes only under the plans
+-- directory; a WRITABLE one may also write inside the project root. Asserted off
+-- the disk, both ways — and the default path (the handoff itself) still saves.
+
+local function plan_one()
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    ok(p.ok and type(p.subject.plan) == 'string', 'a plan was minted: ' .. vim.inspect(p.refusal))
+    return p.subject.plan
+end
+
+local function outside_refusal(s)
+    return type(s.refusal) == 'table' and s.refusal.rule == 'outside-plans-dir'
+end
+
+local function slurp(path)
+    local fh = io.open(path, 'r'); if not fh then return nil end
+    local s = fh:read('*a'); fh:close(); return s
+end
+
+test('agentwrite (CART-1911): a READ-ONLY host saves a recipe only under the plans directory', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local pid = plan_one()
+    local plans = vim.fn.stdpath('state') .. '/cartograph/plans'
+    vim.fn.mkdir(plans, 'p')
+
+    -- an existing file outside every allowed base: the probe's shape
+    local outside = vim.fn.tempname(); vim.fn.mkdir(outside, 'p'); ROOTS[#ROOTS + 1] = outside
+    local victim = outside .. '/victim.txt'
+    vim.fn.writefile({ 'ORIGINAL' }, victim)
+    local s = call('txn_save', { plan = pid, path = victim })
+    ok(outside_refusal(s),
+        'an absolute path outside the plans dir REFUSES: ' .. vim.inspect(s.refusal))
+    eq('ORIGINAL', slurp(victim):gsub('\n$', ''), 'and the file is untouched')
+
+    -- inside the project root: allowed only on a WRITABLE host
+    local inroot = root .. '/recipe.json'
+    s = call('txn_save', { plan = pid, path = inroot })
+    ok(outside_refusal(s), 'the project root is not a plans dir on a read-only host')
+    eq(0, vim.fn.filereadable(inroot), 'and nothing was written there')
+
+    -- a relative path that climbs out
+    local tag = ('cart1911-%d'):format(vim.uv.hrtime())
+    s = call('txn_save', { plan = pid, path = '../' .. tag .. '.json' })
+    ok(outside_refusal(s), 'a `..` segment REFUSES: ' .. vim.inspect(s.refusal))
+    eq(0, vim.fn.filereadable(plans .. '/../' .. tag .. '.json'), 'and nothing landed beside the plans dir')
+    -- ⚠ and one whose `..` sits BEHIND a directory that does not exist yet: the realpath walk stops at
+    -- the deepest existing ancestor (the plans dir itself) and passes it, so only the lexical rule stops
+    -- this one — mkdir would create `new/` and the open would resolve out through the `..`s
+    s = call('txn_save', { plan = pid, path = tag .. '-new/../../' .. tag .. '.json' })
+    ok(outside_refusal(s), 'a `..` behind a not-yet-existing directory REFUSES: ' .. vim.inspect(s.refusal))
+    eq(0, vim.fn.filereadable(plans .. '/../' .. tag .. '.json'), 'and nothing escaped through it')
+
+    -- a symlinked DIRECTORY inside the plans dir that leads out
+    local link = plans .. '/' .. tag .. '-dir'
+    assert(vim.uv.fs_symlink(outside, link))
+    s = call('txn_save', { plan = pid, path = tag .. '-dir/r.json' })
+    ok(outside_refusal(s), 'a symlinked directory that leads out REFUSES: ' .. vim.inspect(s.refusal))
+    eq(0, vim.fn.filereadable(outside .. '/r.json'), 'and nothing was written through it')
+    os.remove(link)
+
+    -- a symlinked FILE inside the plans dir pointing at the victim
+    local flink = plans .. '/' .. tag .. '-file.json'
+    assert(vim.uv.fs_symlink(victim, flink))
+    s = call('txn_save', { plan = pid, path = tag .. '-file.json' })
+    ok(outside_refusal(s), 'a symlinked file REFUSES: ' .. vim.inspect(s.refusal))
+    eq('ORIGINAL', slurp(victim):gsub('\n$', ''), 'and the victim is still untouched')
+    os.remove(flink)
+
+    -- the handoff still works: the default path, and a name under the plans dir
+    s = call('txn_save', { plan = pid })
+    ok(s.ok, 'the default path saves: ' .. vim.inspect(s.refusal))
+    local p1 = s.result[1].path
+    ok(vim.startswith(p1, plans .. '/') and vim.fn.filereadable(p1) == 1, 'under the plans dir: ' .. p1)
+    os.remove(p1)
+    s = call('txn_save', { plan = pid, path = tag .. '/mine.json' })
+    ok(s.ok, 'a relative name saves under the plans dir: ' .. vim.inspect(s.refusal))
+    eq(plans .. '/' .. tag .. '/mine.json', s.result[1].path, 'at the path it names, resolved')
+    eq(1, vim.fn.filereadable(plans .. '/' .. tag .. '/mine.json'), 'and the file exists')
+    vim.fn.delete(plans .. '/' .. tag, 'rf')
+end)
+
+test('agentwrite (CART-1911): a WRITABLE host may also save inside the project root, and nowhere else', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local pid = plan_one()
+    local s = call('txn_save', { plan = pid, path = root .. '/plans/recipe.json' })
+    ok(s.ok, 'inside the project root saves: ' .. vim.inspect(s.refusal))
+    eq(1, vim.fn.filereadable(root .. '/plans/recipe.json'), 'and the file exists')
+
+    local outside = vim.fn.tempname(); vim.fn.mkdir(outside, 'p'); ROOTS[#ROOTS + 1] = outside
+    vim.fn.writefile({ 'ORIGINAL' }, outside .. '/victim.txt')
+    s = call('txn_save', { plan = pid, path = outside .. '/victim.txt' })
+    ok(outside_refusal(s), 'outside both bases still REFUSES: ' .. vim.inspect(s.refusal))
+    eq('ORIGINAL', slurp(outside .. '/victim.txt'):gsub('\n$', ''), 'and the file is untouched')
+    permit(false)
+end)

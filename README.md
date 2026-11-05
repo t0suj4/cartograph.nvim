@@ -3567,6 +3567,11 @@ between, the load still succeeds and says so — `reviewed_match = false` with t
 changed files named — because the difference is not wrong, it is unreviewed, and
 `txn_apply`'s preview gate is already what stops it.
 
+`txn_save` has no write permission of its own, so where it may write is fenced
+(CART-1911). It writes to the plans directory under `stdpath('state')`, and a
+writable host may also write inside the project root. Any other path, a `..`
+segment, or a symlink that leads out is refused (`outside-plans-dir`).
+
 **An empty answer is a typed claim with a reason attached.** `absent`, `refused`,
 `frontier` and `unavailable` mean different things, and reading one as "nothing
 found" is the mistake the envelope exists to prevent.

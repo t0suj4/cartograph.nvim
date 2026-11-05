@@ -127,6 +127,12 @@ NOT THE PLAN: a plan holds a closure (`edit_of`) and cannot be serialised at all
 so `txn_load` RE-DERIVES the plan against the graph as it then stands. A tree that
 moved therefore re-plans cleanly or refuses on the planner's own terms, and the
 loaded handle still has to go through `txn_preview` before `txn_apply` will take it.
+Where the file can go is fenced (CART-1911):
+- Omit `path`, or give a name relative to the plans directory.
+- A read-only host writes nowhere else.
+- A writable host may also write inside the project root.
+- Any other path, a `..` segment, or a symlink that leads out is refused with
+  `outside-plans-dir`.
 
 ★ PREVIEW BEFORE YOU SAVE, and the artifact carries a WITNESS: `txn_preview`
 records a sha256 of each after-image it showed you, `txn_save` carries those, and
