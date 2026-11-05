@@ -1790,3 +1790,74 @@ test('flowdump (CART-1924): the vararg slot is named, a spread call / pcall / re
     eq(nil, old52.argtable, 'no arg table under 5.2')
     for _, g in ipairs(D52.gaps) do ok(g.kind ~= 'vararg-arg', 'and no vararg-arg gap under 5.2') end
 end)
+
+-- (CART-1955, flowpath FLOW-0144: a handler the HOST calls. WoW's frame:SetScript / frame:HookScript hand a function to
+-- the client, which calls it at the frame's events — the method is no tree code and ran nothing, so the handler's
+-- writes reached no reader. The ecosystem declares the registrars (spec/ecosystem/lua-wow.lua `handlers`); the dump
+-- carries the host's call at the registration, tagged contract:host-handlers, the receiver first and the rest tainted)
+test('flowdump: a WoW frame handler is CALLED by the host — receiver as self, the rest tainted, only for a declared registrar (CART-1955)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local a = { cur = 1 }',
+        'local f = { tag = 1 }',
+        'f:HookScript("OnEvent", function (self, ev) a.cur = {}; a.ev = ev end)',
+        'local g = CreateFrame("Frame")',
+        'g:SetScript("OnUpdate", function (self, el) a.up = {} end)',
+        'f:Other("OnEvent", function (self) a.no = {} end)',
+        'function A_get() return a.cur, a.up end' }, '\n') .. '\n'
+    local function solve(files)
+        local root = tree(files)
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        return vim.json.decode(R.dump), R
+    end
+    local D, R = solve({ ['A/A.toc'] = '## Interface: 110000\n## Title: A\nh.lua\n', ['A/h.lua'] = SRC })
+    local site, fnid = {}, {}
+    for _, s in ipairs(D.sites) do
+        site[s.label] = s.id
+        if s.kind == 'function' then fnid[s.label] = s.fn end
+    end
+    local hook, setp, other = site['A/h.lua::HookScript#cb@2'], site['A/h.lua::SetScript#cb@4'], site['A/h.lua::Other#cb@5']
+    local ftab, atab = site['tbl:A/h.lua:1:10'], site['tbl:A/h.lua:0:10']
+    ok(hook and setp and other and ftab and atab, 'the fixture\'s sites: ' .. vim.inspect(vim.tbl_keys(site)))
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local F = {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn end
+    -- the tagged calls: exactly the two declared registrars, each calling its handler
+    local called = {}
+    for _, fn in ipairs(D.functions) do
+        for _, t in ipairs(fn.tags or {}) do
+            if t[2] == 'contract:host-handlers' then
+                local ins = fn.body[t[1] + 1]
+                eq('call', ins[1])
+                for _, o in ipairs(V[ins[3]] or {}) do called[o] = true end
+            end
+        end
+    end
+    ok(called[hook] and called[setp], 'HookScript\'s and SetScript\'s handlers are called: ' .. vim.inspect(called))
+    ok(not called[other], 'an undeclared method calls nothing')
+    eq(2, R.stats.handlers)
+    -- self is the receiver; what the host passes after it is tainted (never a whole answer of nothing)
+    local hf = F[fnid['A/h.lua::HookScript#cb@2']]
+    ok(vim.tbl_contains(V[hf.params[1]] or {}, ftab), 'self holds the receiver f: ' .. vim.inspect(V[hf.params[1]]))
+    ok(vim.tbl_contains(D.solution.taint.ports, hf.params[2]), 'ev is tainted: ' .. vim.inspect(hf.params))
+    -- (NOT a heap fact: flow-insensitively a handler's `a.cur = {}` lands through the shared upvalue whether or not
+    -- anything calls it — on stock too. What was missing is the CALL: a MOD over called functions, self and ev)
+    -- the premise is stated, and labels what the call hands in
+    ok(D.contracts.clauses['host-handlers'], 'the clause is stated')
+    local bitn
+    for i, c in ipairs(D.labels.clauses) do if c == 'host-handlers' then bitn = i - 1 end end
+    local m
+    for _, e in ipairs(D.labels.v) do if e[1] == hf.params[1] then m = e[2] end end
+    ok(bitn and m and require('bit').band(m, require('bit').lshift(1, bitn)) ~= 0, 'self carries the host-handlers label')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+    -- no ecosystem declares a registrar outside a WoW package: the same file alone calls nothing
+    local D2, R2 = solve({ ['h.lua'] = SRC })
+    eq(0, R2.stats.handlers)
+    for _, fn in ipairs(D2.functions) do
+        for _, t in ipairs(fn.tags or {}) do ok(t[2] ~= 'contract:host-handlers', 'no host call outside WoW') end
+    end
+    ok(not D2.contracts.clauses['host-handlers'], 'and no clause')
+end)

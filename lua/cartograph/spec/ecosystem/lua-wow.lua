@@ -81,6 +81,26 @@ return {
             notes = { why = 'patches a global function by name, not a table member' } },
     },
 
+    -- ── HANDLERS THE HOST CALLS (CART-1955) ──────────────────────────────────
+    -- A frame's script handler is handed to the client, which calls it at the
+    -- frame's events — nothing in the tree calls it. A METHOD on the frame names
+    -- the registration: `frame:SetScript("OnEvent", fn)` replaces the script,
+    -- `frame:HookScript("OnEvent", fn)` runs fn after it. The client calls fn with
+    -- the frame, then the script's own values (the event name and its payload,
+    -- OnUpdate's elapsed time …). `handler_arg` counts the method's arguments
+    -- after the receiver. Without this, flowtype ran nothing at such a call (its
+    -- callee is a host method no profile declares), so a handler's writes reached
+    -- no reader.
+    --
+    -- MEASURED IN ~/work/wow_addons: `:SetScript(` 7,268 lines / 1,071 files,
+    -- `:HookScript(` 186 lines / 92 files.
+    handlers = {
+        { method = 'SetScript', handler_arg = 2, kind = 'replace',
+            notes = { why = 'the client calls the handler at each of the frame\'s script events' } },
+        { method = 'HookScript', handler_arg = 2, kind = 'post-hook',
+            notes = { why = 'the client calls the handler after the frame\'s existing script, with the same arguments' } },
+    },
+
     -- WoW addons have no require: files are listed in load order by the .toc and
     -- share one global table. Declaring the absence is not decoration — it is why
     -- no require_form appears here, and why load ORDER (banked) is the axis that

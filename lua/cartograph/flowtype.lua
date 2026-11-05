@@ -2548,18 +2548,41 @@ local function build(store, opts)
     -- files; the name a string whose text is the package's (G7.LITV, what CART-1820's key search reads). Any other
     -- file's `...` is unknown host values: tainted in the taint phase (G7.CHUNKVA), as a lost caller's arguments
     G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS, G7.LOADERP, G7.LOADNAME = {}, {}, {}, {}, {} -- (LOADNAME: local port -> the loader's name; G7.LOADK is a dynamic load's key port)
-    G7.LOADERA = {}
-    function G7.loaderargs(file) -- (the declared loader's arguments for this file and its package, or nil; memoized)
-        local m = G7.LOADERA[file]
+    G7.LOADERA, G7.ECOF = {}, {}
+    function G7.ecoof(file) -- (the ecosystem spec of this file's package and the package, or false; memoized)
+        local m = G7.ECOF[file]
         if m == nil then
             local seg, eco
             local okL, L = pcall(require, 'cartograph.spec.lua')
             if okL and L.package_of then seg, eco = L.package_of(file, store.data.root) end
             local E = eco and require('cartograph.spec.ecosystem').load(eco)
+            m = E and { E, seg } or false
+            G7.ECOF[file] = m
+        end
+        if m then return m[1], m[2] end
+    end
+    function G7.loaderargs(file) -- (the declared loader's arguments for this file and its package, or nil; memoized)
+        local m = G7.LOADERA[file]
+        if m == nil then
+            local E, seg = G7.ecoof(file)
             m = E and E.chunk_args and { E.chunk_args, seg } or false
             G7.LOADERA[file] = m
         end
         if m then return m[1], m[2] end
+    end
+    -- ★ A HANDLER THE HOST CALLS (CART-1955): a method its file's ecosystem declares in `handlers` (WoW's
+    -- frame:SetScript / frame:HookScript) hands a function to the host, which calls it at events — the receiver first,
+    -- then values the host makes. The declared form by method name, or nil
+    G7.HANDLERF, G7.HANDLERVA, G7.HANDLERCALLS = {}, {}, 0
+    function G7.handlerform(file, method)
+        local m = G7.HANDLERF[file]
+        if m == nil then
+            local E = G7.ecoof(file)
+            m = false
+            for _, h in ipairs(E and E.handlers or NOTHING) do m = m or {}; m[h.method] = h end
+            G7.HANDLERF[file] = m
+        end
+        return m and m[method] or nil
     end
     function G7.chunkva(file)
         local va = port('va:chunk:' .. file)
@@ -3425,6 +3448,30 @@ local function build(store, opts)
             if recvp then
                 for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end
                 mcalls[#mcalls + 1] = { recvp, txt(f:field('method')[1]), resl }
+                -- ★ A HANDLER THE HOST CALLS (CART-1955): `frame:SetScript("OnEvent", h)` — a method the file's ecosystem
+                -- declares (G7.handlerform) — hands h to the host, which calls it at the frame's events with the receiver
+                -- and values it makes. The method's own callee is a host method no profile declares: it runs nothing
+                -- (unknown-receiver), and h, called by no tree code, had written nothing anywhere. Flow-insensitively the
+                -- host's call is a call HERE: `call [hr] h [recv, va…]` (tag contract:host-handlers), every argument
+                -- after the receiver one spread port, tainted in the taint phase (G7.HANDLERVA: the event name, its
+                -- payload, OnUpdate's elapsed — unknown host values, never a whole answer of nothing). Its errors go
+                -- to this caller's port: the client's dispatch catches them in truth, but the core's `call` raises
+                -- into the calling function, and a fresh port would disagree with the dumped instruction — the
+                -- over-approximation is the sound side. Whatever the receiver is: a tree method of that name is
+                -- called as well (its callee flow), and the extra call only adds
+                local hf = G7.handlerform(file, txt(f:field('method')[1]))
+                local hp = hf and aps[1 + hf.handler_arg]
+                if hp then
+                    G7.HANDLERCALLS = G7.HANDLERCALLS + 1
+                    G7.mu(function ()
+                        local va, hr = new(), new()
+                        G7.HANDLERVA[#G7.HANDLERVA + 1] = va
+                        local hargs = { recvp, va }
+                        hargs.spread = 2
+                        G7.ins({ 'call', { hr }, hp, { recvp, va, spread = 2 } }, 'contract:host-handlers')
+                        callc(hp, hargs, hr, nil, curerr())
+                    end)
+                end
             end
             if to and CTXFNS and CTXFNS[to] and not clone then
                 if not callee and f then expr(f) end -- (the callee expression is still walked: a call inside it)
@@ -5130,6 +5177,8 @@ local function build(store, opts)
     end
     TCUR = 'a file chunk\'s `...`: what its host passes (CART-1822)'
     for _, p in pairs(G7.CHUNKVA) do taint(p) end
+    TCUR = 'a handler the host calls: what it passes after the receiver (CART-1955)'
+    for _, p in ipairs(G7.HANDLERVA) do taint(p) end
     TCUR = 'sinf'
     if not G7.EXP['sinf-untainted'] then for r in pairs(sinf) do taint(r) end end
     TCUR = 'self seeded from its method declaration: the host may call it with another object'
@@ -5485,7 +5534,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil, handlers = G7.HANDLERCALLS,
         files = #files, ports = N, objects = NO, fedk_skips = G7.FEDKN }
     stats.vinstances = G7.VINSTN
     stats.unknown_code = G7.XESCN -- (objects handed to unknown code, with their fields and prototypes: CART-1707 / 1850)
@@ -6439,7 +6488,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,

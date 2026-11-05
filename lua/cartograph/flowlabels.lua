@@ -13,7 +13,8 @@
 --   call / pcall whose callee holds ext       unknown-receiver, unknown-code
 --   pcall whose callee is cut or escaped      outside-raises-strings
 --   the ESCAPED region (a cut variable, a cell of an escaped site, a parameter of an escaped function)   C1, C3
--- and, past contracts_of: a load from a library site (libraries-never-escape), a call into a host model (host-model).
+-- and, past contracts_of: a load from a library site (libraries-never-escape), a call into a host model (host-model),
+-- a call the host makes to a registered handler — the instruction tagged contract:host-handlers (host-handlers).
 -- A dest's labels ⊇ its sources' ∪ its instruction's seeds: what flowpath checks like a certificate.
 -- An op without a rule here is an ERROR, never silence: a missing label claims an answer rests on nothing.
 local M = {}
@@ -22,7 +23,8 @@ local bor, band = bit.bor, bit.band
 
 M.CLAUSES = { 'GN', 'strict-global', 'computed-global', 'host', 'unknown-receiver', 'unknown-code',
     'outside-raises-strings', 'C1', 'C3', 'globals-never-escape', 'libraries-never-escape', 'host-model',
-    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'reflection:package.loaded', 'thread-env' }
+    'hidden-fields', 'function-no-metatable', 'loaded-code', 'fixed-env', 'reflection:package.loaded', 'thread-env',
+    'host-handlers' }
 local B = {}
 for i, c in ipairs(M.CLAUSES) do B[c] = bit.lshift(1, i - 1) end
 local ESC = bor(B.C1, B.C3)
@@ -77,6 +79,12 @@ function M.compute(D)
     local seeds = {}
     local hmodel = {}
     for _, e in ipairs(D.contracts.host_models or {}) do for _, g in ipairs(e[2] or {}) do hmodel[g] = true end end
+    local hcall = {} -- (fn -> { [index] = true }: the calls the host makes to a registered handler, CART-1955)
+    for _, f in ipairs(D.functions) do
+        for _, t in ipairs(f.tags or {}) do
+            if t[2] == 'contract:host-handlers' then hcall[f.id] = hcall[f.id] or {}; hcall[f.id][t[1]] = true end
+        end
+    end
     local F = {}
     for _, f in ipairs(D.functions) do F[f.id] = f end
     local escfn = {}
@@ -324,6 +332,7 @@ function M.compute(D)
             if closure[a] and hmodel[closure[a]] then seed = bor(seed, B['host-model']) end
         end
         if op == 'pcall' and anyesc then seed = bor(seed, B['outside-raises-strings']) end
+        if CUR and hcall[CUR[1]] and hcall[CUR[1]][CUR[2]] then seed = bor(seed, B['host-handlers']) end
         local pin = bor(lvb(fv), seed)
         local m = pin
         for _, a in ipairs(cs) do
