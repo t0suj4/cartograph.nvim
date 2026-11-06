@@ -4715,3 +4715,43 @@ test('clones: with NO store there is no enclosing scope to ask, so `no-local` st
     eq('no-local', h.scope, 'and it is NOT upgraded to upvalue without a graph to ask')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-0733: a language with no expression IR is NAMED as uncompared, never answered with a clean zero. Haskell's df
+-- is a custom hook with no body, so every function carried a df record and none reached the index; clones_find then
+-- said "N functions were indexed, no pair matched" about a corpus it never compared.
+test('clones: a function in a language with no expression IR is counted as uncovered, and the agent says so', function ()
+    if not parser_available('haskell') then skip 'no haskell parser' end
+    local hs = 'module M where\n\nf x = g x + 1\n  where g y = y * 2\n\nh x = g x + 1\n  where g y = y * 2\n'
+    proj { ['M.hs'] = hs }
+    local cov = clones.coverage(store)
+    eq(2, cov.functions)
+    eq(0, cov.indexed)
+    eq(2, cov.uncovered.haskell)
+    local agent = require 'cartograph.agent'
+    local d = agent.answer(store, 'clones_find', {})
+    eq(0, #d.result)
+    eq('unavailable', d.absence, 'nothing was compared: not "no clones"')
+    eq('no-expression-ir', d.absence_why.premise)
+    eq(2, d.absence_why.evidence.uncovered.haskell)
+
+    -- mixed: lua clones are found AND the haskell half is named as uncompared
+    proj { ['M.hs'] = hs, ['a.lua'] = fn('p', 'a, b', '  local s = a + b\n  local t = s * 2\n  return t + 1'),
+        ['b.lua'] = fn('q', 'x, y', '  local u = x + y\n  local v = u * 2\n  return v + 1') }
+    local m = clones.coverage(store)
+    eq(2, m.uncovered.haskell)
+    ok(m.indexed >= 2)
+    local e = agent.answer(store, 'clones_find', { kind = 'exact' })
+    ok(#e.result >= 1, 'the lua pair is still a clone group')
+    local note
+    for _, n in ipairs(e.notes) do if n.kind == 'uncovered-languages' then note = n end end
+    ok(note, 'a mixed graph names the language it could not compare')
+    eq(2, note.evidence.uncovered.haskell)
+
+    -- and an empty answer over a mixed graph is a FRONTIER: what was compared matched nothing, the rest was never compared
+    proj { ['M.hs'] = hs, ['a.lua'] = fn('p', 'a, b', '  local s = a + b\n  local t = s * 2\n  return t + 1') }
+    local f = agent.answer(store, 'clones_find', {})
+    eq(0, #f.result)
+    eq('frontier', f.absence)
+    eq('uncovered-languages', f.absence_why.premise)
+    ok(vim.tbl_contains(agent.VERBS.clones_find.absences, f.absence))
+end)

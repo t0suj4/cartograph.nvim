@@ -75,3 +75,13 @@ else
     lines = clones.report(clones.exact(store, { min_rows = min_rows }))
 end
 for _, line in ipairs(lines) do print(line) end
+-- ★ WHAT THE INDEX NEVER COMPARED IS PRINTED BESIDE WHAT IT FOUND (CART-0733): haskell and scheme answered
+-- an empty report here, which read as a clean corpus when no function of theirs reached the clone index.
+do
+    local cov = clones.coverage(store)
+    local langs = {}
+    for l, k in pairs(cov.uncovered) do langs[#langs + 1] = ('%s %d'):format(l, k) end
+    table.sort(langs)
+    print(('  coverage: %d of %d function(s) indexed%s'):format(cov.indexed, cov.functions,
+        #langs > 0 and ('; NEVER COMPARED (no expression IR): ' .. table.concat(langs, ', ')) or ''))
+end

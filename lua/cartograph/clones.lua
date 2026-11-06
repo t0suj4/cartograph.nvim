@@ -132,17 +132,30 @@ local INDEX_FLOOR = 2
 -- ★ `all` (CART-1427): every function with a row, the index's records below its floor included — what collect_fns
 -- reads (the block, subterm and row-drift tiers) instead of calling expr.of again per function per tier. expr.of was
 -- 51% of a warm clone workload on TSM, each function derived three times; the floor still filters what exact / near see
+-- ★★ WHAT THE INDEX COULD NOT SEE IS PART OF THE INDEX (CART-0733). A function in a language with no expression IR
+-- (expr.lang_of nil: haskell's df is a custom hook with no body, scheme has neither) never reaches fn_rows, and every
+-- tier then answered ZERO for it -- 1693 of 1696 haskell functions, 2212 of 2212 scheme, read as "no clones here".
+-- `cov` counts them per parse language, so a reader can tell "nothing matched" from "nothing was compared".
 local function build_index(store)
     local c = store._clone_idx
     if c and c.gen == store.generation then
-        return c.fns, c.all
+        return c.fns, c.all, c.cov
     end
     local fns, all = {}, {}
+    local cov = { functions = 0, indexed = 0, uncovered = {}, n_uncovered = 0 }
+    local ts
     -- ★ ONE ID SCOPE PER INDEX GENERATION (CART-1412): the exact tier's variant keys and the near tier's row keys are
     -- compared ACROSS functions, so they are interned in one scope, which dies with the generation's index
     local idscope = require('cartograph.algebra').load().id_scope()
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.file then
+            cov.functions = cov.functions + 1
+            if not expr.lang_of(n.file) then
+                ts = ts or require 'cartograph.providers.treesitter'
+                local k = (ts.is_container(n.file) and 'container') or ts.parse_lang(n.file) or 'unparsed'
+                cov.uncovered[k] = (cov.uncovered[k] or 0) + 1
+                cov.n_uncovered = cov.n_uncovered + 1
+            end
             local ok, eo = pcall(expr.of, store, n.id)
             if ok and eo then
                 local nrows, lines, nparams, exprs, locals, params = fn_rows(eo)
@@ -157,8 +170,17 @@ local function build_index(store)
             end
         end
     end
-    store._clone_idx = { gen = store.generation, fns = fns, all = all }
-    return fns, all
+    cov.indexed = #all
+    store._clone_idx = { gen = store.generation, fns = fns, all = all, cov = cov }
+    return fns, all, cov
+end
+
+--- What the clone index SAW (CART-0733): { functions, indexed, uncovered = { [parse lang] = n }, n_uncovered }.
+--- `indexed` = functions with at least one row (every tier's population); `uncovered` = functions whose language has
+--- no expression IR, so no tier compared them. Rides the generation-cached index.
+function M.coverage(store)
+    local _, _, cov = build_index(store)
+    return cov
 end
 
 --- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,

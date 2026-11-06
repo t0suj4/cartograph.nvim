@@ -552,7 +552,7 @@ test('agent: "nothing was comparable" and "no clones" are different answers', fu
         'two functions with no data-flow record is NOT "no clones" — nothing was compared')
     eq('no-dataflow-records', d.absence_why.premise)
     eq(2, d.absence_why.evidence.functions)
-    eq(0, d.absence_why.evidence.with_dataflow)
+    eq(0, d.absence_why.evidence.indexed)
 
     -- and with no function at all, the answer is a genuine absence
     synth { { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 } }
@@ -626,16 +626,18 @@ test('agent: a self-recursive function does NOT report that it calls nothing', f
 end)
 
 test('agent: an unparsed frontier makes every empty catalogue answer a FRONTIER, not an absence', function ()
-    synth {
-        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
-        { id = 'b.bin', kind = 'module', name = 'b.bin', file = 'b.bin', order = 1,
-            unparsed = true },
-        -- a function that IS comparable (it carries a df record), so the clone
-        -- verb reaches its frontier branch instead of stopping at "nothing was
-        -- comparable" — the two are different answers and both must be reachable
-        { id = 'a.lua::f', kind = 'function', name = 'f', file = 'a.lua', order = 2,
-            df = { stmts = {} } },
-    }
+    -- a function that IS comparable, so the clone verb reaches its frontier branch instead of stopping at "nothing was
+    -- comparable" — the two are different answers and both must be reachable. ⚠ COMPARABLE = THE CLONE INDEX READ ITS
+    -- SOURCE INTO EXPRESSION-IR ROWS (CART-0733), so it is a real file; a synthetic `df` record alone was the wrong
+    -- population (haskell carries one on every function and reaches the index with none).
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.lua', 'w'))
+    fd:write('local function f(a, b)\n  local s = a + b\n  return s * 2\nend\nreturn f\n'); fd:close()
+    local g = ts.extract(root)
+    g.nodes[#g.nodes + 1] = { id = 'b.bin', kind = 'module', name = 'b.bin', file = 'b.bin', order = #g.nodes,
+        unparsed = true }
+    store.ingest(g)
+    eq(1, require('cartograph.clones').coverage(store).indexed, 'the premise: one function was indexed')
     for _, verb in ipairs({ 'clones_find', 'ladder', 'externals' }) do
         local d = agent.answer(store, verb, {})
         eq(0, #d.result, verb .. ' has nothing to report on this graph')

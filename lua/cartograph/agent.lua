@@ -1171,17 +1171,27 @@ local function v_clones_find(store, args)
             evidence = { groups = #rows, limit = limit } }
         for i = #rows, limit + 1, -1 do rows[i] = nil end
     end
+    -- ★★ A LANGUAGE THE INDEX CANNOT READ IS NAMED, WITH ROWS OR WITHOUT (CART-0733). The clone index is built from
+    -- expression-IR rows; a function in a language with no IR (haskell, scheme) is never compared, and a mixed graph's
+    -- clean answer for that language read exactly like a clean language.
+    local cov = require('cartograph.clones').coverage(store)
+    if cov.n_uncovered > 0 then
+        local langs = {}
+        for l, k in pairs(cov.uncovered) do langs[#langs + 1] = ('%s %d'):format(l, k) end
+        table.sort(langs)
+        notes[#notes + 1] = { kind = 'uncovered-languages', premise = 'no-expression-ir',
+            why = ('%d of %d function(s) are in a language with no expression IR (%s): the clone index never compared them, so no clone among them would be listed'):format(
+                cov.n_uncovered, cov.functions, table.concat(langs, ', ')),
+            evidence = { uncovered = cov.uncovered, indexed = cov.indexed, functions = cov.functions } }
+    end
     if #rows > 0 then return { result = rows, notes = notes } end
 
-    -- EMPTY: "no clones" and "nothing was comparable" are OPPOSITE claims, and
-    -- the comparison needs a per-function data-flow record to index at all.
-    local dfa = require 'cartograph.df'
-    local fns, modelled = 0, 0
+    -- EMPTY: "no clones" and "nothing was comparable" are OPPOSITE claims. The population is what the clone index
+    -- INDEXED (a function with expression-IR rows) -- not "carries a df record": haskell's df hook gives every
+    -- function one and its IR gives none, so the old count told an agent 1696 functions were compared when 3 were.
+    local fns = 0
     for _, n in ipairs((store.data or {}).nodes or {}) do
-        if n.kind == 'function' or n.kind == 'method' then
-            fns = fns + 1
-            if dfa.present(n) then modelled = modelled + 1 end
-        end
+        if n.kind == 'function' or n.kind == 'method' then fns = fns + 1 end
     end
     if fns == 0 then
         return { result = {}, absence = 'absent', absence_why = {
@@ -1189,24 +1199,30 @@ local function v_clones_find(store, args)
             why = 'this graph holds no function or method node at all, so there was nothing that could be a clone of anything',
             evidence = { functions = 0 } }, notes = notes }
     end
-    if modelled == 0 then
+    if cov.indexed == 0 then
         return { result = {}, absence = 'unavailable', absence_why = {
-            premise = 'no-dataflow-records',
-            why = ('%d function(s) are in this graph and NONE carries a data-flow record — the clone index is built from df row-keys, so nothing was compared. This is a property of the extraction, not of the code.'):format(fns),
-            evidence = { functions = fns, with_dataflow = 0 } }, notes = notes }
+            premise = cov.n_uncovered > 0 and 'no-expression-ir' or 'no-dataflow-records',
+            why = ('%d function(s) are in this graph and NONE yielded an expression-IR row record (%d in a language with no expression IR) — the clone index is built from those rows, so nothing was compared. This is a property of the extraction, not of the code.'):format(fns, cov.n_uncovered),
+            evidence = { functions = fns, indexed = 0, uncovered = cov.uncovered } }, notes = notes }
+    end
+    if cov.n_uncovered > 0 then
+        return { result = {}, absence = 'frontier', absence_why = {
+            premise = 'uncovered-languages',
+            why = ('%d of %d function(s) were indexed and no pair matched, but %d are in a language with no expression IR and were never compared'):format(cov.indexed, fns, cov.n_uncovered),
+            evidence = { indexed = cov.indexed, functions = fns, uncovered = cov.uncovered } }, notes = notes }
     end
     local g = M.graph(store)
     if g.frontier.unparsed_files > 0 then
         return { result = {}, absence = 'frontier', absence_why = {
             premise = 'unparsed-files',
-            why = ('%d of %d function(s) were comparable and no pair matched, but %d file(s) never parsed — no function in them was indexed'):format(modelled, fns, g.frontier.unparsed_files),
-            evidence = { with_dataflow = modelled, functions = fns,
+            why = ('%d of %d function(s) were comparable and no pair matched, but %d file(s) never parsed — no function in them was indexed'):format(cov.indexed, fns, g.frontier.unparsed_files),
+            evidence = { indexed = cov.indexed, functions = fns,
                 unparsed_files = g.frontier.unparsed_files } }, notes = notes }
     end
     return { result = {}, absence = 'absent', absence_why = {
         premise = 'no-matching-pair',
-        why = ('%d of %d function(s) carried a data-flow record and were indexed; no group shares a structure and no pair aligns within the edit-distance threshold'):format(modelled, fns),
-        evidence = { with_dataflow = modelled, functions = fns } }, notes = notes }
+        why = ('%d of %d function(s) yielded expression-IR rows and were indexed; no group shares a structure and no pair aligns within the edit-distance threshold'):format(cov.indexed, fns),
+        evidence = { indexed = cov.indexed, functions = fns } }, notes = notes }
 end
 
 -- ── verb: cone ──────────────────────────────────────────────────────────────

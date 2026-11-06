@@ -240,8 +240,19 @@ end
 
 io.write(('divergecensus %s   (max_dist=%d, excluded below dist>%d)\n')
     :format(root, max_dist, below))
-io.write(('  pairs scanned %d   unnamed divergences %d\n\n')
+io.write(('  pairs scanned %d   unnamed divergences %d\n')
     :format(res.pairs_scanned, res.divergences))
+-- ★ WHAT THE INDEX NEVER COMPARED IS PRINTED BESIDE WHAT IT FOUND (CART-0733): haskell and scheme answered
+-- `pairs scanned 0` here, which read as a clean corpus when no function of theirs reached the clone index.
+do
+    local cov = clones.coverage(store)
+    local langs = {}
+    for l, k in pairs(cov.uncovered) do langs[#langs + 1] = ('%s %d'):format(l, k) end
+    table.sort(langs)
+    io.write(('  coverage: %d of %d function(s) indexed%s\n'):format(cov.indexed, cov.functions,
+        #langs > 0 and ('; NEVER COMPARED (no expression IR): ' .. table.concat(langs, ', ')) or ''))
+end
+io.write('\n')
 
 -- ★ THE COMPARISON IS ONLY MEANINGFUL AT THE RECORDED PARAMETERS. A run with a
 -- different --below or --max-dist scans a DIFFERENT POPULATION, and every row
