@@ -250,6 +250,12 @@ local function tools_list()
             table.concat(v.langs, ' / '):upper())
             .. ' REFUSES with rule `lang-scope`, because the rewrite it emits is'
             .. " written in that language's syntax." or ''
+        -- ★ AND THE THIRD AXIS, THE GRAPH'S CAPABILITY (CART-1978, CUI-0009 d). graph_info's per-verb column said a
+        -- needs_calls verb is unavailable on an index-only host, and tools/list did not: a client that reads only
+        -- the list learned it as a refusal on the call. Read off the SAME predicate the central gate refuses on
+        -- (agent.has_calls of the active band), so the advertisement and the refusal cannot disagree.
+        local t = (v.needs_calls and not agent.has_calls(store))
+            and ' THIS VERB NEEDS THE CALL GRAPH and this host serves an INDEX-ONLY graph: every call REFUSES with rule `thin-index`. Restart the host without --index-only (a full extract) to enable it.' or ''
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
@@ -257,7 +263,7 @@ local function tools_list()
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
             description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (%s) — never a bare list — plus a `warrant` (%s) saying why nothing OBSERVED it; every verb here is static, so that is `%s`. tier_basis=%s%s.%s')
                 :format(v.summary, kinds_of(tiers.ABSENCE), kinds_of(tiers.WARRANT),
-                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w .. g) }
+                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w .. t .. g) }
     end
     return { tools = out }
 end

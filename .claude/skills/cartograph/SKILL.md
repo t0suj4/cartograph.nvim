@@ -177,7 +177,8 @@ Ask `graph_info` before assuming a verb works. Three capability axes are reporte
 separately because your next move differs on each:
 
 - **`needs_calls`** — about the GRAPH. On an index-only graph a call verb *refuses*
-  rather than answering "none".
+  rather than answering "none", and its tools/list description says so before
+  you call it (rule **`thin-index`**).
 - **`mutates`** — about the HOST. `mcpserve` is **read-only by default**; `--write`
   grants the mutating verbs. Gated verbs are still advertised, with the gate stated
   in their description.

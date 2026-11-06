@@ -809,6 +809,8 @@ test('mcpserve: the handshake completes and tools/list advertises every verb', f
         eq('object', by[name].inputSchema.type, name .. ' carries a JSON Schema')
         ok(by[name].description:find('absence', 1, true),
             name .. "'s description states the envelope, so a client that never reads our docs still learns it")
+        eq(nil, by[name].description:find('`thin-index`', 1, true),
+            name .. ': a FULL graph discloses no thin-index refusal it would never give (CART-1978)')
     end
     -- the names a client may actually use: `.` is rejected by several clients
     for _, t in ipairs(res.tools) do
@@ -874,6 +876,17 @@ test('mcpserve: the thin-index CAPABILITY REFUSAL is reachable by a caller', fun
     eq(false, by.edges_callers.available, 'and says so BEFORE the agent asks')
     ok(#by.edges_callers.unavailable_why > 20, 'with a reason')
     eq(true, by.node_find.available, 'while the observation verbs still serve')
+
+    -- CART-1978: and tools/list says it too, before any call, for exactly the verbs graph_info marks unavailable
+    local list = c:request('tools/list', vim.empty_dict())
+    for _, t in ipairs(list.tools) do
+        local says = t.description:find('`thin-index`', 1, true) ~= nil
+        eq(agent.VERBS[t.name].needs_calls or false, says,
+            t.name .. ': tools/list discloses thin-index iff the verb needs the call graph')
+        if by[t.name] and not agent.VERBS[t.name].mutates then
+            eq(not by[t.name].available, says, t.name .. ': tools/list and graph_info agree')
+        end
+    end
 
     -- the refusal itself, over the wire — NOT an empty list, NOT an error
     local d, why, raw = c:call('edges_callers', { file = 'm.lua', line = 3 })
