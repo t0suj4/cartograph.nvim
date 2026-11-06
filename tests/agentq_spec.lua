@@ -385,3 +385,28 @@ test('agentq: caller and callee rows carry prov — the resolver behind the edge
     eq({ 'not-a-call' }, row('edges_callers', 'helper', 'M.user').prov, 'a reference, not a call')
     eq({ 'base' }, row('edges_callers', 'helper', 'M.caller').prov, 'the call beside it')
 end)
+
+-- CART-1979: a candidate is a verb answering the SAME question that THIS host and graph can serve. A full graph whose
+-- languages opted out of the mention index refuses mentions and offers edges_callers — the alternative its remedy
+-- names in prose — marked as needing a different handle (a node, not a name). On a thin graph it is unavailable too.
+test('agent: refusal candidates are same-question verbs this host can serve, with their subject stated', function ()
+    local agent = require 'cartograph.agent'
+    local function stub(thin, mi)
+        return { is_index_only = function () return thin end, data = { calls = (not thin) and {} or nil },
+            has_mention_index = function () return mi end }
+    end
+    local full = agent.candidates(stub(false, false), 'mentions')
+    eq(1, #full, vim.inspect(full))
+    eq('edges_callers', full[1].name)
+    eq('who-uses-it', full[1].question)
+    eq(false, full[1].same_subject, 'mentions takes a name, edges_callers a node: stated, not filtered')
+    eq('node', full[1].subject)
+    eq({}, agent.candidates(stub(true, false), 'mentions'), 'on a thin graph the sibling is unavailable too')
+    -- language: a lua-only sibling is not offered for a ruby subject, and is for a lua one
+    local rb, lua = {}, {}
+    for _, c in ipairs(agent.candidates(stub(false, true), 'clones_find', 'ruby')) do rb[c.name] = true end
+    for _, c in ipairs(agent.candidates(stub(false, true), 'clones_find', 'lua')) do lua[c.name] = true end
+    eq(nil, rb.txn_plan_extract_family, 'extract_family serves lua/javascript, not ruby')
+    ok(lua.txn_plan_extract_family, 'and is offered for a lua subject')
+    eq(nil, lua.clones_find, 'an AVAILABLE verb asked directly is still never its own candidate')
+end)

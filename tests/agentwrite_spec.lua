@@ -369,6 +369,15 @@ test('agentwrite: a read-only host refuses every mutating verb, and graph_info s
         -- able to probe which handles exist on a host that will not write for them
         eq('read-only', doc.refusal.rule)
         ok(doc.refusal.remedy:find('--write', 1, true), 'and says how to grant it')
+        -- CART-1979: and names it as DATA — the host flag first, then the same-question verbs this host can serve
+        local cs = doc.refusal.candidates
+        eq('host-flag', cs[1].kind); eq('--write', cs[1].name); eq('add', cs[1].change)
+        local verbs = {}
+        for _, x in ipairs(cs) do if x.kind == 'verb' then verbs[x.name] = x end end
+        ok(verbs.txn_preview, case[1] .. ': review on a read-only host is still possible, and named')
+        eq(nil, verbs.txn_apply, 'a verb is never its own candidate')
+        eq(nil, verbs.txn_undo, 'and a candidate is AVAILABLE here — the other write verb is not')
+        for _, x in pairs(verbs) do eq('review-apply', x.question, x.name .. ' answers the same question') end
     end
     permit(false)
 end)
@@ -753,6 +762,18 @@ test('agentwrite: a lua-only planner REFUSES a subject in another language', fun
     ok(r.refusal.remedy:find('graph_info', 1, true),
         'and the remedy points at the column that answers "which verb then": '
         .. r.refusal.remedy)
+    -- CART-1979: nothing optimizes ruby, and the candidates SAY so — an empty list is a claim, not a missing field
+    eq({}, r.refusal.candidates, 'no verb answering `performance` serves ruby')
+    -- and a planner whose question HAS ruby-serving siblings names them, each serving this file
+    local x = call('txn_plan_extract_family', { node = rid })
+    eq('lang-scope', x.refusal.rule)
+    local names = {}
+    for _, c in ipairs(x.refusal.candidates) do
+        names[c.name] = true
+        eq('templates', c.question)
+        ok(c.langs == vim.NIL or c.langs:find('ruby', 1, true), c.name .. ' serves ruby')
+    end
+    ok(names.txn_plan_clonemerge and names.clones_find, 'the clone family\'s other verbs: ' .. vim.inspect(names))
 
     -- THE OTHER SIDE: the same verb, the same graph, a lua subject — still plans.
     local good = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })

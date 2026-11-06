@@ -199,7 +199,11 @@ is the rule the call would refuse with, in the gate's order (permission first):
 Each verb also declares the ONE question it answers (`answers`, a slug, and
 `question`, its heading in `references/questions.md`; tools/list carries it too).
 Verbs that declare the same question are alternatives for each other: when one is
-unavailable, look at its siblings. `txn_plan_optimize`'s subject is `statement`:
+unavailable, look at its siblings. A refusal lists them for you in
+`refusal.candidates`: `kind = 'verb'` rows (same question, available here, serving
+the file's language; `same_subject = false` means you must re-address, e.g. a name
+→ a node), `kind = 'host-flag'` rows (`--write` to add, `--index-only` to remove)
+and `kind = 'band'` rows. An empty list is a claim: nothing here answers it. `txn_plan_optimize`'s subject is `statement`:
 the full node address, optionally narrowed to one statement by `target_line`.
 
 ⚠ **A wrong-language planner does not error, so this column is the only warning you

@@ -443,6 +443,35 @@ function M.unavailable(store, name)
     if d then return d.rule, d.unavailable end
 end
 
+--- ★★ A REFUSAL NAMES WHAT TO SWITCH TO, AS DATA (CART-1979, CUI-0009 e). lang-scope's remedy named an alternative in
+--- prose and no other refusal named one at all, so an agent had to parse English to find its next call. The candidate
+--- VERBS are the ones declaring the SAME question (`answers`, CART-1976) that this host and graph can serve now
+--- (M.unavailable) and that serve the subject's language when it is known (`lang`). Each row carries its subject kind
+--- and `same_subject`, because a sibling may need a different handle (mentions takes a name, edges_callers a node):
+--- that is stated, not filtered, so the caller decides whether re-addressing is worth it. ⚠ NAMES THAT EXIST TODAY
+--- ONLY — verbs, host flags, bands; never a loadout name (CART-0855 Layer 2 is deferred). An empty list is a claim:
+--- nothing on this host answers the same question.
+function M.candidates(store, verb, lang)
+    local v, out = M.VERBS[verb], {}
+    for _, k in ipairs(M.ORDER) do
+        local c = M.VERBS[k]
+        if k ~= verb and c.answers == v.answers and not M.unavailable(store, k) then
+            local serves = not (lang and c.langs)
+            for _, l in ipairs(lang and c.langs or {}) do if l == lang then serves = true end end
+            if serves then
+                out[#out + 1] = { kind = 'verb', name = k, question = c.answers, subject = c.subject,
+                    same_subject = c.subject == v.subject,
+                    langs = c.langs and table.concat(c.langs, ' ') or NUL }
+            end
+        end
+    end
+    return out
+end
+
+local function host_flag(name, change, why)
+    return { kind = 'host-flag', name = name, change = change, why = why }
+end
+
 -- ── verb results ────────────────────────────────────────────────────────────
 -- A verb returns ONE of:
 --   { result = rows, tier?, absence?, absence_why?, notes?, subject? }
@@ -4706,7 +4735,9 @@ function M.answer(store, verb, args)
             local names = {}
             for _, r in ipairs(rows) do names[#names + 1] = r.name end
             table.sort(names)
-            berr = { rule = 'unknown-band',
+            local bands = {}
+            for _, b in ipairs(names) do bands[#bands + 1] = { kind = 'band', name = b, change = 'pass', why = 'pass it as `band`' } end
+            berr = { rule = 'unknown-band', candidates = bands,
                 reason = ('no open band named %q, so %s was not run — answering about an unnamed band would silently attribute the result to the wrong root'):format(tostring(args.band), verb),
                 remedy = ('name one of the open bands: %s (or omit `band` for the active one, %q). graph_info lists the roster with each band\'s root'):format(table.concat(names, ' | '), tostring(session.active)) }
         elseif args.band ~= session.active then
@@ -4738,7 +4769,9 @@ function M.answer(store, verb, args)
     -- allowed to reach — and `thin-index`'s remedy ("reopen the root without
     -- --index-only") would send them down a road that ends in this refusal anyway.
     if v.mutates and not M.WRITABLE then
-        return refusal { rule = 'read-only',
+        local cands = M.candidates(store, verb)
+        table.insert(cands, 1, host_flag('--write', 'add', 'restart the host with it: the mutating verbs then apply'))
+        return refusal { rule = 'read-only', candidates = cands,
             reason = ('%s writes to the tree, and this host was started without write permission — nothing was planned, diffed or written'):format(verb),
             remedy = 'start the host with --write (nvim --headless -u NONE -l tools/mcpserve.lua <root> --write). Planning and previewing need no permission: txn_plan_* and txn_preview answer on a read-only host, so a proposal and its diff can be produced and reviewed before anyone grants the power to apply it' }
     end
@@ -4751,14 +4784,24 @@ function M.answer(store, verb, args)
     -- CAPABILITY, in ONE place. A verb that needs the call graph must never be
     -- allowed to answer "none" off a graph that has none.
     if v.needs_calls and not M.has_calls(store) then
-        return refusal { rule = 'thin-index',
+        local cands = M.candidates(store, verb)
+        table.insert(cands, 1, host_flag('--index-only', 'remove', 'restart the host without it: a full extract carries the call graph'))
+        return refusal { rule = 'thin-index', candidates = cands,
             reason = ('this graph is index-only (%d nodes, no call graph), so %s would report an absence that is a property of the INDEX, not of the code'):format(graph.counts.nodes, verb),
             remedy = 'reopen the root without --index-only (a full extract), or ask a verb graph_info reports as available' }
     end
     -- THE DECLARED NEEDS (CART-1975), after the call graph: both are facts about the host or graph, never the subject
     do
         local _, d = M.unmet(store, v)
-        if d then return refusal { rule = d.rule, reason = d.reason, remedy = d.remedy } end
+        if d then
+            local cands = M.candidates(store, verb)
+            -- a missing mention index on an INDEX-ONLY graph has a host flag that fixes it; one a language opted out
+            -- of has none, and a missing binary is installed, not flagged (the remedy says how)
+            if d.rule == 'no-mention-index' and store.is_index_only and store.is_index_only() then
+                table.insert(cands, 1, host_flag('--index-only', 'remove', 'restart the host without it: a full extract builds the mention index'))
+            end
+            return refusal { rule = d.rule, reason = d.reason, remedy = d.remedy, candidates = cands }
+        end
     end
 
     -- LANGUAGE SCOPE, last of the three capability axes and the only one that has
@@ -4784,11 +4827,12 @@ function M.answer(store, verb, args)
         if snode and not serves then
             local names = table.concat(v.langs, ', ')
             return refusal { rule = 'lang-scope',
+                candidates = M.candidates(store, verb, flang),
                 subject = { node = snode.id, file = snode.file, name = snode.name },
                 reason = ('%s serves %s, and %s is %s. The rewrite it emits is written in one language\'s syntax, so running it here would decline every candidate for reasons that read as facts about YOUR code rather than about this verb'):format(
                     verb, names, snode.file,
                     flang and ('written in ' .. flang) or 'in no language this graph names'),
-                remedy = ('ask graph_info for the `langs` column — the verbs with no language of their own serve any file. The read verbs all do, and on the write side so does txn_plan_moveset, which moves text and discloses the wiring it will not guess'):format() }
+                remedy = ('`candidates` lists the verbs answering the same question that serve this file (empty: none does). graph_info\'s `langs` column says which verbs serve which languages — the verbs with no language of their own serve any file, and on the write side so does txn_plan_moveset, which moves text and discloses the wiring it will not guess'):format() }
         end
     end
 

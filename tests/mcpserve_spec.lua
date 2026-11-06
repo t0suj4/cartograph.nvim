@@ -905,6 +905,10 @@ test('mcpserve: the thin-index CAPABILITY REFUSAL is reachable by a caller', fun
     eq(false, raw.isError, 'isError would flatten the refusal to a string and lose the remedy')
     eq(false, d.ok)
     eq('thin-index', d.refusal.rule, 'the refusal names its RULE')
+    eq('--index-only', d.refusal.candidates[1].name, 'the host flag that lifts it is a candidate (CART-1979)')
+    for _, cand in ipairs(d.refusal.candidates) do
+        ok(cand.kind ~= 'verb' or cand.name ~= 'mentions', 'mentions is unavailable on this graph too, so it is not offered')
+    end
     ok(#d.refusal.reason > 20, 'and its reason')
     ok(#d.refusal.remedy > 10, 'and a remedy, so the agent can fix the call')
     eq(vim.NIL, d.result, 'a refusal has no result at all — not an empty one')
@@ -1046,6 +1050,12 @@ test('mcpserve: mentions REFUSES on a thin index rather than reporting zero file
     eq(false, d.ok)
     eq('no-mention-index', d.refusal.rule)
     ok(#d.refusal.remedy > 10, 'and says what to change')
+    -- CART-1979: on an INDEX-ONLY graph a host flag fixes it, and no same-question verb is available (edges_callers
+    -- needs the call graph this host lacks) — so the flag is the only candidate
+    eq(1, #d.refusal.candidates, vim.inspect(d.refusal.candidates))
+    eq('host-flag', d.refusal.candidates[1].kind)
+    eq('--index-only', d.refusal.candidates[1].name)
+    eq('remove', d.refusal.candidates[1].change)
     eq(vim.NIL, d.absence, 'a missing INSTRUMENT is not an absence in the code')
 end)
 
@@ -1290,6 +1300,8 @@ test('mcpserve: an unknown band REFUSES with the roster, and does not answer fro
     eq(false, raw.isError)
     eq(false, d.ok)
     eq('unknown-band', d.refusal.rule)
+    eq(2, #d.refusal.candidates, 'every open band is a candidate (CART-1979)')
+    for _, cand in ipairs(d.refusal.candidates) do eq('band', cand.kind) end
     -- ★ THE POINT OF REFUSING RATHER THAN DEFAULTING: answering from the active
     -- band would attribute a real result to the wrong root, silently. An agent
     -- that mistyped a band name must not receive a plausible answer.
