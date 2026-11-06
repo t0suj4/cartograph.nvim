@@ -206,6 +206,13 @@ unavailable, look at its siblings. A refusal lists them for you in
 the file's language; `same_subject = false` means you must re-address, e.g. a name
 → a node), `kind = 'host-flag'` rows (`--write` to add, `--index-only` to remove)
 and `kind = 'band'` rows. An empty list is a claim: nothing here answers it.
+Refusals a verb's own run raises carry candidates too, and each verb row has a
+`role`: `alternative` (call it INSTEAD), `producer` (call it to get a valid
+argument — `supplies` says which kind — then RETRY the same call),
+`prerequisite` (call it first, then retry). `kind = 'argument'` rows name a valid
+VALUE for the refused argument (an ambiguous file's matches; `candidates_total`
+states the clip) or `change = 'omit'`. Order: values, prerequisite, producers,
+alternatives, host flag. Everything offered is mounted and available here.
 
 A session can hold the full verb set MINUS some verbs: start the host with
 `--umount mentions,node_at`. The verbs stay listed, `graph_info` shows

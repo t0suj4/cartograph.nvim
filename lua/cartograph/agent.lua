@@ -499,7 +499,7 @@ function M.candidates(store, verb, lang, ns)
             local serves = not (lang and c.langs)
             for _, l in ipairs(lang and c.langs or {}) do if l == lang then serves = true end end
             if serves then
-                out[#out + 1] = { kind = 'verb', name = k, question = c.answers, subject = c.subject,
+                out[#out + 1] = { kind = 'verb', role = 'alternative', name = k, question = c.answers, subject = c.subject,
                     same_subject = c.subject == v.subject,
                     langs = c.langs and table.concat(c.langs, ' ') or NUL }
             end
@@ -510,6 +510,97 @@ end
 
 local function host_flag(name, change, why)
     return { kind = 'host-flag', name = name, change = change, why = why }
+end
+
+-- ── ★★ RUN-TIME REFUSALS NAME WHAT TO DO NEXT, TOO (CART-1986) ─────────────────
+-- CART-1979 gave the central gate's refusals candidates; the 44 rules a verb's OWN run raises (CART-1982 `refuses`)
+-- still named their next move in prose. Each rule gets ONE class here, and the class — not the rule — decides the rows:
+--   arg = <kind>      the ARGUMENT was wrong: the verbs that PRODUCE a valid one (role `producer`, `supplies` = <kind>);
+--                     call one, then RETRY THE SAME VERB — a producer is not an alternative
+--   decline = true    the analysis said no for this subject: the same-question siblings (role `alternative`, CART-1979)
+--   prerequisite = v  a step was skipped: call v first, then retry (role `prerequisite`)
+--   host = flag       the host forbids it: the host flag that grants it
+--   omit = argname    drop that argument (the default is always valid)
+--   none = why        nothing on this host fixes it — an empty list, and `why` is the claim
+-- A refusing SITE may add rows it alone knows (an ambiguous file's hits, the band serving a plan's root, the planner
+-- that minted a plan); they are merged FIRST. Order: argument/band values, prerequisite, producers, alternatives, host
+-- flag. Every verb row passes agent.unavailable for the calling session (CART-1977), and no verb is offered to itself.
+-- ⚠ A RULE NO CLASS COVERS gets NO candidates field (not an empty list, which would claim "nothing answers this"):
+-- tests/refuses_spec.lua fences that every declared rule has a class and every class is used.
+local ARG_PRODUCERS = {
+    node = { 'node_find', 'node_at' }, file = { 'node_find' }, position = { 'node_at' },
+    object = { 'k8s_findings' }, profile = { 'portability_targets' }, journal = { 'journal_list' },
+    tactic = { 'toolbelt_list' }, recipe = { 'txn_save' },
+    plan = 'planners', -- DERIVED: the verbs stash_plan's invocations come from (VERB_OF_FAMILY, CART-1912)
+}
+M.ARG_PRODUCERS = ARG_PRODUCERS
+M.RUN_RULES = {
+    ['ambiguous-file'] = { arg = 'file' }, ['unknown-file'] = { arg = 'file' },
+    ['stale-ref'] = { arg = 'node' }, ['unknown-node'] = { arg = 'node' }, ['no-address'] = { arg = 'node' },
+    ['ref-caveat'] = { arg = 'node' }, ['bad-seed'] = { arg = 'node' },
+    ['no-subject'] = { arg = 'position' },
+    ['ambiguous-object'] = { arg = 'object' }, ['not-k8s-object'] = { arg = 'object' },
+    ['same-profile'] = { arg = 'profile' }, ['profiles-not-comparable'] = { arg = 'profile' },
+    ['unknown-plan'] = { arg = 'plan' }, ['stale-plan'] = { arg = 'plan' }, ['foreign-plan'] = { arg = 'plan' },
+    ['preview-refused'] = { arg = 'plan' }, ['apply-refused'] = { arg = 'plan' }, ['recipe-schema'] = { arg = 'plan' },
+    ['replan-refused'] = { arg = 'plan' }, ['no-plan-minted'] = { arg = 'plan' },
+    ['unknown-entry'] = { arg = 'journal' },
+    ['unknown-tactic'] = { arg = 'tactic' }, ['cannot-run'] = { arg = 'tactic' },
+    ['no-path'] = { arg = 'recipe' }, ['unreadable-path'] = { arg = 'recipe' }, ['unreadable-recipe'] = { arg = 'recipe' },
+    ['cannot-plan'] = { decline = true }, ['cannot-annotate'] = { decline = true }, ['cannot-derive'] = { decline = true },
+    ['cannot-invert'] = { decline = true }, ['does-not-fit'] = { decline = true }, ['no-partition'] = { decline = true },
+    ['executes-on-read-only'] = { host = '--write' }, ['read-only-host'] = { host = '--write' },
+    ['unpreviewed'] = { prerequisite = 'txn_preview' }, ['undo-refused'] = { prerequisite = 'journal_get' },
+    ['outside-plans-dir'] = { omit = 'path' }, ['unwritable-path'] = { omit = 'path' },
+    ['foreign-recipe'] = { none = 'only the host serving the recipe\'s root can load it (a band row is added when this host serves it)' },
+    ['unreplayable-step'] = { none = 'the file was not written by txn_save; nothing re-derives it' },
+    ['no-payload'] = { none = 'the missing argument is text only the caller has' },
+    ['unencodable-recipe'] = { none = 'an argument of the planner is not data; nothing re-encodes it' },
+    ['unrecordable-plan'] = { none = 'a gap in the planner that minted it, not in the call' },
+    ['unrenderable'] = { none = 'the chart needs its dependencies vendored or its required values passed' },
+}
+
+local function producers_of(kind)
+    local p = ARG_PRODUCERS[kind]
+    if p ~= 'planners' then return p or {} end
+    local out = {}
+    for _, v in pairs(M._families) do out[#out + 1] = v end -- (VERB_OF_FAMILY, declared below; read at call time)
+    table.sort(out)
+    return out
+end
+
+--- the candidates of a refusal the verb's RUN raised: rows | nil (nil = the rule has no class and the site named none)
+function M.run_candidates(store, verb, r)
+    local cls, site = M.RUN_RULES[r.rule], type(r.candidates) == 'table' and r.candidates or nil
+    if not cls and not site then return nil end
+    local out, seen = {}, {}
+    local function add(row)
+        if not row then return end
+        if row.kind == 'verb' then
+            if row.name == verb or not M.VERBS[row.name] or M.unavailable(store, row.name) then return end
+            local c = M.VERBS[row.name]
+            row.question, row.subject = row.question or c.answers, row.subject or c.subject
+        end
+        local key = table.concat({ row.kind, tostring(row.name), tostring(row.value) }, '\31')
+        if seen[key] then return end
+        seen[key] = true
+        out[#out + 1] = row
+    end
+    for _, row in ipairs(site or {}) do if row.kind ~= 'verb' then add(row) end end
+    if cls and cls.omit then add({ kind = 'argument', role = 'omit', name = cls.omit, change = 'omit',
+        why = 'omit it: the default is always valid' }) end
+    if cls and cls.prerequisite then add({ kind = 'verb', role = 'prerequisite', name = cls.prerequisite,
+        why = 'call it first, then retry this call' }) end
+    for _, row in ipairs(site or {}) do if row.kind == 'verb' then add(row) end end
+    if cls and cls.arg then
+        for _, pv in ipairs(producers_of(cls.arg)) do
+            add({ kind = 'verb', role = 'producer', name = pv, supplies = cls.arg,
+                why = ('it produces a valid %s; then retry this call'):format(cls.arg) })
+        end
+    end
+    if cls and cls.decline then for _, row in ipairs(M.candidates(store, verb)) do add(row) end end
+    if cls and cls.host then add(host_flag(cls.host, 'add', 'restart the host with it')) end
+    return out
 end
 
 -- ── verb results ────────────────────────────────────────────────────────────
@@ -524,11 +615,23 @@ local function refuse(rule, reason, remedy, extra)
     return { refusal = r }
 end
 
-local function unknown_file(store, path, why, hits)
+-- CART-1986: argument VALUES a refusal can name (an ambiguous file's hits, the objects at a position), as candidate rows
+-- of the argument that was refused, CAPPED — `candidates_total` states the clip
+local ARG_ROW_CAP = 10
+local function arg_rows(argname, values)
+    local rows = {}
+    for i = 1, math.min(#values, ARG_ROW_CAP) do
+        rows[i] = { kind = 'argument', role = 'value', name = argname, value = values[i] }
+    end
+    return rows
+end
+
+local function unknown_file(store, path, why, hits, argname)
     if why == 'ambiguous' then
         return refuse('ambiguous-file',
             ('%q matches %d files in this graph (%s…)'):format(path, #hits, table.concat(hits, ', ', 1, math.min(3, #hits))),
-            'pass a longer path suffix, or the exact key graph_info/node_find reports')
+            'pass a longer path suffix, or the exact key graph_info/node_find reports',
+            { candidates = arg_rows(argname or 'file', hits), candidates_total = #hits })
     end
     return refuse('unknown-file',
         ('%q is not a file in this graph (%d files extracted)'):format(path, #(store.files or {})),
@@ -705,7 +808,7 @@ end
 
 local function v_node_at(store, args)
     local file, why, hits = resolve_file(store, args.file)
-    if not file then return unknown_file(store, args.file, why, hits) end
+    if not file then return unknown_file(store, args.file, why, hits, 'file') end
     local line = math.floor(tonumber(args.line) or 0)
     local subject = { kind = 'position', file = file, line = line }
     local mod = module_of(store, file)
@@ -797,7 +900,7 @@ local function subject_node(store, args)
             'pass `node` (an id from node_find/node_at), `ref` (the durable handle from the same row) or `file` and `line`')
     end
     local file, why, hits = resolve_file(store, args.file)
-    if not file then return nil, unknown_file(store, args.file, why, hits) end
+    if not file then return nil, unknown_file(store, args.file, why, hits, 'file') end
     local optapply = require 'cartograph.optapply'
     local id = optapply.at(store, file, math.floor(tonumber(args.line) or 0))
     if not id then
@@ -1041,7 +1144,7 @@ end
 
 local function v_why(store, args)
     local file, why, hits = resolve_file(store, args.file)
-    if not file then return unknown_file(store, args.file, why, hits) end
+    if not file then return unknown_file(store, args.file, why, hits, 'file') end
     local line = math.floor(tonumber(args.line) or 0)
     local col = math.floor(tonumber(args.col) or 1)
     local subject = { kind = 'position', file = file, line = line, col = col }
@@ -1099,7 +1202,7 @@ local function v_lint_run(store, args)
     local file
     if args.file and args.file ~= '' then
         local f, why, hits = resolve_file(store, args.file)
-        if not f then return unknown_file(store, args.file, why, hits) end
+        if not f then return unknown_file(store, args.file, why, hits, 'file') end
         file = f
     end
     local findings, declined = lint.run(store, only and { only = only } or nil)
@@ -1582,7 +1685,7 @@ local function v_mentions(store, args)
     local from
     if args.from and args.from ~= '' then
         local f, why, hits = resolve_file(store, args.from)
-        if not f then return unknown_file(store, args.from, why, hits) end
+        if not f then return unknown_file(store, args.from, why, hits, 'from') end
         from = f
     end
     local ev = require('cartograph.mentions').evidence(store, args.name, from)
@@ -2107,6 +2210,22 @@ local VERB_OF_FAMILY = {
 M._families = VERB_OF_FAMILY
 
 local PLAN_CAP = 16
+
+-- CART-1986: what a refusal about a HELD plan can name precisely — the band that serves the plan's root (when this host
+-- has one) and the planner that minted it (the invocation stash_plan recorded), before the class's generic producers
+local function band_row(root)
+    local bn = root and session.by_root and session.by_root(root)
+    return bn and { kind = 'band', role = 'value', name = bn, change = 'pass', why = 'pass it as `band`: it serves that root' } or nil
+end
+local function plan_site_rows(e)
+    local rows = {}
+    local b = band_row(e.root)
+    if b then rows[#rows + 1] = b end
+    local mv = e.invocation and e.invocation.verb
+    if mv then rows[#rows + 1] = { kind = 'verb', role = 'producer', name = mv, supplies = 'plan',
+        why = 'the planner that minted this plan: call it again for a fresh handle' } end
+    return rows
+end
 M._plans = {}
 local plan_seq = 0
 
@@ -2147,12 +2266,13 @@ local function held_plan(store, id)
     if e.root ~= (store.data or {}).root then
         return nil, refuse('foreign-plan',
             ('plan %s was built against %s, and this host serves %s'):format(id, tostring(e.root), tostring((store.data or {}).root)),
-            'plan against the graph you mean to edit')
+            'plan against the graph you mean to edit', { candidates = plan_site_rows(e) })
     end
     if e.gen ~= (store.generation or 0) then
         return nil, refuse('stale-plan',
             ('plan %s was computed against generation %d and this graph is at %d — every line offset in it may have moved'):format(id, e.gen, store.generation or 0),
-            'call the same txn_plan_* verb again against the current graph, preview the new plan, then apply that one')
+            'call the same txn_plan_* verb again against the current graph, preview the new plan, then apply that one',
+            { candidates = plan_site_rows(e) })
     end
     return e
 end
@@ -3250,7 +3370,8 @@ local function v_txn_load(store, args)
     local root = (store.data or {}).root
     if art.root ~= root then
         return refuse('foreign-recipe', ('that recipe was built against %s and this host serves %s')
-            :format(tostring(art.root), tostring(root)), 'load it on the host that serves its root')
+            :format(tostring(art.root), tostring(root)), 'load it on the host that serves its root',
+            { candidates = { band_row(art.root) } })
     end
     local step = (art.steps or {})[1]
     if type(step) ~= 'table' or not step.verb then
@@ -3801,7 +3922,7 @@ local function v_k8s_traces(store, args)
     end
     if #ids > 1 then
         return refuse('ambiguous-object', ('%d objects answer to %s'):format(#ids, args.object or (tostring(args.file) .. ':' .. tostring(args.line))),
-            'pass one node id', { candidates = ids })
+            'pass one node id', { candidates = arg_rows('object', ids), candidates_total = #ids })
     end
     local ts, why = require('cartograph.k8s').traces(data, ids[1])
     if not ts then return refuse('not-k8s-object', tostring(why), 'k8s_findings lists the objects this graph read') end
@@ -4953,6 +5074,7 @@ local function answer(store, verb, args)
         -- ★ THE DECLARED `refuses` IS ENFORCED WHERE A RUN'S REFUSAL LEAVES (CART-1982), the way an undeclared absence
         -- kind is: the refusal still goes out (its rule is information the caller needs), and the undeclared rule is
         -- DISCLOSED as an envelope bug naming it, so a contract drift is never silent
+        res.refusal.candidates = M.run_candidates(store, verb, res.refusal) -- CART-1986 (nil when unclassified)
         local d, k = refusal(res.refusal)
         local rule = res.refusal.rule
         if not vim.tbl_contains(v.refuses or {}, rule) then

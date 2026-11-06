@@ -147,6 +147,10 @@ test('agent: an empty result NEVER arrives as a bare list — every verb names i
         eq('refusal', status, c[1] .. ' must REFUSE, not answer')
         eq(c[3], d.refusal.rule)
         ok(#d.refusal.remedy > 10, c[3] .. ' says what to change')
+        -- CART-1986: and names, as data, the verb that produces a valid argument
+        local prod = false
+        for _, x in ipairs(d.refusal.candidates or {}) do if x.role == 'producer' then prod = true end end
+        ok(prod, c[3] .. ' names a producer to retry with: ' .. vim.inspect(d.refusal.candidates))
         eq(vim.NIL, d.result, 'a refusal has no result at all — not an empty one')
         eq(vim.NIL, d.absence, 'and it is not an absence')
     end
@@ -1120,6 +1124,13 @@ test('mcpserve: --umount subtracts verbs from THIS session: listed, refused `unm
     for _, cand in ipairs(d.refusal.candidates) do if cand.name == 'node_find' then sib = true end end
     ok(sib, 'node_find, mounted and answering the same question, is offered')
     ok(c:call('node_find', { query = 'pub' }).ok, 'and a mounted verb answers')
+    -- CART-1986 over the wire: a run-time refusal's producers respect the session — node_at is unmounted here
+    local s = c:call('edges_callers', { node = 'no::such::id' })
+    eq('unknown-node', s.refusal.rule)
+    local names = {}
+    for _, x in ipairs(s.refusal.candidates) do names[x.name] = x.role end
+    eq('producer', names.node_find)
+    eq(nil, names.node_at, 'an unmounted producer is not offered')
     c:close()
     -- an unknown verb name is a caller error at startup, never silently ignored
     local c2 = mcp.connect { cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l',

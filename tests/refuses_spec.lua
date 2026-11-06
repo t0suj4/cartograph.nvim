@@ -104,3 +104,105 @@ test('refuses: a real argument-dependent refusal is declared, and graph_info pub
     eq({}, by.graph_info.refuses, 'an empty set is published as a claim, not omitted')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── CART-1986: what a RUN-TIME refusal names next ──────────────────────────────
+test('refuses: every declared rule has exactly ONE candidate class, and every class and producer is real', function ()
+    local declared = {}
+    for _, name in ipairs(agent.ORDER) do for _, r in ipairs(agent.VERBS[name].refuses) do declared[r] = true end end
+    local KEYS = { arg = true, decline = true, prerequisite = true, host = true, omit = true, none = true }
+    local used_kind = {}
+    for r in pairs(declared) do ok(agent.RUN_RULES[r], r .. ' is declared by a verb, so it needs a candidate class') end
+    for r, cls in pairs(agent.RUN_RULES) do
+        ok(declared[r], r .. ' has a class but no verb declares it (dead entry)')
+        local n = 0
+        for k in pairs(cls) do ok(KEYS[k], r .. ': unknown class key ' .. k); n = n + 1 end
+        eq(1, n, r .. ' has exactly one class')
+        if cls.arg then ok(agent.ARG_PRODUCERS[cls.arg], r .. ': argument kind ' .. cls.arg .. ' has producers'); used_kind[cls.arg] = true end
+        if cls.prerequisite then ok(agent.VERBS[cls.prerequisite], r .. ': prerequisite is a verb') end
+        if cls.none then ok(#cls.none > 10, r .. ': a `none` class states WHY nothing helps') end
+    end
+    for kind, p in pairs(agent.ARG_PRODUCERS) do
+        ok(used_kind[kind], 'argument kind ' .. kind .. ' is used by some rule')
+        if type(p) == 'table' then for _, v in ipairs(p) do ok(agent.VERBS[v], kind .. ': producer ' .. v .. ' is a verb') end
+        else eq('planners', p) end
+    end
+end)
+
+local function full_stub()
+    return { is_index_only = function () return false end, data = { calls = {} }, has_mention_index = function () return true end }
+end
+local function roles(rows)
+    local o = {}
+    for _, x in ipairs(rows or {}) do o[#o + 1] = (x.role or x.kind) .. ':' .. tostring(x.name) end
+    return table.concat(o, ' ')
+end
+
+test('refuses: each class yields its rows — producers to RETRY with, prerequisites, alternatives, host flags, omissions', function ()
+    local s = full_stub()
+    eq('producer:node_find', roles(agent.run_candidates(s, 'node_at', { rule = 'unknown-file' })),
+        'a wrong file: the verb that produces valid ones (node_at is never offered to itself)')
+    eq('producer:node_find', roles(agent.run_candidates(s, 'node_at', { rule = 'no-address' })),
+        'node_at produces nodes, but is never offered as its own producer')
+    local p = agent.run_candidates(s, 'edges_callers', { rule = 'stale-ref' })
+    eq('producer:node_find producer:node_at', roles(p))
+    eq('node', p[1].supplies, 'a producer says which argument it supplies')
+    eq('prerequisite:txn_preview', roles(agent.run_candidates(s, 'txn_apply', { rule = 'unpreviewed' })))
+    eq('prerequisite:journal_get', roles(agent.run_candidates(s, 'txn_undo', { rule = 'undo-refused' })))
+    local alt = agent.run_candidates(s, 'txn_plan_declare', { rule = 'does-not-fit' })
+    ok(roles(alt):find('alternative:txn_plan_replace', 1, true), 'a decline offers the same-question siblings: ' .. roles(alt))
+    for _, x in ipairs(alt) do eq('change-it', x.question) end
+    eq('host-flag:--write', roles(agent.run_candidates(s, 'toolbelt_run', { rule = 'read-only-host' })))
+    eq('omit:path', roles(agent.run_candidates(s, 'txn_save', { rule = 'unwritable-path' })))
+    eq({}, agent.run_candidates(s, 'helm_chart', { rule = 'unrenderable' }), 'a `none` class is an empty list: a claim')
+    -- plan handles come from the DERIVED planner set (VERB_OF_FAMILY), never a list here
+    local planners = agent.run_candidates(s, 'txn_preview', { rule = 'unknown-plan' })
+    local fam = {}
+    for _, v in pairs(agent._families) do fam[v] = true end
+    for _, x in ipairs(planners) do ok(fam[x.name], x.name .. ' mints plans') end
+    eq(vim.tbl_count(fam), #planners)
+    -- a site's own rows come FIRST, then the class's
+    local merged = agent.run_candidates(s, 'txn_apply', { rule = 'stale-plan', candidates = {
+        { kind = 'band', role = 'value', name = 'b2', change = 'pass' },
+        { kind = 'verb', role = 'producer', name = 'txn_plan_optimize', supplies = 'plan' } } })
+    eq('value:b2', roles({ merged[1] })); eq('producer:txn_plan_optimize', roles({ merged[2] }))
+    eq(1 + vim.tbl_count(fam), #merged, 'the site\'s planner is not repeated by the class')
+    -- an unclassified rule with no site rows has NO candidates field — never a false "nothing answers this"
+    eq(nil, agent.run_candidates(s, 'node_at', { rule = 'never-classified' }))
+end)
+
+test('refuses: an ambiguous file names its hits under the ARGUMENT that was refused, capped, then the producer', function ()
+    local root = vim.fn.tempname()
+    for _, d in ipairs({ 'a', 'b' }) do
+        vim.fn.mkdir(root .. '/' .. d, 'p')
+        local fd = assert(io.open(root .. '/' .. d .. '/m.lua', 'w')); fd:write('local M = {}\nfunction M.f() return 1 end\nreturn M\n'); fd:close()
+    end
+    store.ingest(ts.extract(root))
+    local d = agent.answer(store, 'node_at', { file = 'm.lua', line = 2 })
+    eq('ambiguous-file', d.refusal.rule)
+    local cs = d.refusal.candidates
+    eq('argument', cs[1].kind); eq('file', cs[1].name); eq('argument', cs[2].kind)
+    eq({ 'a/m.lua', 'b/m.lua' }, (function () local v = { cs[1].value, cs[2].value }; table.sort(v); return v end)())
+    eq(2, d.refusal.candidates_total)
+    eq('producer:node_find', roles({ cs[3] }))
+    -- mentions refuses its `from`, and the row says so (java: lua opts out of the mention index mentions needs)
+    if parser_available('java') then
+        local jroot = vim.fn.tempname()
+        for _, dd in ipairs({ 'a', 'b' }) do
+            vim.fn.mkdir(jroot .. '/' .. dd, 'p')
+            -- (the mention index holds the names a file USES from outside, so the fixture must use one)
+            local jf = assert(io.open(jroot .. '/' .. dd .. '/M.java', 'w')); jf:write('class M { int f() { return Helper.compute(1); } }\n'); jf:close()
+        end
+        store.ingest(ts.extract(jroot))
+        ok(store.has_mention_index(), 'the premise: this graph carries a mention index')
+        local m = agent.answer(store, 'mentions', { name = 'Helper', from = 'M.java' })
+        eq('ambiguous-file', m.refusal.rule)
+        eq('from', m.refusal.candidates[1].name)
+        vim.fn.delete(jroot, 'rf')
+    end
+    -- the CALLING SESSION decides what is offered (CART-1977): with node_find unmounted, it is not a candidate
+    local ns = assert(agent.umount_verb(nil, 'node_find'))
+    local u = agent.answer(store, 'node_at', { file = 'nosuch.lua', line = 1 }, { mounts = ns })
+    eq('unknown-file', u.refusal.rule)
+    eq({}, u.refusal.candidates, 'the only producer is unmounted in this session')
+    vim.fn.delete(root, 'rf')
+end)
