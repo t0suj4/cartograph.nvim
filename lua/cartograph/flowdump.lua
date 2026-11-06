@@ -19,7 +19,17 @@
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ],
---       upvalues = [var...], vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--       upvalues = [var...], declares = [var...], vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--     program_vars = [var...],
+--       (DECLARES, CART-1987 / flowpath FLOW-0148: the variables the function DECLARES — one cell per ACTIVATION of it,
+--       whoever captures them. Its params, self and vararg; every local it declares (G7.LOCALS: `local n` with no
+--       initializer too, which names n nowhere in the body — `inc`'s n is declared by the CHUNK), loop variables; and its
+--       TEMPORARIES: the ports the walk created while walking this function (G7.PFN) and the dump's own per-function
+--       variables. Never a PROGRAM-WIDE one: a named port (a module's result `mod:<file>`, a global's cached read, the
+--       holders, init's ports), a field cell, a port no function's walk created — those are `program_vars`, one cell for
+--       the whole run. Always present, sorted. THE PARTITION: every variable the dump names is in exactly one function's
+--       `declares` or in `program_vars`; a variable another function names is in that function's `upvalues`. OWNERSHIP
+--       is now read off the dump directly: F's own = F.declares)
 --       (UPVALUES, CART-1958: the variables the function CAPTURES from enclosing functions — an outer local it reads or
 --       writes, also through a function nested inside it (each function between the local's and the reader captures
 --       it), the walk's own scope lookup (fp.ups; what debug.setupvalue writes, CART-1803). Always present, `[]` when
@@ -389,7 +399,8 @@ function M.build(rec, X, sink)
     local nextv = X.N
     local function newvar() nextv = nextv + 1; return nextv end
     local used = {}
-    local function V(p) if p then used[p] = true end; return p end
+    local CUR -- (the function being encoded: the variables it names, for its `declares`, CART-1987)
+    local function V(p) if p then used[p] = true; if CUR then CUR[p] = true end end; return p end
     -- init: what the solve itself starts with
     local init = { { 'new', V(X.GPORT), X.GOBJ } }
     if X.FENVP then init[#init + 1] = { 'new', V(X.FENVP), X.GOBJ } end
@@ -459,16 +470,47 @@ function M.build(rec, X, sink)
     -- ignores the key reads what it always did; `spread` [[index, position]] each call / pcall / ret whose last operand
     -- spreads from that 1-based position; `argtable` a vararg function under ver 51 that never names `...`: PUC 5.1's
     -- implicit `arg` table)
+    -- (CART-1987: a port is PROGRAM-WIDE when it is named (the walk's `named` table — modules, globals, holders, init's).
+    -- Every other port was created while walking ONE function, G7.PFN says which. A field CELL is never a dump variable
+    -- — fields live in `h`: measured on the self tree, 0 of 191,171 unnamed field ports in solution.v — so it needs no rule)
+    local SHARED = {}
+    for _, p in pairs(X.named or {}) do SHARED[p] = true end
+    -- (and the CACHED GLOBAL READ, G7.gread: one port per global name per environment, created lazily — its load lands in
+    -- whichever function read the global FIRST, and every later reader copies from it. Measured before this line on the
+    -- self tree: 32 such ports, named by 5,680 instructions in other functions, misread as the first reader's temporary)
+    for _, g in ipairs(X.GREADS or {}) do for _, p in pairs(g) do SHARED[p] = true end end
+    local LOCALSET = {}
+    for fk, l in pairs(X.LOCALS or {}) do local t = {}; for _, q in ipairs(l) do t[q] = true end; LOCALSET[fk] = t end
+    local DECLARED = {} -- var -> the function that declares it
+    local function declares_of(name, params, self, va, seen)
+        local d = {}
+        local function add(p) if p and not d[p] then d[p] = true end end
+        for _, p in ipairs(params) do add(p) end
+        add(self); add(va.vararg)
+        local own = LOCALSET[name] or {}
+        for q in pairs(own) do if not SHARED[q] then add(q) end end
+        for p in pairs(seen or {}) do
+            if not SHARED[p] and ((X.PFN and X.PFN[p] == name) or own[p] or p > X.N) then add(p) end
+        end
+        -- (an upvalue is the CAPTURER's view of an outer local: never its declaration)
+        for _, u in ipairs(va.upvalues or {}) do if u ~= self then d[u] = nil end end
+        local l = {}
+        for p in pairs(d) do l[#l + 1] = p; DECLARED[p] = DECLARED[p] or name end
+        table.sort(l)
+        return l
+    end
     local function emitfn(name, params, self, body, tags, va)
         va = va or {}
         local ups = vars(va.upvalues or {})
-        local extra = ',"upvalues":' .. jarr(ups) .. (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
+        local decl = vars(declares_of(name, params, self, va, CUR))
+        CUR = nil
+        local extra = ',"upvalues":' .. jarr(ups) .. ',"declares":' .. jarr(decl) .. (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
             .. (va.spread and #va.spread > 0 and (',"spread":' .. jarr(va.spread)) or '')
             .. (va.argtable and ',"argtable":true' or '')
         fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s%s}'):format(FN(name), jarr(vars(params)),
             V(self), jarr(body), jarr(tags), extra)
         if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags,
-            upvalues = ups, vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
+            upvalues = ups, declares = decl, vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
     end
     local keys = {}
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
@@ -477,6 +519,7 @@ function M.build(rec, X, sink)
     local maps = {} -- (a function's recorder index -> its DUMPED body index: what an answer's `ins` names, CART-1725)
     for _, name in ipairs(keys) do
         local body, tags, map = {}, {}, {}
+        CUR = {}
         maps[name] = map
         for i, ins in ipairs(rec.fns[name] or {}) do
             local e = enc(ins)
@@ -563,6 +606,7 @@ function M.build(rec, X, sink)
     rec._self[iself] = {}
     local ij = {}
     for i, ins in ipairs(init) do ij[i] = ins end
+    CUR = {} -- (init names only program-wide variables and its self: it declares its self)
     emitfn('init', {}, iself, ij, inittags)
     -- sites
     local sj = {}
@@ -1009,6 +1053,15 @@ function M.build(rec, X, sink)
     put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')
     put('"sites":['); putl(sj); put('],')
     put('"functions":['); putl(fjson); put('],')
+    -- (PROGRAM_VARS, CART-1987: every variable the dump names that no function declares — one cell for the whole run;
+    -- computed here, once every variable the dump names has been named)
+    do
+        local pv = {}
+        for p in pairs(used) do if not DECLARED[p] then pv[#pv + 1] = p end end
+        table.sort(pv)
+        put('"program_vars":' .. jarr(pv) .. ',')
+        if LD then LD.program_vars = pv end
+    end
     sj, fjson = nil, nil -- (written: the strings go, the labels below need only LD)
     put('"solution":{"v":['); putl(vj); put('],"top":['); putl(topj); put('],"h":['); putl(hj)
     put('],"hdyn":['); putl(hdj); put('],"htop":['); putl(htj); put('],"htaint":['); putl(hxj); put('],"hkeys":['); putl(hkj)

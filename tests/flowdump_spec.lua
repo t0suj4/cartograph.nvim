@@ -1662,11 +1662,12 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
         local same = true
         FD._ld_probe = function (LD, D)
             local s, c = D.solution, D.contracts
-            local proj = { functions = {}, sites = {}, names = { fields = D.names.fields },
+            local proj = { functions = {}, sites = {}, names = { fields = D.names.fields }, program_vars = D.program_vars,
                 solution = { v = s.v, top = s.top, h = s.h, hdyn = s.hdyn, htop = s.htop, taint = { ports = s.taint.ports, escaped = s.taint.escaped } },
                 contracts = { library_sites = c.library_sites, package_loaded_sites = c.package_loaded_sites, host_models = c.host_models, ext_channel = c.ext_channel, clauses = c.clauses } }
             for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags,
                 upvalues = f.upvalues, -- (what it captures, CART-1958)
+                declares = f.declares, -- (what it declares, CART-1987)
                 vararg = f.vararg, spread = f.spread, argtable = f.argtable } end -- (the vararg markers, CART-1924)
             for i, x in ipairs(D.sites) do proj.sites[i] = { id = x.id, kind = x.kind, label = x.label, fn = x.fn, host = x.host } end
             same = vim.deep_equal(vim.json.decode(vim.json.encode(LD)), vim.json.decode(vim.json.encode(proj)))
@@ -2019,6 +2020,118 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
     D = solve('local t = {}\ndebug.setmetatable(t, { __index = {} })\nreturn t\n')
     eq(0, gaps(D), 'a table target: no gap')
     ok(D.contracts.clauses['function-no-metatable'], 'and the clause stands')
+end)
+
+-- (CART-1987, flowpath FLOW-0148: the core keeps a captured variable as ONE cell per activation of its DECLARING
+-- function, and `upvalues` says who captures, not who declares — `local n` with no initializer names n in no body, so
+-- the chunk that declares it could not be recovered. Each function lists `declares`; `program_vars` the rest)
+test('flowdump: each function lists the variables it DECLARES, and the rest are program_vars — a partition (CART-1987)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'local n',
+        'local function inc(v) local old = n; n = v; return old end',
+        'inc(A); local y = inc(B)',
+        'local function outer() local k = A; return function () return function () return k end end end',
+        'local function pure(p) local q = p; return q end',
+        'local function two() return B, A, n end',
+        'for i = 1, 2 do local w = i end',
+        'local function g1() return tostring(A) end',
+        'local function g2() return tostring(B) end',
+        'return y, outer, pure, two, g1, g2' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    eq(#D.functions, select(2, R.dump:gsub('"declares":%[', '')), 'every function entry has the key')
+    ok(R.dump:find('"program_vars":[', 1, true), 'and the dump states its program-wide variables')
+    local F = {}
+    for i, nm in ipairs(D.names.functions) do F[nm] = D.functions[i] end
+    local function has(l, v) return vim.tbl_contains(l or {}, v) end
+    local chunk, inc = F['chunk:m.lua'], F['m.lua::inc@2']
+    local n = inc.upvalues[1]
+    -- ★ THE CASE upvalues COULD NOT ANSWER: the chunk declares n, and never names it (`local n` emits nothing)
+    ok(has(chunk.declares, n), 'the chunk declares n')
+    ok(not has(inc.declares, n), 'inc captures n and does not declare it')
+    for _, p in ipairs(inc.params) do ok(has(inc.declares, p), 'inc declares its parameter') end
+    ok(has(inc.declares, inc.self), 'and its self')
+    local old
+    for _, ins in ipairs(inc.body) do if ins[1] == 'copy' and ins[3] == n then old = ins[2] end end
+    ok(old and has(inc.declares, old), 'and its own local `old` (the copy n -> old writes it)')
+    -- its TEMPORARIES too: a call's result variables are the calling function's own, fresh per activation (the walk's
+    -- creator record) — the chunk's, and a NESTED function's (g1's tostring call), which the walk enters on its own id
+    local results, inner_results = 0, 0
+    for nm, f in pairs(F) do
+        for _, ins in ipairs(f.body) do
+            if ins[1] == 'call' then
+                for _, r in ipairs(ins[2]) do
+                    -- (init runs ONCE and builds the program's shared state: its results are program_vars, checked below)
+                    if nm ~= 'init' then
+                        results = results + 1
+                        if nm ~= 'chunk:m.lua' then inner_results = inner_results + 1 end
+                        ok(has(f.declares, r), nm .. ' declares its call result ' .. r)
+                    end
+                end
+            end
+        end
+    end
+    ok(results > 0 and inner_results > 0, 'the premise: the chunk and a nested function have call results')
+    local outer, mid, inner = F['m.lua::outer@4'], F['m.lua::outer#ret@4'], F['m.lua::fn#ret@4']
+    local k = inner.upvalues[1]
+    ok(has(outer.declares, k), 'outer declares k')
+    ok(not has(mid.declares, k) and not has(inner.declares, k), 'the functions that capture k do not')
+    -- ★ THE PARTITION: each variable declared once, never also program-wide; each upvalue declared by ANOTHER function
+    local owner = {}
+    for nm, f in pairs(F) do
+        local sorted = vim.deepcopy(f.declares); table.sort(sorted)
+        eq(sorted, f.declares, nm .. ': sorted')
+        for _, v in ipairs(f.declares) do
+            ok(owner[v] == nil, ('%d is declared by %s and %s'):format(v, tostring(owner[v]), nm)); owner[v] = nm
+        end
+    end
+    local prog = {}
+    for _, v in ipairs(D.program_vars) do ok(not owner[v], v .. ' is program-wide AND declared by ' .. tostring(owner[v])); prog[v] = true end
+    for nm, f in pairs(F) do
+        for _, u in ipairs(f.upvalues) do
+            ok(owner[u] and owner[u] ~= nm, ('%s captures %d, declared by %s'):format(nm, u, tostring(owner[u])))
+        end
+    end
+    for _, row in ipairs(D.solution.v) do
+        ok(owner[row[1]] or prog[row[1]], 'every solved variable is declared or program-wide: ' .. row[1])
+    end
+    -- ★ AND NO BODY NAMES ANOTHER FUNCTION'S DECLARED VARIABLE except through its own upvalues — one cell per activation
+    -- of the declarer is only sound if nobody else reaches it. g1 and g2 both read the global tostring: the CACHED read
+    -- (G7.gread) is created by whichever reads first and copied by the other, so it must be program-wide, never g1's
+    local POS = { new = { 2 }, copy = { 2, 3 }, load = { 2, 3 }, loadDyn = { 2, 3, 4 }, store = { 2, 4 }, storeDyn = { 2, 3, 4 },
+        call = { 2, 3, 4 }, pcall = { 2, 3, 4 }, keys = { 2, 3 }, storeRaw = { 2, 4 }, storeRawDyn = { 2, 3, 4 },
+        loadRaw = { 2, 3, 4 }, error = { 2 }, getmeta = { 2, 3 }, copyKeyed = { 2, 3, 4, 5 }, op = { 2, 3 },
+        setmeta = { 2, 3 }, cocreate = { 2, 4 }, resume = { 2, 3, 4 }, yield = { 2, 3 }, ret = { 2 } }
+    local cross = 0
+    for nm, f in pairs(F) do
+        local up = {}
+        for _, u in ipairs(f.upvalues) do up[u] = true end
+        local function chk(v)
+            if type(v) == 'number' and owner[v] and owner[v] ~= nm and not up[v] then
+                cross = cross + 1; ok(false, ('%s names %d, declared by %s'):format(nm, v, owner[v]))
+            end
+        end
+        for _, ins in ipairs(f.body) do
+            ok(POS[ins[1]], 'a known opcode: ' .. tostring(ins[1]))
+            for _, k in ipairs(POS[ins[1]] or {}) do
+                local x = ins[k]
+                if type(x) == 'table' then for _, v in ipairs(x) do chk(v) end else chk(x) end
+            end
+        end
+    end
+    eq(0, cross)
+    -- the globals port init creates is program-wide; init declares only its self
+    eq('new', F.init.body[1][1])
+    ok(prog[F.init.body[1][2]], 'the globals port is a program var')
+    eq({ F.init.self }, F.init.declares)
+    for _, ins in ipairs(F.init.body) do
+        if ins[1] == 'call' then for _, r in ipairs(ins[2]) do ok(prog[r], 'init\'s call result is program-wide: ' .. r) end end
+    end
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
 
 -- (CART-1958, flowpath FLOW-0147: a captured local is ONE variable for every function naming it, and nothing said

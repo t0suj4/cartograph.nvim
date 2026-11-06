@@ -425,7 +425,7 @@ local function build(store, opts)
     end
     -- (opts.dump: the program in the core IR, with this solve's solution — flowdump.lua, CART-1710. G7.mu runs a builtin
     -- translated by hand with its inner primitives MUTED; G7.ins / G7.gap record into the current function)
-    if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0; G7.INSAT = {} end
+    if opts.dump then G7.REC = require('cartograph.flowdump').recorder(); G7.M = 0; G7.INSAT = {}; G7.PFN = {} end -- (PFN: each port's creating function, for the dump's `declares`, CART-1987)
     function G7.mu(f)
         if not G7.REC then return f() end
         G7.M = G7.M + 1
@@ -462,7 +462,7 @@ local function build(store, opts)
     local FUEL = tonumber(opts.fuel or os.getenv('CARTOGRAPH_FLOWTYPE_FUEL') or '')
     local OUT = false
     local walking, NW, NOW = true, 0, 0
-    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; if G7.PORTFILE then G7.PORTFILE[N] = G7.WALKFILE end; return N end
+    local function new() N = N + 1; if G7.LOCP then G7.LOCP[N] = G7.CURLOC end; if G7.TR then G7.TR.PFN[N] = G7.CURFN end; if G7.PFN then G7.PFN[N] = G7.CURFN end; if G7.PORTFILE then G7.PORTFILE[N] = G7.WALKFILE end; return N end
     -- (experiment refl-nocap: a port of a reflecting file is exempt from CAP)
     function G7.capped(p) return not (G7.PORTFILE and G7.REFLFILE[G7.PORTFILE[p] or false]) end
     local function newobj(info) NO = NO + 1; obinfo[NO] = info; if G7.TR then G7.TR.OFN[NO] = G7.CURFN end; if G7.OBJFN then G7.OBJFN[NO] = G7.WALKFN or false end; return NO end
@@ -2682,7 +2682,7 @@ local function build(store, opts)
             scan(tree)
         end
         G7.MAPNAME = G7.MAPNAMEF and G7.MAPNAMEF[file] or NOTHING
-        if G7.TR then G7.CURFN = 'chunk:' .. file end
+        if G7.TR or G7.PFN then G7.CURFN = 'chunk:' .. file end
         if G7.PROG == nil then G7.PROG = require('cartograph.programs').of(store) or false end
         if G7.PROG then G7.useenv(G7.mkenv(G7.PROG.env[file] or 'default')) end
         if not G7.STRLIB then
@@ -2919,7 +2919,7 @@ local function build(store, opts)
             local o = newobj(id)
             if not inst and not clone then local _, _, b0, _, _, e0 = n:range(true); G7.FNSIZE[id] = e0 - b0 end -- (its bytes: the context selection's cost)
             local trfn0 = G7.CURFN -- (experiment `trace`: from here the ports are the function's own — params, ret, err)
-            if G7.TR then G7.CURFN = id end
+            if G7.TR or G7.PFN then G7.CURFN = id end
             addobj(p, o)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
             fp.rets = { fp.ret }
@@ -3000,7 +3000,7 @@ local function build(store, opts)
                 end
             end
             G7.LASTFP = fp
-            if G7.TR then G7.CURFN = trfn0 end
+            if G7.TR or G7.PFN then G7.CURFN = trfn0 end
             return p
         end
         local function callv(n, want)
@@ -6572,7 +6572,9 @@ local function build(store, opts)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
             LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
-            LOCP = G7.LOCP, named = named, ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
+            LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
+            GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
+             ISELF = G7.ISELF, CHUNKSELF = G7.CHUNKSELF, -- (an internal port's name in taint.from: its statement, its key, CART-1824)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)
