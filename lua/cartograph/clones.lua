@@ -13,14 +13,11 @@
 -- (AST anti-unification), which this substrate feeds.
 --
 -- SCOPE (honest): (1) re-uses expr.of per function (one whole-file re-parse each —
--- ~5ms/fn, fine for an on-demand tool, not a hot path). (2) locals = params ∪ df-defs;
--- a for-loop binder df does not record as a def stays a literal name in every ROW KEY.
--- ⚠ "A RARE UNDER-ABSTRACTION" IS MEASURED FALSE — it was 17 of the 22 `localglobal`
--- struct holes over `lua/`. The ANTI-UNIFIER now sees binders (`with_binders`); the key
--- side is CART-0962, and it is deferred because it moves every tier count, not because
--- it is rare. "Never a false MERGE" still holds and holds for the Mer-S key too: a
--- missed local keeps its NAME, so two sites key differently and SPLIT. The cost is
--- recall. (3)
+-- ~5ms/fn, fine for an on-demand tool, not a hot path). (2) locals = params ∪ df-defs ∪
+-- the spec-declared LOOP BINDERS (`with_binders`, the anti-unifier's walk since CART-0876
+-- and the row key's since CART-0705). A language that declares no `binders` (python,
+-- CART-1973) still keys its loop variable as a literal name: that only SPLITS a real
+-- clone, never merges — a missed local keeps its NAME. (3)
 -- FUNCTION-granular; block/window granularity (a clone inside one function, e.g. the
 -- provider's resolve logic shared by extract & relink) is M.blocks, keyed by the same
 -- variant relation over a window of rows (CART-1412).
@@ -30,6 +27,8 @@ local at = require 'cartograph.at'
 local shortlist = require 'cartograph.shortlist'
 
 local M = {}
+
+local with_binders -- (defined with binder_rule below; fn_rows widens its locals with it, CART-0705)
 
 -- a function body's ROWS: (nrows, lines, nparams, exprs, locals, params) or nil when it has none. exprs/locals feed
 -- the variant key, the near tier's relative keys and the anti-unifier.
@@ -69,6 +68,16 @@ local function fn_rows(eo)
         -- MEASURED: 31 of 6061 functions on our tree, 183 of 3047 on elasticsearch's `common`. Every reader tests a
         -- row for truth (rel_keys' '~', row_term -> 'row~', anti_unify_row's norow guard, ho_row_parts).
         exprs[#exprs + 1] = s.expr or false
+    end
+    -- ★ THE LOOP BINDERS ARE LOCALS IN THE KEY TOO (CART-0705, CART-0962). df records `for i, item in …` as USES only,
+    -- so a loop variable stayed a literal name in every row key and two loops differing only in its spelling SPLIT —
+    -- selectively against the query agents send most ("two loops over the same structure that drifted"). The same
+    -- spec-declared walk the anti-unifier has read since CART-0876, so key and hole agree on what a binder is; it
+    -- never takes the iterated expression or a numeric bound, the one error that would MERGE. A binder that rebinds a
+    -- parameter's name is a redefinition: it leaves the call-site-safe set like any other.
+    local wb = with_binders(exprs, eo.lang, locals)
+    if wb ~= locals then
+        for n in pairs(wb) do locals[n] = true; params[n] = nil end
     end
     return #stmts, lines, #(eo.fl.params or {}), exprs, locals, params
 end
@@ -1176,7 +1185,7 @@ end
 --- row expressions). Returns `locals` ITSELF when the language declares no binders or
 --- the body binds none, so the common case allocates nothing; otherwise a table whose
 --- `__index` is the original, which is what keeps this a view rather than a mutation.
-local function with_binders(exprs, lang, locals)
+function with_binders(exprs, lang, locals) -- (the local declared above fn_rows)
     local rule = binder_rule(lang)
     if not rule or not locals then return locals end
     local out

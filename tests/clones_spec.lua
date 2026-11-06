@@ -48,6 +48,40 @@ test('clones: alpha-renamed identical bodies are one group', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-0705 / CART-0962: df records a `for` binder as a USE only, so the loop variable stayed a literal name in the key
+-- and two loops differing only in its spelling SPLIT — the drifted-loop pair an agent is most often sent to find)
+test('clones: two loops differing only in the LOOP VARIABLE are one group (CART-0705)', function ()
+    local root = proj {
+        ['a.lua'] = fn('total', 'items', '  local acc = 0\n  for i, item in ipairs(items) do\n    if item.w and i > 0 then acc = acc + item.w end\n  end\n  return acc'),
+        ['b.lua'] = fn('summed', 'rows', '  local out = 0\n  for r, entry in ipairs(rows) do\n    if entry.w and r > 0 then out = out + entry.w end\n  end\n  return out'),
+        ['c.lua'] = fn('counted', 'rows', '  local n = 0\n  for j = 1, #rows do\n    if rows[j] then n = n + j end\n  end\n  return n'),
+        ['d.lua'] = fn('tallied', 'xs', '  local m = 0\n  for q = 1, #xs do\n    if xs[q] then m = m + q end\n  end\n  return m'),
+    }
+    local groups = clones.exact(store, { min_rows = 3 })
+    local g = group_of(groups, 'total')
+    ok(g and g.summed, 'generic for: `i, item` vs `r, entry` are alpha-renamed')
+    local h = group_of(groups, 'counted')
+    ok(h and h.tallied, 'numeric for: `j` vs `q` are alpha-renamed')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ AND NOTHING THAT IS NOT BOUND BECOMES A LOCAL: a numeric `for`'s LIMIT and a generic `for`'s ITERATED table are
+-- read, not bound. A global wrongly called local is alpha-renamed, and two loops over DIFFERENT globals would merge
+test('clones: loops over different GLOBALS stay apart — the bound and the iterated table are not binders (CART-0705)', function ()
+    local root = proj {
+        ['a.lua'] = fn('fa', '', '  local acc = 0\n  for i = 1, LIMIT_A do\n    acc = acc + i\n  end\n  return acc'),
+        ['b.lua'] = fn('fb', '', '  local acc = 0\n  for i = 1, LIMIT_B do\n    acc = acc + i\n  end\n  return acc'),
+        ['c.lua'] = fn('fc', '', '  local acc = 0\n  for _, v in ipairs(TABLE_C) do\n    acc = acc + v\n  end\n  return acc'),
+        ['d.lua'] = fn('fd', '', '  local acc = 0\n  for _, v in ipairs(TABLE_D) do\n    acc = acc + v\n  end\n  return acc'),
+    }
+    local groups = clones.exact(store, { min_rows = 3 })
+    local ga = group_of(groups, 'fa')
+    ok(not (ga and ga.fb), 'for i = 1, LIMIT_A vs LIMIT_B: different globals, not a clone')
+    local gc = group_of(groups, 'fc')
+    ok(not (gc and gc.fd), 'ipairs(TABLE_C) vs ipairs(TABLE_D): different globals, not a clone')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: a different CALLEE is not a clone (callees kept verbatim)', function ()
     -- up/up2 are a genuine clone (so the group is non-vacuous); dn differs only by callee
     local root = proj {
@@ -240,6 +274,22 @@ local function near_pair(pairs_, n1, n2)
     end
     return nil
 end
+
+-- (CART-0705: a loop binder that REBINDS a parameter's name is a redefinition — inside the loop the name is not the
+-- incoming value, so it leaves the call-site-safe `params` set the way `opts = opts or {}` does; it stays a local)
+test('clones: a loop binder rebinding a parameter leaves params, stays a local (CART-0705)', function ()
+    local body_a = '  local out = load(src)\n  for _, src in ipairs(out) do out[#out + 1] = tag(src) end\n  local n = count(out)\n  persist(out)\n  return n'
+    local body_b = '  local out = load(src)\n  for _, src in ipairs(out) do out[#out + 1] = mark(src) end\n  local n = count(out)\n  persist(out)\n  return n'
+    local root = proj {
+        ['pb1.lua'] = fn('first', 'src', body_a),
+        ['pb2.lua'] = fn('second', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 4, min_rows = 3, min_shared = 1 }), 'first', 'second')
+    ok(p, 'first and second are a near-clone')
+    ok(p and p.a.locals['src'], 'the rebinding binder is a local')
+    ok(p and not (p.a.params or {})['src'], 'and no longer a call-site-safe parameter')
+    vim.fn.delete(root, 'rf')
+end)
 
 test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', function ()
     -- identical but for a single substituted row (foo→bar) — distance 1, the rest template
@@ -3995,12 +4045,11 @@ test('clones: a loop variable facing a real local is NOT local-vs-global', funct
     ok(p, 'incoming and outgoing are a near-clone')
     local an = p and clones.analyze_pair(p)
     eq(0, lg_holes(an), 'the loop binder ⇄ the parameter mints NO local-vs-global hole')
-    -- ⚠ THE CONTAINMENT, ASSERTED DIRECTLY. `pair.a.locals` feeds `rcanon` and every
-    -- row key; widening it there would move every tier count and every clone baseline.
-    -- The binder is visible to the anti-unifier and absent from the key set, which is
-    -- the whole design in one assertion.
-    ok(p and not (p.a.locals or {})['caller'],
-        'and the ROW-KEY locals set is untouched — the widening is a view')
+    -- (CART-0876 kept the binder OUT of the row-key set, deliberately, so the hole fix moved no tier count; the key
+    -- side was deferred to CART-0962 and landed with CART-0705. The binder is now a local in both, so key and hole
+    -- agree on what a binder is.)
+    ok(p and (p.a.locals or {})['caller'],
+        'and the ROW-KEY locals set has the binder too (CART-0705)')
     vim.fn.delete(root, 'rf')
 end)
 
