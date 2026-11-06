@@ -10910,6 +10910,9 @@ function M.relink(data, touched, opts)
         data.edges[#data.edges + 1] = e
     end
     local regstale = {}
+    -- (file .. '\31' .. def id) -> { [line] = true }: a module-level argument's occurrences of a registration the
+    -- global judgment did not confirm (CART-0700)
+    local regsite = {}
     local bind_of, binding_reaches = binding_index(data.edges, function () return data.extends, data.implements, exact end)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     M._set_clink(data.nodes, data.edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
@@ -11363,10 +11366,12 @@ function M.relink(data, touched, opts)
                         if n.file == cfile then regstale[cfile .. '\31' .. n.id] = true end
                     end
                 end
+                local confirmed
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
                     and not M._nested_unseen(t2, cfn, parent_fn) -- (another function's local def, CART-1562)
                     and (cv.aget(i, j, 'bound') ~= nil and not M._bound_veto(cv.aget(i, j, 'bound'), cv.aget(i, j, 'bate'), t2, cfile)
                         or cv.aget(i, j, 'bound') == nil and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile)) then -- (CART-1498 / 1598)
+                    confirmed = t2.id
                     cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)
                     if touched then touched[cfile] = true end
                     local cline = cget(i, 'line')
@@ -11382,15 +11387,42 @@ function M.relink(data, touched, opts)
                         if touched then touched[t2.file] = true end
                     end
                 end
+                -- ★ A SLICE'S REGISTRATION IS RE-JUDGED AT ITS SITE (CART-0700). A worker resolved this argument against
+                -- its slice's files only, so a name unique in the slice and ambiguous in the corpus registered a function
+                -- the corpus refuses — `matrix server --cols par` named a different subset of five false `reg` edges per
+                -- run, as file membership of the slices varied. Every same-named def this judgment did NOT confirm loses
+                -- the occurrence on this call's line; the registration goes only when no occurrence is left. By SITE,
+                -- not by pair: the same pair can be registered from another line (a data mention, another argument),
+                -- and a confirmed site keeps its occurrence as extracted.
+                if not cfn then
+                    local cline = cget(i, 'line')
+                    for _, list in ipairs({ exact[aname] or {}, tail[aname] or {} }) do -- (a method is in tail only)
+                        for _, n in ipairs(list) do
+                            if n.id ~= confirmed then
+                                local k = cfile .. '\31' .. n.id
+                                local ls = regsite[k]; if not ls then ls = {}; regsite[k] = ls end
+                                ls[cline] = true
+                            end
+                        end
+                    end
+                end
             end
         end
     end
-    if next(regstale) then -- (compacted IN PLACE: the passes below hold this very list)
+    if next(regstale) or next(regsite) then -- (compacted IN PLACE: the passes below hold this very list)
         local E, w = data.edges, 0
         for r = 1, #E do
             local e = E[r]
             local k = e.kind == 'reg' and (e.from .. '\31' .. e.to)
-            if k and regstale[k] and not regok[k] then regEdge[k] = nil else w = w + 1; E[w] = e end
+            local ls = k and regsite[k]
+            if ls then
+                local keep = {}
+                for _, at in ipairs(e.at or {}) do
+                    if not ls[atr.sl(at)] then keep[#keep + 1] = at end
+                end
+                if #keep < #(e.at or {}) then e.at = keep; if touched then touched[e.from] = true end end
+            end
+            if k and (regstale[k] and not regok[k] or ls and #e.at == 0) then regEdge[k] = nil else w = w + 1; E[w] = e end
         end
         for r = #E, w + 1, -1 do E[r] = nil end
     end

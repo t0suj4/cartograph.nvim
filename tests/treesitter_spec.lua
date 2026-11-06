@@ -6607,6 +6607,102 @@ test('lua: a call through a same-name field alias is an inferred edge; a forward
     end
 end)
 
+-- (CART-0700: a SLICE registers what only the slice can see. A module-level call passes `cmp`, which names exactly one
+-- function inside the slice and two in the corpus: the slice's resolution upgraded the argument and minted a
+-- registration `main.lua -> x.lua::cmp`. The audit reopens the upgrade but killed only a FUNCTION's ref edge, so the
+-- module's registration survived a relink that refuses the name. Which files shared a slice varied by run, so
+-- `matrix server --cols par` named a different subset of five false `reg` edges each time)
+test('parallel parity: a registration only a slice could resolve does not survive the relink (CART-0700)', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local par = require 'cartograph.parallel'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put('main.lua', 'local t = { 3, 1, 2 }\ntable.sort(t, cmp)\nreturn t\n')
+    put('x.lua', 'function cmp(a, b) return a < b end\n')
+    put('y.lua', 'function cmp(a, b) return a > b end\n')
+    local seq = ts.extract(root)
+    local fileset = ts.list_files(root)
+    local acc = { schema = 1, root = root, provider = 'treesitter', nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
+    local sliced
+    for _, slice in ipairs({ { 'main.lua', 'x.lua' }, { 'y.lua' } }) do
+        local chunk = ts.extract(root, { files = slice, fileset = fileset, skip_idpass = true })
+        for _, n in ipairs(chunk.nodes) do acc.nodes[#acc.nodes + 1] = n end
+        for _, e in ipairs(chunk.edges) do
+            acc.edges[#acc.edges + 1] = e
+            if e.kind == 'reg' and e.from == 'main.lua' then sliced = e.to end
+        end
+        for _, c in ipairs(chunk.calls or {}) do acc.calls[#acc.calls + 1] = c end
+    end
+    vim.fn.delete(root, 'rf')
+    eq('x.lua::cmp@0', sliced) -- the slice DID register it: the fixture reaches the seam
+    par.audit(acc)
+    ts.relink(acc)
+    local function regs(g)
+        local l = {}
+        for _, e in ipairs(g.edges) do if e.kind == 'reg' then l[#l + 1] = e.from .. ' -> ' .. e.to end end
+        table.sort(l)
+        return l
+    end
+    eq(regs(seq), regs(acc)) -- the parallel registrations are the sequential ones
+    eq({}, regs(acc))        -- and `cmp` is ambiguous in the corpus: nothing registers
+    -- BY SITE, NOT BY PAIR: the same registration with an occurrence on ANOTHER line (as a data mention elsewhere in
+    -- the file would give it) keeps that occurrence; only the refused argument's line goes
+    local root2 = vim.fn.tempname(); vim.fn.mkdir(root2, 'p')
+    local function put2(f, t) local fd = assert(io.open(root2 .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put2('main.lua', 'local t = { 3, 1, 2 }\ntable.sort(t, cmp)\nreturn t\n')
+    put2('x.lua', 'function cmp(a, b) return a < b end\n')
+    put2('y.lua', 'function cmp(a, b) return a > b end\n')
+    local fs2 = ts.list_files(root2)
+    local acc2 = { schema = 1, root = root2, provider = 'treesitter', nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
+    for _, slice in ipairs({ { 'main.lua', 'x.lua' }, { 'y.lua' } }) do
+        local chunk = ts.extract(root2, { files = slice, fileset = fs2, skip_idpass = true })
+        for _, n in ipairs(chunk.nodes) do acc2.nodes[#acc2.nodes + 1] = n end
+        for _, e in ipairs(chunk.edges) do
+            acc2.edges[#acc2.edges + 1] = e
+            if e.kind == 'reg' and e.from == 'main.lua' then
+                e.at[#e.at + 1] = { start = { line = 2, char = 7 }, ['end'] = { line = 2, char = 10 } }
+            end
+        end
+        for _, c in ipairs(chunk.calls or {}) do acc2.calls[#acc2.calls + 1] = c end
+    end
+    vim.fn.delete(root2, 'rf')
+    par.audit(acc2)
+    ts.relink(acc2)
+    local kept
+    for _, e in ipairs(acc2.edges) do if e.kind == 'reg' and e.from == 'main.lua' then kept = e end end
+    ok(kept, 'the registration with another occurrence survives')
+    eq({ 2 }, vim.tbl_map(function (a) return a.start.line end, kept.at)) -- and only that occurrence
+    -- ★ AND A METHOD, which the name index holds under its QUALIFIED name only (the bare name is in `tail`): the
+    -- elasticsearch shape — a record's compact constructor passes its component `total`, and a method total() exists in
+    -- one other class of the slice and a third class outside it (a name under three characters never upgrades)
+    if not has_parser('java') then return end
+    local jroot = vim.fn.tempname(); vim.fn.mkdir(jroot, 'p')
+    local function jput(f, t) local fd = assert(io.open(jroot .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    jput('R.java', 'import java.util.Objects;\npublic record R(int total) {\n    public R {\n        Objects.requireNonNull(total);\n    }\n}\n')
+    jput('A.java', 'public class A {\n    public int total() { return 1; }\n}\n')
+    jput('B.java', 'public class B {\n    public int total() { return 2; }\n}\n')
+    local jseq = ts.extract(jroot)
+    local jset = ts.list_files(jroot)
+    local jacc = { schema = 1, root = jroot, provider = 'treesitter', nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
+    local jsliced
+    for _, slice in ipairs({ { 'R.java', 'A.java' }, { 'B.java' } }) do
+        local chunk = ts.extract(jroot, { files = slice, fileset = jset, skip_idpass = true })
+        for _, n in ipairs(chunk.nodes) do jacc.nodes[#jacc.nodes + 1] = n end
+        for _, e in ipairs(chunk.edges) do
+            jacc.edges[#jacc.edges + 1] = e
+            if e.kind == 'reg' and e.from == 'R.java' then jsliced = e.to end
+        end
+        for _, c in ipairs(chunk.calls or {}) do jacc.calls[#jacc.calls + 1] = c end
+        for _, x in ipairs(chunk.extends or {}) do jacc.extends[#jacc.extends + 1] = x end
+    end
+    vim.fn.delete(jroot, 'rf')
+    eq('A.java::A::total@1', jsliced) -- the slice registered the method
+    par.audit(jacc)
+    ts.relink(jacc)
+    eq(regs(jseq), regs(jacc))
+    eq({}, regs(jacc))
+end)
+
 -- (CART-1733: the inline and the parallel graph agree — the two causes the repo showed. The MONKEY-PATCH FENCE needs every
 -- file, so relink applies it to the merged graph; and the cbarg pre-scans mark a function only when the argument's
 -- BINDER is it — another file's `local helper` passed at module level is not e.lua's `helper`)
