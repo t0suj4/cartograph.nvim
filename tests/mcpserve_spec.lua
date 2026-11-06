@@ -811,6 +811,9 @@ test('mcpserve: the handshake completes and tools/list advertises every verb', f
             name .. "'s description states the envelope, so a client that never reads our docs still learns it")
         ok(by[name].description:find(('QUESTION: %q'):format(agent.QUESTION[agent.VERBS[name].answers]), 1, true),
             name .. ': tools/list carries the question it answers (CART-1976)')
+        for _, rule in ipairs(agent.VERBS[name].refuses) do
+            ok(by[name].description:find(rule, 1, true), name .. ': tools/list names its declared refusal ' .. rule .. ' (CART-1982)')
+        end
         eq(nil, by[name].description:find('`thin-index`', 1, true),
             name .. ': a FULL graph discloses no thin-index refusal it would never give (CART-1978)')
         -- CART-1975: the disclosure is the central gate's answer, so it follows THIS host (helm may or may not be here)

@@ -600,6 +600,9 @@ local function v_graph_info(store)
             needs_calls = v.needs_calls or false,
             needs = v.needs and table.concat(v.needs, ' ') or NUL,
             mounted = M.mounted(nil, name), -- CART-1977: in THIS session's catalogue
+            -- CART-1982: the rules the verb's OWN run may refuse with, depending on its arguments (the central gate's
+            -- rules — read-only, thin-index, needs, lang-scope, unmounted, unknown-band — are the other columns)
+            refuses = v.refuses,
             available = available, unavailable_why = nn(why), unavailable_rule = nn(rule),
             absences = v.absences }
     end
@@ -3697,6 +3700,14 @@ M.ANSWERS = {
 M.QUESTION = {}
 for _, a in ipairs(M.ANSWERS) do M.QUESTION[a[1]] = a[2] end
 
+-- ── THE SIXTH AXIS: WHAT A VERB'S OWN RUN MAY REFUSE WITH (CART-1982) ────────
+-- The central gate's refusals are declared by their axes (mutates, needs_calls, needs, langs, the catalogue). The ones
+-- a run raises itself depend on the ARGUMENTS — an unknown file, a stale ref, two profiles that cannot be compared — and
+-- were undeclared: 44 distinct rules a catalogue reader could not see. `refuses` is that closed set, per verb. It is
+-- NOT hand-maintained in the sense that matters: tests/refuses_spec.lua DERIVES each verb's set from this file's own
+-- graph (its run's cone, the literal rule at every `refuse` call inside it) and requires the declaration to EQUAL it,
+-- and M.answer discloses a refusal whose rule is not declared as an envelope bug.
+
 -- ── THE VERB TABLE ──────────────────────────────────────────────────────────
 -- `absences` lists the absence values a verb can actually produce. It is
 -- documentation an agent can read, and it is a standing question to the next
@@ -3953,6 +3964,7 @@ end
 M.VERBS = {
     k8s_findings = {
         answers = 'deployment',
+        refuses = {},
         summary = 'Kubernetes manifests in this graph: soft-edge references that dangle, selectors that match no pod, peers absent from their own release — the edges GC never walks, derived from the API types',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -3961,6 +3973,7 @@ M.VERBS = {
     },
     k8s_traces = {
         answers = 'deployment',
+        refuses = { 'ambiguous-object', 'no-address', 'not-k8s-object' },
         summary = 'REQUEST-PATH TRACES from a Kubernetes workload: every peer it names (an env *_SERVICE_ADDR, a URL host), hop by hop — the naming line -> the peer\'s Service and port -> the workload it selects -> that workload listening (containerPort) -> its health probe — each hop at its declaring line; a peer with no Service ends dangling',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'unavailable' },
@@ -3973,6 +3986,7 @@ M.VERBS = {
     },
     helm_chart = {
         answers = 'deployment',
+        refuses = { 'unrenderable' },
         summary = 'a Helm chart RENDERED by Helm itself and read: dangling references, empty selectors, and the silent-success lints on its templates (dangling / orphan values, chomped separators, checksum coverage)',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'refused', 'frontier' },
@@ -3987,6 +4001,7 @@ M.VERBS = {
     },
     kustomize_overlays = {
         answers = 'deployment',
+        refuses = {},
         summary = 'every kustomize overlay BUILT by kustomize itself and read as a release — components resolved inside the overlays that compose them: dangling references, selectors matching nothing, the deletion frontier',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent', 'refused' },
@@ -3996,6 +4011,7 @@ M.VERBS = {
     },
     helmfile_releases = {
         answers = 'deployment',
+        refuses = {},
         summary = 'a HELMFILE repo\'s releases: chart, pinned version, namespace, needs and each values layer (read / templated / missing) per cluster file; no-op overrides, chart version skew between releases, hosts served by several releases, secrets as a private frontier',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -4004,6 +4020,7 @@ M.VERBS = {
     },
     helm_stages = {
         answers = 'deployment',
+        refuses = {},
         summary = 'a plain chart deployed per stage by the repo\'s own helm command lines: each stage\'s values chain, must-override placeholders left, no-op overrides, plaintext secret count, and the drift between stages',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -4014,6 +4031,7 @@ M.VERBS = {
     },
     graph_info = {
         answers = 'graph-right',
+        refuses = {},
         summary = 'this graph: provider, counts, capability per verb, and the frontier (what was NOT looked at)',
         subject = 'graph',
         tier_basis = 'observation', absences = {},
@@ -4022,6 +4040,7 @@ M.VERBS = {
     },
     node_find = {
         answers = 'where-is-it',
+        refuses = {},
         summary = 'find definitions by name (exact, tail — M.foo ~ foo — or substring); each row says HOW it matched',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
@@ -4034,6 +4053,7 @@ M.VERBS = {
     },
     node_at = {
         answers = 'where-is-it',
+        refuses = { 'ambiguous-file', 'unknown-file' },
         summary = 'the definitions containing file:line, innermost first — addressing a position',
         subject = 'position',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
@@ -4045,6 +4065,7 @@ M.VERBS = {
     },
     edges_callers = {
         answers = 'who-uses-it',
+        refuses = { 'ambiguous-file', 'no-address', 'no-subject', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'who calls this — each row with its own resolution tier and `prov`, the resolvers that landed its edge (base, super, typed_receiver, … ; not-a-call for a reference)',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
@@ -4054,6 +4075,7 @@ M.VERBS = {
     },
     edges_callees = {
         answers = 'what-it-uses',
+        refuses = { 'ambiguous-file', 'no-address', 'no-subject', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'what this calls — each row with its own resolution tier and `prov` (which resolvers landed the edge); refused and external sites ride as notes',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
@@ -4063,6 +4085,7 @@ M.VERBS = {
     },
     why = {
         answers = 'graph-right',
+        refuses = { 'ambiguous-file', 'unknown-file' },
         summary = 'the honesty record for what is at file:line — how a call resolved, or which rule refused it',
         subject = 'position',
         -- `why` answers about ONE position, so its result is one row and floor
@@ -4079,6 +4102,7 @@ M.VERBS = {
     },
     lint_run = {
         answers = 'dead-or-alive',
+        refuses = { 'ambiguous-file', 'unknown-file' },
         summary = 'the graph-aware lint findings, each carrying its rule disposition (authoritative vs suggestive)',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4094,6 +4118,7 @@ M.VERBS = {
 
     clones_find = {
         answers = 'templates',
+        refuses = {},
         summary = 'duplicated code: exact structural clone GROUPS and near-clone PAIRS with the value holes that would become a shared helper\'s parameters',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4108,6 +4133,7 @@ M.VERBS = {
     },
     cone = {
         answers = 'what-it-uses',
+        refuses = { 'ambiguous-file', 'no-address', 'no-subject', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'everything reachable from a node, transitively — direction `out` (what it reaches) or `in` (what reaches it)',
         subject = 'node',
         -- NOT 'observation' and NOT 'resolution'. A cone member was reached
@@ -4127,6 +4153,7 @@ M.VERBS = {
     },
     ladder = {
         answers = 'graph-right',
+        refuses = { 'ambiguous-file', 'no-address', 'no-subject', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'the call-resolution distribution — how many call sites landed on each rung, for one function or the whole graph',
         subject = 'node',
         tier_basis = 'observation', needs_calls = true,
@@ -4143,6 +4170,7 @@ M.VERBS = {
     },
     territory = {
         answers = 'dead-or-alive',
+        refuses = { 'no-partition' },
         summary = 'the architecture by reachability: which entry point owns each node, plus commons, core and the borders between them',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4156,6 +4184,7 @@ M.VERBS = {
     },
     census = {
         answers = 'graph-right',
+        refuses = {},
         summary = "the graph's epistemic state as counts: edges by trust tier, calls by disposition, refusals by rule, the outside-the-corpus buckets",
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4166,6 +4195,7 @@ M.VERBS = {
     },
     mentions = {
         answers = 'who-uses-it',
+        refuses = { 'ambiguous-file', 'unknown-file' },
         summary = 'which FILES mention an identifier — the weaker, name-level question that still answers when resolution refused',
         subject = 'query',
         tier_basis = 'observation',
@@ -4179,6 +4209,7 @@ M.VERBS = {
     },
     externals = {
         answers = 'reach-for',
+        refuses = {},
         summary = 'the external surface: every call base that leaves this graph, with its members, its files and how the boundary was decided',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4193,6 +4224,7 @@ M.VERBS = {
 
     portability_targets = {
         answers = 'reach-for',
+        refuses = {},
         summary = 'the environment profiles that ship, and what each can ANSWER — the from/to vocabulary for portability_move; an artifact that can be no target carries the mechanism that stops it',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4205,6 +4237,7 @@ M.VERBS = {
     },
     portability_move = {
         answers = 'reach-for',
+        refuses = { 'profiles-not-comparable', 'same-profile' },
         summary = 'THE VERSION MOVE, over the READ surface: names this code reads that the OLD environment held and the NEW one does not — the port worklist. This is the strong one; a renamed data global (global.x -> storage.x) lives here and nowhere else',
         subject = 'query',
         tier_basis = 'observation',
@@ -4232,6 +4265,7 @@ M.VERBS = {
     },
     portability_move_calls = {
         answers = 'reach-for',
+        refuses = { 'profiles-not-comparable', 'same-profile' },
         summary = 'the same move over the CALL-derived requirement set — THE WEAKER QUESTION. A name that is READ and never invoked produces no call record, so a data-global rename is invisible here and this verb can answer "0 lost" on a large port. Ask portability_move first; use this only when you specifically mean CALLED names',
         subject = 'query',
         -- requires() reads the call records, so unlike portability_move this one
@@ -4264,6 +4298,7 @@ M.VERBS = {
 
     txn_plan_moveset = {
         answers = 'change-it',
+        refuses = { 'bad-seed', 'cannot-plan', 'no-address', 'ref-caveat', 'stale-ref', 'unknown-node' },
         summary = 'PROPOSE moving symbols to another file (or into a new one — an existing dest is a MOVE, a path that does not exist yet is an EXTRACT-MODULE). Writes nothing: returns a plan handle for txn_preview',
         subject = 'set',
         tier_basis = 'observation', needs_calls = true,
@@ -4285,6 +4320,7 @@ M.VERBS = {
     },
     txn_plan_extract_family = {
         answers = 'templates',
+        refuses = { 'ambiguous-file', 'cannot-plan', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE ONE shared helper for a function\'s whole near-clone FAMILY (not just its nearest partner). Writes nothing: returns a plan handle for txn_preview, plus the per-member verdict when it cannot',
         subject = 'node',
         -- cloneextract's EXTRACT table is the whole language-specific part of the
@@ -4320,6 +4356,7 @@ M.VERBS = {
     },
     txn_plan_clonemerge = {
         answers = 'templates',
+        refuses = { 'ambiguous-file', 'cannot-plan', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE merging a function\'s EXACT clones into it — the copies are deleted and their call sites pointed at the survivor. Writes nothing: returns a plan handle for txn_preview',
         subject = 'node',
         -- `observation`, like every planner: the answer carries a PLAN, never a rung.
@@ -4339,6 +4376,7 @@ M.VERBS = {
     },
     txn_plan_invert = {
         answers = 'change-it',
+        refuses = { 'cannot-invert', 'unknown-entry' },
         summary = 'PROPOSE the INVERSE of a recorded extract-helper — inline the synthesized helper back into the sites it was taken from. ⚠ NOT txn_undo: undo restores that transaction\'s bytes and discards later work; this removes ONE abstraction from the tree as it stands, so a helper improved since is what comes back. Reads the argument/parameter correspondence off the transaction\'s own undo record instead of re-parsing our output. Writes nothing: returns a plan handle for txn_preview',
         -- ⚠ THE ONLY PLANNER WHOSE SUBJECT IS HISTORY. What it needs was computed by the
         -- fold and never written as text, so the address is a journal id, not a node.
@@ -4356,6 +4394,7 @@ M.VERBS = {
     },
     txn_plan_transplant = {
         answers = 'templates',
+        refuses = { 'ambiguous-file', 'cannot-derive', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE the edit demonstrated by one pair applied to a third definition -- a DERIVED replacement, not a supplied one. Give the exemplar pair `a` -> `b` and the target `c`; the operator derives c-prime from the tree and the plan records `origin = derived` and claims `unreviewed` rather than `none`. Writes nothing: returns a plan handle for txn_preview',
         -- THE SUBJECT IS THE DEFINITION BEING REWRITTEN. `a`/`b` are the EXEMPLAR --
         -- a parameter of the edit, not a second subject -- which is why this is a
@@ -4379,6 +4418,7 @@ M.VERBS = {
     },
     ports = {
         answers = 'reach-for',
+        refuses = {},
         summary = 'this graph\'s PORTS: every call its band honestly left unresolved that a profile DISPOSED (callee, full, the disposition, the enclosing fn, the 1-based line), plus the band identity (root, profile, a stamp of its file stamps). A client mounts this host as a band and derives the cross-band linkage itself; only ports cross the wire, never bodies',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4388,6 +4428,7 @@ M.VERBS = {
     },
     toolbelt_list = {
         answers = 'already-here',
+        refuses = {},
         summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, its EXAMPLES (the usage, which the toolbelt fence also runs as tests), its TAGS with their source (declared | derived | scope) and its binding CHAIN (the mount that runs it and what it shadows); `name` or `tag` looks tactics up, `at` is the subject whose scoped tags and applicability count',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4401,6 +4442,7 @@ M.VERBS = {
     },
     toolbelt_run = {
         answers = 'already-here',
+        refuses = { 'cannot-run', 'executes-on-read-only', 'read-only-host', 'unknown-tactic' },
         summary = 'run a named tactic: a DISCOVERY re-measures this graph and says whether its finding still holds; a WRITE tactic PREVIEWS (dry, up to the first write) unless `apply` is set on a writable host. Params are coerced by the entry: a ref may be `file::name`, a string `@path`',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4414,6 +4456,7 @@ M.VERBS = {
     },
     txn_plan_propagate = {
         answers = 'templates',
+        refuses = { 'ambiguous-file', 'cannot-plan', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE carrying an edit made to ONE member of a near-clone family to the others. Give the member and its NEW text; the edit is classified (value / template / mixed; a straddle or unsupported shape refuses) and each member it reaches is re-rendered from its OWN text and verified by reparse against its predicted values. The SCOPE is yours: without `scope` the plan is the member alone, with a `propagate-scope` decision naming the wider scopes',
         subject = 'node',
         tier_basis = 'observation',
@@ -4432,6 +4475,7 @@ M.VERBS = {
     },
     txn_plan_replace = {
         answers = 'change-it',
+        refuses = { 'ambiguous-file', 'cannot-plan', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',
         subject = 'node',
         tier_basis = 'observation',
@@ -4455,6 +4499,7 @@ M.VERBS = {
     },
     txn_plan_optimize = {
         answers = 'performance',
+        refuses = { 'ambiguous-file', 'cannot-plan', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',
         subject = 'statement',
         tier_basis = 'observation', needs_calls = true,
@@ -4485,6 +4530,7 @@ M.VERBS = {
     },
     txn_plan_declare = {
         answers = 'change-it',
+        refuses = { 'ambiguous-file', 'does-not-fit', 'no-address', 'no-payload', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE adding a member to a declared container (a table/array/object literal). Writes nothing: returns a plan handle for txn_preview',
         subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
@@ -4507,6 +4553,7 @@ M.VERBS = {
     },
     txn_plan_annotate = {
         answers = 'change-it',
+        refuses = { 'ambiguous-file', 'cannot-annotate', 'no-address', 'no-subject', 'ref-caveat', 'stale-ref', 'unknown-file', 'unknown-node' },
         summary = 'PROPOSE attaching prose above a definition, in the file\'s own comment style. Writes nothing: returns a plan handle for txn_preview',
         subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
@@ -4526,6 +4573,7 @@ M.VERBS = {
     },
     txn_save = {
         answers = 'review-apply',
+        refuses = { 'foreign-plan', 'outside-plans-dir', 'stale-plan', 'unencodable-recipe', 'unknown-plan', 'unrecordable-plan', 'unwritable-path' },
         summary = 'SAVE a held plan to a file so another session can apply it. Planning needs no write capability and applying does, so this is the handoff: plan on a read-only host, review the file, apply on an armed one',
         subject = 'plan',
         -- `observation`: the answer carries a PATH, never a rung.
@@ -4542,6 +4590,7 @@ M.VERBS = {
     },
     txn_load = {
         answers = 'review-apply',
+        refuses = { 'ambiguous-file', 'foreign-recipe', 'no-address', 'no-path', 'no-plan-minted', 'no-subject', 'recipe-schema', 'replan-refused', 'stale-ref', 'unknown-file', 'unknown-node', 'unreadable-path', 'unreadable-recipe', 'unreplayable-step' },
         summary = 'LOAD a saved plan and hold it here, returning a fresh handle. Every stamp the plan pinned is re-checked against disk first, and the plan must still be previewed before it can be applied',
         subject = 'path',
         tier_basis = 'observation', needs_calls = false,
@@ -4557,6 +4606,7 @@ M.VERBS = {
     },
     txn_preview = {
         answers = 'review-apply',
+        refuses = { 'foreign-plan', 'preview-refused', 'stale-plan', 'unknown-plan' },
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',
         subject = 'plan',
         tier_basis = 'observation',
@@ -4570,6 +4620,7 @@ M.VERBS = {
     },
     journal_list = {
         answers = 'what-changed',
+        refuses = {},
         summary = 'the transaction history for this root, newest first — metadata only (id, when, verb, status, files); journal_get serves the bytes',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4584,6 +4635,7 @@ M.VERBS = {
     },
     journal_get = {
         answers = 'what-changed',
+        refuses = { 'unknown-entry' },
         summary = 'one journal entry in full: its per-file diff, hashes and status — what a transaction actually did',
         subject = 'journal',
         tier_basis = 'observation',
@@ -4595,6 +4647,7 @@ M.VERBS = {
     },
     txn_apply = {
         answers = 'review-apply',
+        refuses = { 'apply-refused', 'foreign-plan', 'stale-plan', 'unknown-plan', 'unpreviewed' },
         summary = 'WRITE a held plan to disk, journalled and reversible. Refuses unless the plan has been through txn_preview, and runs the full late-bound ladder before any byte moves',
         subject = 'plan',
         tier_basis = 'observation', needs_calls = true, mutates = true,
@@ -4608,6 +4661,7 @@ M.VERBS = {
     },
     txn_undo = {
         answers = 'review-apply',
+        refuses = { 'undo-refused' },
         summary = 'roll back the newest applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since',
         subject = 'graph',
         tier_basis = 'observation', mutates = true,
@@ -4895,7 +4949,19 @@ local function answer(store, verb, args)
         return { ok = false, verb = verb, graph = graph,
             error = { kind = 'usage', reason = tostring(usage) } }, 'usage'
     end
-    if res.refusal then return refusal(res.refusal) end
+    if res.refusal then
+        -- ★ THE DECLARED `refuses` IS ENFORCED WHERE A RUN'S REFUSAL LEAVES (CART-1982), the way an undeclared absence
+        -- kind is: the refusal still goes out (its rule is information the caller needs), and the undeclared rule is
+        -- DISCLOSED as an envelope bug naming it, so a contract drift is never silent
+        local d, k = refusal(res.refusal)
+        local rule = res.refusal.rule
+        if not vim.tbl_contains(v.refuses or {}, rule) then
+            d.notes[#d.notes + 1] = { kind = 'envelope-bug', premise = 'undeclared-refusal-rule',
+                why = ('%s refused with rule %q, which it does not declare in `refuses`'):format(verb, tostring(rule)),
+                evidence = { rule = nn(rule), declared = v.refuses or {} } }
+        end
+        return d, k
+    end
 
     local result = res.result or {}
     local tier, absence, absence_why = res.tier, res.absence, res.absence_why

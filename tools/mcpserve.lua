@@ -274,6 +274,10 @@ local function tools_list()
         -- `answers` has no other expression on this surface — the `langs` case, not the `subject` one.
         local a = (' QUESTION: %q (answers=%s; verbs declaring the same question are alternatives for each other).')
             :format(agent.QUESTION[v.answers], v.answers)
+        -- CART-1982: the argument-dependent refusal rules, declared — a client learns them before the first call
+        if #(v.refuses or {}) > 0 then
+            a = a .. (' Depending on its arguments it may REFUSE with: %s.'):format(table.concat(v.refuses, ', '))
+        end
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'

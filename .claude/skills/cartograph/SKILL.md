@@ -188,7 +188,9 @@ is the rule the call would refuse with, in the gate's order (permission first):
   (**`no-kustomize`**), `mentions` a mention index (**`no-mention-index`**). An
   unmet need is disclosed in tools/list and refused before the verb runs. A
   refusal that depends on your ARGUMENTS (which profile, tactic or path) is not a
-  need and is only known on the call.
+  need: it is declared instead in the verb's **`refuses`** (graph_info column,
+  and listed in tools/list) — the closed set of rules its own run can return, kept
+  equal to the code by a test that derives it from agent.lua's graph.
 - **`langs`** — about the SUBJECT. A planner that emits code emits it in *one*
   language's syntax: `txn_plan_optimize` is `lua`, `txn_plan_extract_family` is
   `lua javascript`. Aim one at a function in another language and it refuses with
