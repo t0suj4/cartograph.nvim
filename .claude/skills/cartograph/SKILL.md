@@ -271,6 +271,12 @@ ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
 - Addressing: every verb taking an `id` also takes a durable `ref`
   (`{file, kind, name, ordinal?, witness?}`). A stale ref **refuses** with rule
   `stale-ref`. Prefer refs across edits; ids embed line numbers and move.
+  A ref whose `name` is a bare tail node_find matched (`foo` for `M::foo`)
+  resolves when exactly one definition in that file ends with it, with a
+  `ref-tail-match` note carrying the qualified ref (a write verb refuses it as
+  `ref-caveat` and hands you that ref). Several matches refuse as
+  `ambiguous-tail` with candidate refs; "gone" is said only after the whole graph
+  was searched.
 
 ## Writing
 

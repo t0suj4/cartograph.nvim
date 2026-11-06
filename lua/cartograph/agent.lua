@@ -738,13 +738,12 @@ local function v_node_find(store, args)
     local want = args.kind
     local limit = tonumber(args.limit) or 100
     local lq = q:lower()
-    local pat = '[.:]' .. lq:gsub('(%W)', '%%%1') .. '$'
     local rows = {}
     for name, ids in pairs(store.by_name or {}) do
         local ln = name:lower()
         local how
         if ln == lq then how = 'exact'
-        elseif ln:match(pat) then how = 'tail'
+        elseif M.tail_match(name, q) then how = 'tail'
         elseif ln:find(lq, 1, true) then how = 'substring' end
         if how then
             for _, id in ipairs(ids) do
@@ -857,15 +856,83 @@ end
 --- Only the first two refuse, and the refusal carries refs.lua's `why` VERBATIM
 --- in its own field rather than only inside prose, because a caller that must
 --- branch on missing-vs-ambiguous should not have to parse a sentence.
-local function stale_ref(ref, why)
+--- ★ ONE TAIL RULE (CART-0718): `name` ends with `query` after a `.` or `:` (`M.foo`, `M:foo`, `T::foo` ~ `foo`),
+--- case-insensitive — node_find's own match, shared so the two surfaces cannot disagree about whether a tail is a name.
+function M.tail_match(name, query)
+    local ln, lq = tostring(name):lower(), tostring(query):lower()
+    return ln ~= lq and ln:match('[.:]' .. lq:gsub('(%W)', '%%%1') .. '$') ~= nil
+end
+
+local function stale_ref(ref, why, remedy, candidates)
     local ambiguous = why:sub(1, 9) == 'ambiguous'
     return refuse('stale-ref',
         ('the ref %s::%s (%s) does not resolve against this graph: %s')
             :format(tostring(ref.file), tostring(ref.name), tostring(ref.kind), why),
-        ambiguous
+        remedy or (ambiguous
             and 'several definitions in that file share the name and the witness could not separate them — pass `node` with an id from node_find, or add the `ordinal` field the ref carries when it is minted'
-            or 'the definition is gone from that file, or moved to another one — call node_find with the name to see where it is now, and take a fresh `ref` from the row',
-        { why = why })
+            or 'the definition is gone from that file, or moved to another one — call node_find with the name to see where it is now, and take a fresh `ref` from the row'),
+        { why = why, candidates = candidates })
+end
+
+local function ref_rows(store, ids)
+    local rows = {}
+    for i = 1, math.min(#ids, 10) do
+        local n = store.node(ids[i])
+        rows[i] = { kind = 'argument', role = 'value', name = 'ref', value = store.ref_of(ids[i]),
+            why = n and ('%s in %s'):format(tostring(n.name), tostring(n.file)) or nil }
+    end
+    return rows
+end
+
+--- ★★ A REF THAT MISSES ITS EXACT NAME IS NOT YET A MISSING DEFINITION (CART-0718). node_find tail-matches (`foo` finds
+--- `M::foo`) and hands that bare name back as a valid handle; refs.resolve matched only the EXACT name and answered
+--- `missing`, whose remedy asserted the definition "is gone or moved" — a claim about the world the graph could see was
+--- false. On an exact miss, the same tail rule runs in the ref's file and kind:
+---   one tail match  -> RESOLVED, with a caveat naming the qualified name (read verbs note it, `ref-tail-match`; write
+---                      verbs refuse a caveated ref as they always have — `ref-caveat` — now handing the qualified ref)
+---   several         -> refused as AMBIGUOUS, the candidates' refs named — never "missing"
+---   none in the file -> the whole graph is asked (exact or tail, same kind): the remedy names where they are, or — only
+---                      when nothing anywhere matches — says the definition is gone, a claim it has now CHECKED
+--- Returns id, caveat, tail (true when the caveat is a tail match) | nil, refusal.
+local function resolve_ref_honest(store, ref)
+    local id, why = store.resolve_ref(ref)
+    if id then return id, why end
+    why = why or 'missing'
+    if why ~= 'missing' then return nil, stale_ref(ref, why) end
+    local hits = {}
+    for _, n in ipairs(store.by_file and store.by_file[ref.file] or {}) do
+        if n.kind == ref.kind and M.tail_match(n.name, ref.name) then hits[#hits + 1] = n.id end
+    end
+    table.sort(hits)
+    if #hits == 1 then
+        local n = store.node(hits[1])
+        return hits[1], ('tail-match: the ref names %q, the definition in that file is %q — the ref was underqualified'):format(
+            tostring(ref.name), tostring(n and n.name)), true
+    end
+    if #hits > 1 then
+        return nil, stale_ref(ref, ('ambiguous-tail: %d definitions in %s end with %q'):format(#hits, tostring(ref.file), tostring(ref.name)),
+            'the name is UNDERQUALIFIED, not gone: several definitions in that file end with it — pass one of the candidate refs (each is the qualified name node_find reports)',
+            ref_rows(store, hits))
+    end
+    local elsewhere = {}
+    for name, ids in pairs(store.by_name or {}) do
+        if name == ref.name or M.tail_match(name, ref.name) then
+            for _, nid in ipairs(ids) do
+                local n = store.node(nid)
+                if n and n.kind == ref.kind and n.file ~= ref.file then elsewhere[#elsewhere + 1] = nid end
+            end
+        end
+    end
+    table.sort(elsewhere)
+    if #elsewhere > 0 then
+        return nil, stale_ref(ref, 'missing',
+            ('no %s named %q (exactly or as a tail) is in %s any more, and %d with that name is in another file — if it moved, the candidate refs say where'):format(
+                tostring(ref.kind), tostring(ref.name), tostring(ref.file), #elsewhere),
+            ref_rows(store, elsewhere))
+    end
+    return nil, stale_ref(ref, 'missing',
+        ('no %s named %q — exactly or as a tail — is anywhere in this graph: it was deleted or renamed. node_find with a fragment of the name finds a rename'):format(
+            tostring(ref.kind), tostring(ref.name)))
 end
 
 --- the node an edges_* / why call is about: an explicit `node` id, a durable
@@ -873,12 +940,17 @@ end
 --- identical). Returns (node, refusal, note) — the note is the ref caveat.
 local function subject_node(store, args)
     if args.ref ~= nil and args.ref ~= NUL then
-        local id, why = store.resolve_ref(args.ref)
-        if not id then return nil, stale_ref(args.ref, why or 'missing') end
+        local id, why, tail = resolve_ref_honest(store, args.ref)
+        if not id then return nil, why end
         local n = store.node(id)
         if not n then return nil, stale_ref(args.ref, 'missing') end
         local note
-        if why then
+        if tail then
+            -- (CART-0718: node_find's own tail rule; the qualified name and a fresh ref ride along)
+            note = { kind = 'ref-tail-match', premise = 'ref-resolution',
+                why = ('%s — answered about %s, the one definition in that file the name is a tail of; pass its `ref` to address it exactly'):format(why, tostring(n.name)),
+                evidence = { resolved_to = n.id, name = n.name, ref = args.ref, qualified_ref = store.ref_of(n.id) } }
+        elseif why then
             note = { kind = 'ref-caveat', premise = 'ref-resolution',
                 why = ('the ref resolved with a caveat — %s — so this answer is about the node it LANDED ON, not necessarily the one that was pinned'):format(why),
                 evidence = { resolved_to = n.id, ref = args.ref } }
@@ -2279,14 +2351,14 @@ end
 
 --- refs on the WRITE side. See the section comment: a caveat REFUSES here.
 local function resolve_write_ref(store, ref)
-    local id, why = store.resolve_ref(ref)
-    if not id then return nil, stale_ref(ref, why or 'missing') end
+    local id, why, tail = resolve_ref_honest(store, ref)
+    if not id then return nil, why end
     if why then
         return nil, refuse('ref-caveat',
             ('the ref %s::%s (%s) resolved only WITH A CAVEAT — %s — and a write is not planned on a handle that is merely probable: txn.verify refuses on the same caveat at apply time, so this plan could only ever fail at its last rung'):format(
                 tostring(ref.file), tostring(ref.name), tostring(ref.kind), why),
             'take a fresh `ref` from a node_find / node_at row against the CURRENT graph and plan again; if you have checked the drift yourself, address by `node` id instead — passing an id asserts you looked',
-            { why = why })
+            { why = why, candidates = tail and ref_rows(store, { id }) or nil })
     end
     return id
 end

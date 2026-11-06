@@ -927,6 +927,21 @@ test('mcpserve: the thin-index CAPABILITY REFUSAL is reachable by a caller', fun
     ok(#f.result >= 1, 'the thin index still answers what it CAN answer')
 end)
 
+-- CART-0718 over the wire, the reported shape: node_find tail-matches `pub`, and edges_callers addressed by a ref
+-- carrying that bare name answers (with a tail note) instead of refusing that the definition is gone
+test('mcpserve: a ref with the bare name node_find tail-matched answers, and says it was underqualified', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client(false)
+    local row = c:call('node_find', { query = 'pub' }).result[1]
+    eq('tail', row.match)
+    local d = c:call('edges_callers', { ref = { file = row.ref.file, kind = row.ref.kind, name = 'pub' } })
+    eq(true, d.ok, vim.inspect(d.refusal))
+    ok(#d.result >= 1, 'the caller the graph knows')
+    local kinds = {}
+    for _, n in ipairs(d.notes or {}) do kinds[n.kind] = true end
+    ok(kinds['ref-tail-match'], 'and the tail resolution rides as a note')
+end)
+
 test('mcpserve: a protocol fault is a JSON-RPC error, not an answer', function ()
     if not ready() then skip('no treesitter') end
     local c = client(false)

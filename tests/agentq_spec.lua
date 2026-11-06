@@ -410,3 +410,49 @@ test('agent: refusal candidates are same-question verbs this host can serve, wit
     ok(lua.txn_plan_extract_family, 'and is offered for a lua subject')
     eq(nil, lua.clones_find, 'an AVAILABLE verb asked directly is still never its own candidate')
 end)
+
+-- CART-0718 (design corpus agent-surface/07): a ref whose name node_find TAIL-matches (`solo` ~ `M.solo`) refused as
+-- stale-ref/missing with a remedy saying the definition was "gone or moved" — false, and the graph could see it.
+test('agent: an underqualified ref resolves by node_find\'s tail rule, refuses as AMBIGUOUS, and claims "gone" only after checking', function ()
+    local agent = require 'cartograph.agent'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(name, src) local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(src); fd:close() end
+    w('m.lua', 'local M = {}\nlocal T = {}\nfunction M.solo(x) return x end\nfunction M.dup(x) return x end\nfunction T.dup(x) return x end\nfunction M.user() return M.solo(1) end\nreturn M\n')
+    w('o.lua', 'local O = {}\nfunction O.other() return 1 end\nreturn O\n')
+    store.ingest(ts.extract(root))
+    local found = agent.answer(store, 'node_find', { query = 'solo' }).result[1]
+    eq('tail', found.match, 'node_find tail-matches the bare name (unchanged)')
+    local kind = found.ref.kind
+    -- one tail match in the file: RESOLVED, and the answer says how
+    local d = agent.answer(store, 'edges_callers', { ref = { file = 'm.lua', kind = kind, name = 'solo' } })
+    eq(true, d.ok, 'an underqualified ref is not a missing definition: ' .. vim.inspect(d.refusal))
+    ok(#d.result >= 1 and d.result[1].name == 'M.user', 'and the caller the graph knows is answered')
+    local note
+    for _, n in ipairs(d.notes or {}) do if n.kind == 'ref-tail-match' then note = n end end
+    ok(note, 'the tail resolution is DISCLOSED, never silent')
+    eq('M.solo', note.evidence.name); eq('M.solo', note.evidence.qualified_ref.name)
+    -- several tail matches: AMBIGUOUS, with the candidates' refs — never "missing"
+    local a = agent.answer(store, 'edges_callers', { ref = { file = 'm.lua', kind = kind, name = 'dup' } })
+    eq('stale-ref', a.refusal.rule)
+    ok(a.refusal.why:find('^ambiguous%-tail'), a.refusal.why)
+    ok(not a.refusal.remedy:find('gone from that file', 1, true) and a.refusal.remedy:find('UNDERQUALIFIED', 1, true),
+        'the remedy names the cause, not the old "gone or moved" claim: ' .. a.refusal.remedy)
+    local names = {}
+    for _, c in ipairs(a.refusal.candidates) do if c.kind == 'argument' then names[#names + 1] = c.value.name end end
+    table.sort(names)
+    eq({ 'M.dup', 'T.dup' }, names, 'each candidate is a qualified ref')
+    -- not in that file, but elsewhere: the remedy names where, as data
+    local e = agent.answer(store, 'edges_callers', { ref = { file = 'o.lua', kind = kind, name = 'solo' } })
+    eq('missing', e.refusal.why)
+    ok(e.refusal.remedy:find('another file', 1, true), e.refusal.remedy)
+    eq('M.solo', e.refusal.candidates[1].value.name)
+    -- nowhere at all: only now is "deleted or renamed" said, and it says the graph was searched
+    local g = agent.answer(store, 'edges_callers', { ref = { file = 'm.lua', kind = kind, name = 'nowhere' } })
+    eq('missing', g.refusal.why)
+    ok(g.refusal.remedy:find('anywhere in this graph', 1, true), g.refusal.remedy)
+    -- the WRITE side still refuses a caveated ref, now handing over the qualified one
+    local wr = agent.answer(store, 'txn_plan_annotate', { ref = { file = 'm.lua', kind = kind, name = 'solo' }, text = 'x' })
+    eq('ref-caveat', wr.refusal.rule)
+    eq('M.solo', wr.refusal.candidates[1].value.name)
+    vim.fn.delete(root, 'rf')
+end)
