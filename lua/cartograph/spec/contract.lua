@@ -234,6 +234,8 @@ M.SLOTS = {
     scan_ancestors = 'EMITTERS', scan_super = 'EMITTERS',
     scan_bare_calls = 'EMITTERS', ctor_query = 'EMITTERS',
     super_query = 'EMITTERS', iface_query = 'EMITTERS', interface = 'EMITTERS',
+    -- the interface linker's candidate gates (CART-0692): a language declaring neither never redirects
+    iface_bean = 'EMITTERS', iface_markers = 'EMITTERS',
     aperture_query = 'EMITTERS',
     -- OBSERVED REGISTRARS (CART-0722): the reflective annotation READ and the
     -- reflective INVOKE. Two slots and not one because the read is rare and

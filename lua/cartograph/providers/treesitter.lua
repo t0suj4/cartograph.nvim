@@ -894,7 +894,7 @@ M.spec.php = require 'cartograph.spec.php' -- 13th (move-set flow; guard substra
 M.spec.lua = require 'cartograph.spec.lua' -- 14th (move-set flow; scope/guards/ecosystem detectors)
 -- java (15th, LAST inline spec): java_var_type takes the scope model as a param
 -- (threaded via qualify_call), so the generic tree_model/jvt_sm cache stays here;
--- the resolver reads _jdk_types/_service_markers/_bean_name back off the module.
+-- the resolver reads _jdk_types back off the module (the interface gates are spec fields, CART-0692).
 local javaspec = require 'cartograph.spec.java'
 M.spec.java = javaspec
 
@@ -2408,74 +2408,86 @@ end
 -- non-Spring Java) → gate (2) is inert, behaviour is exactly the bean gate —
 -- verified: `gate libs` (elasticsearch) stays identical. Bounded like
 -- resolve_super by the step limit + cycle guard.
-local function resolve_interface(cv, implements, beans, extends, exact, addref, markers)
+local function resolve_interface(cv, implements, beans, extends, exact, addref)
     if not (implements and implements[1]) then return 0 end
-    beans = beans or {}; markers = markers or {}
+    beans = beans or {}
     local super = build_super(extends)
-    local allimpls, beanimpls = {}, {} -- iface -> { [class]=true }
-    local ifext = {} -- iface(child) -> { parent iface, ... } : child extends parent
+    -- ★ PER LANGUAGE (CART-0692). The candidate sets, the interface-extends edges and the markers are built for each
+    -- language from its own `implements` rows, and a call reads only its own language's: a same-named class in another
+    -- language is not an implementer, and the markers are the calling language's declaration (spec.iface_markers),
+    -- not Java's applied to everyone.
+    local parts = {} -- lang -> { allimpls, beanimpls, ifext, svc }
+    local function part(lang)
+        local P = parts[lang]
+        if not P then P = { allimpls = {}, beanimpls = {}, ifext = {}, svc = {} }; parts[lang] = P end
+        return P
+    end
     local function add(map, iface, cls)
         local s = map[iface]; if not s then s = {}; map[iface] = s end
         s[cls] = true
     end
     for _, e in ipairs(implements) do
+        local P = part(elang_for(e.file) or false)
         if e.cintf then
-            local l = ifext[e.child]; if not l then l = {}; ifext[e.child] = l end
+            local l = P.ifext[e.child]; if not l then l = {}; P.ifext[e.child] = l end
             l[#l + 1] = e.iface
         else
-            add(allimpls, e.iface, e.child)
-            if beans[e.child] then add(beanimpls, e.iface, e.child) end
+            add(P.allimpls, e.iface, e.child)
+            if beans[e.child] then add(P.beanimpls, e.iface, e.child) end
         end
     end
-    -- SERVICE TYPES: interfaces transitively extending a marker (fixpoint over
-    -- the interface-extends edges, seeded by the marker set)
-    --
-    -- ★★ THE VALUE IS THE MARKER, NOT `true` (CART-0756). This widens a call's
-    -- candidate set from `beanimpls` to ALL implementers, so "why does this
-    -- interface draw from every implementer?" is a question the answer has to be
-    -- able to carry — and a boolean cannot. sinkflow's taint fixpoint already
-    -- shows the shape: it propagates a WITNESS, with a precedence rule for which
-    -- witness survives, rather than a bit.
-    --
-    -- ★ AND IT RECORDS THE ORIGIN MARKER, NOT THE PARENT THAT PASSED IT ALONG.
-    -- Naming the immediate parent is the attribution bug CART-0755 measured on a
-    -- derivation chain: after two hops the accused step is one that merely
-    -- inherited the property, while the marker that actually justified it goes
-    -- unnamed. `svc[p]` already holds ITS origin, so inheriting the value —
-    -- rather than storing `p` — keeps the root at every depth for free.
-    local svc = {}
-    for _ = 1, SUPER_STEP_LIMIT do
-        local changed = false
-        for child, parents in pairs(ifext) do
-            if not svc[child] then
-                for _, p in ipairs(parents) do
-                    -- a DIRECT marker names itself; an inherited one carries the
-                    -- root through unchanged
-                    local origin = markers[p] and p or svc[p]
-                    if origin then svc[child] = origin; changed = true; break end
+    for lang, P in pairs(parts) do
+        local allimpls, beanimpls, ifext, svc = P.allimpls, P.beanimpls, P.ifext, P.svc
+        local markers = (lang and M.spec[lang] and M.spec[lang].iface_markers) or {}
+        -- SERVICE TYPES: interfaces transitively extending a marker (fixpoint over
+        -- the interface-extends edges, seeded by the marker set)
+        --
+        -- ★★ THE VALUE IS THE MARKER, NOT `true` (CART-0756). This widens a call's
+        -- candidate set from `beanimpls` to ALL implementers, so "why does this
+        -- interface draw from every implementer?" is a question the answer has to be
+        -- able to carry — and a boolean cannot. sinkflow's taint fixpoint already
+        -- shows the shape: it propagates a WITNESS, with a precedence rule for which
+        -- witness survives, rather than a bit.
+        --
+        -- ★ AND IT RECORDS THE ORIGIN MARKER, NOT THE PARENT THAT PASSED IT ALONG.
+        -- Naming the immediate parent is the attribution bug CART-0755 measured on a
+        -- derivation chain: after two hops the accused step is one that merely
+        -- inherited the property, while the marker that actually justified it goes
+        -- unnamed. `svc[p]` already holds ITS origin, so inheriting the value —
+        -- rather than storing `p` — keeps the root at every depth for free.
+        for _ = 1, SUPER_STEP_LIMIT do
+            local changed = false
+            for child, parents in pairs(ifext) do
+                if not svc[child] then
+                    for _, p in ipairs(parents) do
+                        -- a DIRECT marker names itself; an inherited one carries the
+                        -- root through unchanged
+                        local origin = markers[p] and p or svc[p]
+                        if origin then svc[child] = origin; changed = true; break end
+                    end
                 end
             end
+            if not changed then break end
         end
-        if not changed then break end
-    end
-    -- push each interface's members up its extends chain (I extends J ⟹ J's
-    -- impls include I's) to a fixpoint, for both maps; bounded rounds
-    for _ = 1, SUPER_STEP_LIMIT do
-        local changed = false
-        for child, parents in pairs(ifext) do
-            for _, p in ipairs(parents) do
-                for _, map in ipairs({ allimpls, beanimpls }) do
-                    if map[child] then
-                        for cls in pairs(map[child]) do
-                            if not (map[p] and map[p][cls]) then
-                                add(map, p, cls); changed = true
+        -- push each interface's members up its extends chain (I extends J ⟹ J's
+        -- impls include I's) to a fixpoint, for both maps; bounded rounds
+        for _ = 1, SUPER_STEP_LIMIT do
+            local changed = false
+            for child, parents in pairs(ifext) do
+                for _, p in ipairs(parents) do
+                    for _, map in ipairs({ allimpls, beanimpls }) do
+                        if map[child] then
+                            for cls in pairs(map[child]) do
+                                if not (map[p] and map[p][cls]) then
+                                    add(map, p, cls); changed = true
+                                end
                             end
                         end
                     end
                 end
             end
+            if not changed then break end
         end
-        if not changed then break end
     end
     local cget, cset = cv.get, cv.set
     local n = 0
@@ -2491,7 +2503,8 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref, 
             -- reads it. `svc` never leaves this function, so no alibi can cite
             -- it; carrying it across the seam is a `data` field, with the
             -- closed-schema and parallel-merge cost that implies (CART-0756).
-            local set = head and (svc[head] and allimpls[head] or beanimpls[head])
+            local P = head and parts[elang_for(cget(i, 'file')) or false]
+            local set = P and (P.svc[head] and P.allimpls[head] or P.beanimpls[head])
             if set then
                 local only, cnt = nil, 0
                 for cls in pairs(set) do cnt = cnt + 1; only = cls end
@@ -4890,7 +4903,7 @@ local RESOLVE_PASSES = {
     { name = 'ruby_ancestors', run = function (x)
         return resolve_ruby_ancestors(x.cv, x.data.ruby_anc, x.exact, x.addref, x.node_index, x.data.ruby_ctor) end },
     { name = 'interface', run = function (x)
-        return resolve_interface(x.cv, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, javaspec._service_markers) end },
+        return resolve_interface(x.cv, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref) end },
     { name = 'local_callable', run = function (x)
         return resolve_local_callable(x.cv, x.node_index, x.exact, x.addref, x.parent_fn, x.data) end },
     -- DISPOSITION (not resolution): label std-aliased calls the resolvers left
@@ -8871,8 +8884,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                             data.implements[#data.implements + 1] = { child = child,
                                 iface = node_text(ifn, src), cintf = cintf, file = file }
                         end
-                        if not cintf then
-                            local bn = javaspec._bean_name(decl, src)
+                        if not cintf and spec.iface_bean then
+                            local bn = spec.iface_bean(decl, src)
                             if bn then
                                 data.beans = data.beans or {}
                                 data.beans[child] = bn -- explicit name or `true`

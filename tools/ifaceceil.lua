@@ -30,7 +30,7 @@ local band_of = ports.default_band_of(3)
 local surf = ports.surface(data, band_of)
 local idx = bandlink.indexes(data, band_of)
 local chains = bandlink.chains(data)
-local markers = javaspec._service_markers or {}
+local markers = javaspec.iface_markers or {}
 
 local node_index = {}
 for _, n in ipairs(data.nodes or {}) do node_index[n.id] = n end

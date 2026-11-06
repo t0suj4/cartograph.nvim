@@ -7,11 +7,12 @@
 --      takes the model as an explicit PARAM, and the engine threads it through
 --      the qualify_call protocol (a backwards-compatible 4th arg other specs
 --      ignore). No ambient coupling, no require cycle.
---   2. Three symbols are consumed by the ENGINE resolver, not the entry
---      (JAVA_JDK_TYPES also by the entry, JAVA_SERVICE_MARKERS + java_bean_name
---      only by it): exposed as `_`-prefixed fields on the returned table (the
---      capability contract skips `_` fields), and the engine reads them back
---      via require 'cartograph.spec.java'.
+--   2. JAVA_JDK_TYPES is consumed by the ENGINE resolver as well as the entry:
+--      exposed as the `_`-prefixed `_jdk_types` (the capability contract skips
+--      `_` fields), read back via require 'cartograph.spec.java'. The bean
+--      classifier and the service markers are ordinary spec fields
+--      (iface_bean / iface_markers, CART-0692), read off whichever language's
+--      spec is asking.
 --   3. NOOP is the trivial engine empty-iterator idiom, copied local.
 -- node_text/inext are the shared tsutil deps. Behaviour-identical.
 
@@ -1129,6 +1130,15 @@ return {
             (super_interfaces (type_list [ (type_identifier) @iface
                                            (generic_type (type_identifier) @iface) ]))) @idecl
     ]=],
+    -- ★ THE INTERFACE LINKER'S TWO CANDIDATE GATES ARE JAVA'S DECLARATIONS (CART-0692), read off the CALLING
+    -- language's spec. They had been `_bean_name` / `_service_markers` that the engine pulled off this module for
+    -- every language. A language that declares neither never redirects an interface call: it has no certificate
+    -- that its `implements` clauses ARE the implementer set (Java's lambdas implement a functional interface with
+    -- no clause, PHP has mocks, proxies and anonymous classes, TypeScript is structural).
+    --   iface_bean(decl, src) — at extraction: the class's bean name (explicit or `true`), nil if not a candidate
+    --   iface_markers         — at resolution: interfaces whose transitive sub-interfaces draw from ALL implementers
+    iface_bean = java_bean_name,
+    iface_markers = JAVA_SERVICE_MARKERS,
     entry_names = { main = true },
     -- An annotation registers the member iff its NAME says so — see
     -- JAVA_REGISTERING_ANNOS for the inclusion rule and why the name is the
@@ -1279,6 +1289,4 @@ return {
     -- so the capability contract skips them; the engine reads them back via
     -- require 'cartograph.spec.java'.
     _jdk_types = JAVA_JDK_TYPES,
-    _service_markers = JAVA_SERVICE_MARKERS,
-    _bean_name = java_bean_name,
 }

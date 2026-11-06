@@ -359,6 +359,63 @@ test('spring: no marker + no stereotype → stays at the interface (sound)', fun
     eq(nm['IFoo::doIt'].id, c.to) -- unchanged: neither gate fires
 end)
 
+-- ── THE GATES ARE THE CALLING LANGUAGE'S DECLARATIONS (CART-0692) ──────────
+-- The pass is general, but its two candidate gates were Java's module fields
+-- (`_bean_name`, `_service_markers`) read for every language. They are now spec
+-- fields, iface_bean / iface_markers, and a language that declares neither never
+-- redirects. These arms take each declaration away and require the redirect it
+-- licensed to go with it: a pass that still read Java's module would keep it.
+test('spring: the interface gates are spec declarations — remove one and its redirect goes (CART-0692)', function ()
+    if not parser_available('java') then return skip 'no java parser' end
+    local js = require('cartograph.providers.treesitter').spec.java
+    local markers, bean = js.iface_markers, js.iface_bean
+    local okm, errm = pcall(function ()
+        js.iface_markers = nil
+        local data = extract_files(SVC)
+        local nm = byname(data)
+        local c = callof(data, 'IProductBL::doIt')
+        ok(c, 'the interface-typed call is present')
+        eq(nm['IProductBL::doIt'].id, c.to) -- no markers declared: the plain impl is no candidate
+    end)
+    js.iface_markers = markers
+    assert(okm, errm)
+    local okb, errb = pcall(function ()
+        js.iface_bean = nil
+        local data = extract_files(FILES)
+        ok(not next(data.beans or {}), 'no bean classifier declared: no beans recorded')
+    end)
+    js.iface_bean = bean
+    assert(okb, errb)
+    -- and with both restored, the same fixtures redirect again
+    local data = extract_files(SVC)
+    eq(byname(data)['ProductBL::doIt'].id, callof(data, 'IProductBL::doIt').to)
+end)
+
+-- A same-named implementer in ANOTHER language is not a candidate. A PHP class
+-- `implements IProductBL` (php given an iface_query for this arm; the shipped php
+-- spec has none yet) made the Java set {ProductBL, OtherBL} and the redirect
+-- stayed at the interface; per-language sets keep Java's at {ProductBL}.
+test('spring: an implementer in another language does not join the candidate set (CART-0692)', function ()
+    if not (parser_available('java') and parser_available('php')) then return skip 'no java/php parser' end
+    local ps = require('cartograph.providers.treesitter').spec.php
+    local q0 = ps.iface_query
+    local files = {}
+    for k, v in pairs(SVC) do files[k] = v end
+    files['OtherBL.php'] = '<?php\nclass OtherBL implements IProductBL { function doIt() {} function doInline() {} }\n'
+    local okx, err = pcall(function ()
+        ps.iface_query = '(class_declaration name: (name) @ichild (class_interface_clause (name) @iface)) @idecl'
+        local data = extract_files(files)
+        local phprow
+        for _, e in ipairs(data.implements or {}) do if e.child == 'OtherBL' then phprow = e end end
+        ok(phprow, 'the php implements row is recorded (the fixture reaches the pass)')
+        local c = callof(data, 'IProductBL::doIt')
+        ok(c, 'the interface-typed call is present')
+        eq(byname(data)['ProductBL::doIt'].id, c.to)
+    end)
+    ps.iface_query = q0
+    assert(okx, err)
+end)
+
 -- ── PARAMETERIZED SUPERTYPES (CART-0672) ────────────────────────────────────
 -- `extends Base` parses `superclass → type_identifier`; `extends Base<T>` parses
 -- `superclass → generic_type → type_identifier`. The two queries named only the
