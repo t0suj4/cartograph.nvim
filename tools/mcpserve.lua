@@ -60,6 +60,10 @@ local profile, profile_mint = nil, nil
 -- <state>/cartograph/<root>.queries.jsonl (`--query-log-to <path>` elsewhere) — the request, the answer's envelope, the
 -- cartograph commit and THIS HOST'S FLAGS (`host_flags`), so tools/queryreplay.lua re-opens the graph the same way.
 local query_log, host_flags = nil, {}
+-- ★ THE SESSION'S VERB CATALOGUE (CART-1977, CUI-0009 c): `--umount <verb>[,<verb>…]` (repeatable) holds the full set
+-- minus those verbs, as a namespace value passed to every agent.answer. It can only SUBTRACT. Without it the value is
+-- nil — the full catalogue, and the exact path every other caller (the cockpit) takes.
+local umounts = {}
 do
     local i = 1
     while i <= #arg do
@@ -67,6 +71,9 @@ do
         elseif arg[i] == '--write' then writable = true
         elseif arg[i] == '--profile' then profile = arg[i + 1]; host_flags[#host_flags + 1] = arg[i]; host_flags[#host_flags + 1] = arg[i + 1]; i = i + 1
         elseif arg[i] == '--no-profile-mint' then profile_mint = false; host_flags[#host_flags + 1] = arg[i]
+        elseif arg[i] == '--umount' then
+            for v in tostring(arg[i + 1] or ''):gmatch('[^,%s]+') do umounts[#umounts + 1] = v end
+            host_flags[#host_flags + 1] = arg[i]; host_flags[#host_flags + 1] = arg[i + 1]; i = i + 1
         elseif arg[i] == '--query-log' then query_log = query_log or true
         elseif arg[i] == '--query-log-to' then query_log = arg[i + 1]; i = i + 1
         else roots[#roots + 1] = arg[i] end
@@ -74,7 +81,7 @@ do
     end
 end
 if #roots == 0 then
-    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write] [--profile <runtime>] [--no-profile-mint] [--query-log | --query-log-to <path>]\n')
+    io.stderr:write('usage: mcpserve <root>... [--index-only] [--write] [--umount <verb>[,<verb>...]] [--profile <runtime>] [--no-profile-mint] [--query-log | --query-log-to <path>]\n')
     os.exit(2)
 end
 -- ⚠ ONE BAND PER ROOT, ENFORCED HERE BECAUSE NOTHING ELSE ENFORCES IT
@@ -99,6 +106,12 @@ do
 end
 
 local agent = require 'cartograph.agent'
+local session_ns -- nil = the full catalogue
+for _, v in ipairs(umounts) do
+    local ns, why = agent.umount_verb(session_ns, v)
+    if not ns then io.stderr:write(('mcpserve: --umount: %s\n'):format(why)); os.exit(2) end
+    session_ns = ns
+end
 -- ── --write: THE PERMISSION, AND ITS DEFAULT IS OFF (CART-0146) ─────────────
 -- This host shipped as a READ surface. The write verbs (txn_apply, txn_undo)
 -- would otherwise hand every client already pointed at it the power to rewrite
@@ -254,7 +267,7 @@ local function tools_list()
         -- graph_info's per-verb column said a verb is unavailable and tools/list did not: a client that reads only the
         -- list learned it as a refusal on the call. Read off agent.unavailable — the central gate's own checks, in its
         -- order — so the advertisement and the refusal cannot disagree. (read-only rides in `w` above, in its own words.)
-        local rule, uwhy = agent.unavailable(store, name)
+        local rule, uwhy = agent.unavailable(store, name, session_ns)
         local t = (rule and rule ~= 'read-only')
             and (' THIS VERB IS UNAVAILABLE ON THIS HOST: every call REFUSES with rule `%s` — %s.'):format(rule, uwhy) or ''
         -- ★ THE QUESTION RIDES HERE TOO (CART-1976). `subject` stays out because the inputSchema already shows it;
@@ -285,7 +298,7 @@ local function tools_call(id, params)
     if type(args) ~= 'table' then
         return fail(id, -32602, 'arguments must be an object')
     end
-    local doc, status = agent.answer(store, name, args)
+    local doc, status = agent.answer(store, name, args, { mounts = session_ns })
     if status == 'usage' then
         return fail(id, -32602, doc.error.reason)
     end

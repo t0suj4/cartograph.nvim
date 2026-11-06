@@ -421,6 +421,42 @@ M.NEEDS = {
         unavailable = 'no kubectl or kustomize on this host\'s PATH — an overlay is read through its builder' },
 }
 
+-- ── ★★ THE CATALOGUE IS A NAMESPACE VALUE (CART-1977, CUI-0009 c) ─────────────
+-- Tactics have been mounted since CART-1160 (toolbelt.namespace); the verbs were a flat table, so "this session holds
+-- the full set minus X" had no value to be. Each verb is mounted at `verbs/<name>` (target = its name) in a
+-- cartograph.namespace value. ★ SUBTRACTION BY CONSTRUCTION: the only producers are M.catalogue() (the full set) and
+-- M.umount_verb (one fewer) — there is no verb-mount operation, so a session can never hold MORE than the catalogue
+-- (the loadout law, kb layouts-vs-loadouts). ★ AND THE DEFAULT IS THE FULL SET BY CONSTRUCTION, NOT BY CONVENTION:
+-- the session's value is PASSED to M.answer (`opts.mounts`) by the agent host (tools/mcpserve.lua, argv `--umount`);
+-- a caller that passes nothing — the cockpit, lsp.lua, lint.lua, a test — gets nil, and nil is the full catalogue.
+-- No module state, so no in-editor caller can be affected by a session it is not.
+-- ⚠ AN UNMOUNTED VERB IS ADVERTISED, NOT HIDDEN (the read-only precedent): tools/list keeps it with its rule, the call
+-- refuses `unmounted`, and the refusal's candidates are the mounted siblings (CART-1979).
+local ACTIVE_NS -- the catalogue of the session whose M.answer is running; nil = the full set
+
+function M.catalogue()
+    local namespace = require 'cartograph.namespace'
+    local ns = namespace.empty()
+    for _, k in ipairs(M.ORDER) do ns = namespace.mount(ns, 'verbs/' .. k, k) end
+    return ns
+end
+
+--- `ns` (nil = the full catalogue) with verb `name` unmounted -> ns' | nil, why
+function M.umount_verb(ns, name)
+    if not M.VERBS[name] then
+        return nil, ('%q is not a verb (have: %s)'):format(tostring(name), table.concat(M.ORDER, ', '))
+    end
+    return require('cartograph.namespace').umount(ns or M.catalogue(), 'verbs/' .. name)
+end
+
+--- is verb `name` mounted in `ns`? nil `ns` = the running session's (ACTIVE_NS), and no session = the full set
+function M.mounted(ns, name)
+    ns = ns or ACTIVE_NS
+    if ns == nil then return M.VERBS[name] ~= nil end
+    local hit = require('cartograph.namespace').resolve(ns, 'verbs/' .. name)
+    return hit ~= nil and hit.rest == '' and M.VERBS[name] ~= nil
+end
+
 --- the first declared need of verb `v` this store/host does not meet: name, NEEDS entry | nil
 function M.unmet(store, v)
     for _, n in ipairs(v.needs or {}) do
@@ -431,8 +467,12 @@ end
 
 --- why verb `name` cannot be called on this store/host, in the CENTRAL GATE'S ORDER (permission, graph, needs):
 --- rule, why | nil. graph_info and tools/list read this, so the catalogue and the refusal cannot disagree.
-function M.unavailable(store, name)
+function M.unavailable(store, name, ns)
     local v = M.VERBS[name]
+    -- THE SESSION FIRST (CART-1977): an unmounted verb is not what this session said it is doing, whatever the host
+    if not M.mounted(ns, name) then
+        return 'unmounted', 'this session unmounted the verb from its catalogue (mcpserve --umount) — it refuses rather than answering'
+    end
     if v.mutates and not M.WRITABLE then
         return 'read-only', 'this host was started read-only — the verb writes to the tree and refuses rather than doing it without permission'
     end
@@ -451,11 +491,11 @@ end
 --- that is stated, not filtered, so the caller decides whether re-addressing is worth it. ⚠ NAMES THAT EXIST TODAY
 --- ONLY — verbs, host flags, bands; never a loadout name (CART-0855 Layer 2 is deferred). An empty list is a claim:
 --- nothing on this host answers the same question.
-function M.candidates(store, verb, lang)
+function M.candidates(store, verb, lang, ns)
     local v, out = M.VERBS[verb], {}
     for _, k in ipairs(M.ORDER) do
         local c = M.VERBS[k]
-        if k ~= verb and c.answers == v.answers and not M.unavailable(store, k) then
+        if k ~= verb and c.answers == v.answers and not M.unavailable(store, k, ns) then
             local serves = not (lang and c.langs)
             for _, l in ipairs(lang and c.langs or {}) do if l == lang then serves = true end end
             if serves then
@@ -559,6 +599,7 @@ local function v_graph_info(store)
             tier_headline = nn(v.tier_headline),
             needs_calls = v.needs_calls or false,
             needs = v.needs and table.concat(v.needs, ' ') or NUL,
+            mounted = M.mounted(nil, name), -- CART-1977: in THIS session's catalogue
             available = available, unavailable_why = nn(why), unavailable_rule = nn(rule),
             absences = v.absences }
     end
@@ -4707,7 +4748,7 @@ end
 --- Returns (doc, status) where status ∈ 'ok' | 'refusal' | 'usage' | 'error'.
 --- The transport decides what each status looks like on ITS wire; nothing about
 --- JSON-RPC, exit codes or content blocks is decided here.
-function M.answer(store, verb, args)
+local function answer(store, verb, args)
     args = args or {}
     local v = M.VERBS[verb]
     if not v then
@@ -4768,6 +4809,15 @@ function M.answer(store, verb, args)
     -- asking about the call graph first would answer a question the caller is not
     -- allowed to reach — and `thin-index`'s remedy ("reopen the root without
     -- --index-only") would send them down a road that ends in this refusal anyway.
+    -- THE SESSION'S CATALOGUE, before permission (CART-1977): a verb this session unmounted is refused whatever the
+    -- host would allow, and the refusal names the mounted siblings that answer the same question
+    if not M.mounted(nil, verb) then
+        local cands = M.candidates(store, verb)
+        table.insert(cands, 1, host_flag('--umount', 'remove', ('restart the agent host without `--umount %s`'):format(verb)))
+        return refusal { rule = 'unmounted', candidates = cands,
+            reason = ('this session unmounted %s from its verb catalogue, so it was not run — the session said it is not doing this'):format(verb),
+            remedy = 'use a candidate (a mounted verb answering the same question), or restart the agent host without --umount for this verb' }
+    end
     if v.mutates and not M.WRITABLE then
         local cands = M.candidates(store, verb)
         table.insert(cands, 1, host_flag('--write', 'add', 'restart the host with it: the mutating verbs then apply'))
@@ -4918,6 +4968,22 @@ function M.answer(store, verb, args)
     return envelope { subject = nn(res.subject), result = result, tier = nn(tier),
         absence = nn(absence), absence_why = nn(absence_why),
         warrant = nn(warrant), notes = notes }, 'ok'
+end
+
+--- Answer one verb call. `opts.mounts` = the calling session's verb catalogue (a namespace value from M.catalogue /
+--- M.umount_verb, CART-1977); omitted = the full set, EXCEPT inside another M.answer (a recipe stepping verbs), which
+--- inherits the outer session's catalogue so a recipe cannot reach a verb its session unmounted.
+function M.answer(store, verb, args, opts)
+    local prev = ACTIVE_NS
+    local ns = opts and opts.mounts
+    if ns == nil then ns = prev end
+    ACTIVE_NS = ns
+    local function done(ok, ...)
+        ACTIVE_NS = prev
+        if not ok then error((...), 0) end
+        return ...
+    end
+    return done(pcall(answer, store, verb, args))
 end
 
 -- ── WHAT IS DELIBERATELY NOT A VERB, AND WHY (CART-0145) ────────────────────

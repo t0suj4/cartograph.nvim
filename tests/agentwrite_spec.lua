@@ -2042,3 +2042,62 @@ test('agentwrite (CART-1912): a planner step that mints NO plan refuses rather t
         'a load that holds no plan REFUSES: ok=' .. tostring(l.ok) .. ' ' .. vim.inspect(l.refusal))
     os.remove(path)
 end)
+
+-- ── THE VERB CATALOGUE AS A NAMESPACE VALUE (CART-1977, CUI-0009 c) ────────────
+-- A session holds "the full set minus X" by umount; the default is the full set BY CONSTRUCTION (a caller that passes
+-- no catalogue — the cockpit — cannot be affected), and the value can only subtract.
+test('agentwrite (CART-1977): the catalogue is a namespace value — full by default, a session subtracts by umount', function ()
+    local full = agent.catalogue()
+    eq(#agent.ORDER, #require('cartograph.namespace').entries(full), 'every verb is mounted')
+    for _, name in ipairs(agent.ORDER) do
+        ok(agent.mounted(full, name), name .. ' is in the full catalogue')
+        ok(agent.mounted(nil, name), name .. ' is mounted when no session says otherwise')
+    end
+    local ns = assert(agent.umount_verb(nil, 'mentions'))
+    ns = assert(agent.umount_verb(ns, 'txn_plan_optimize'))
+    eq(#agent.ORDER - 2, #require('cartograph.namespace').entries(ns), 'two fewer, nothing else moved')
+    eq(false, agent.mounted(ns, 'mentions'))
+    eq(true, agent.mounted(ns, 'node_find'))
+    local bad, why = agent.umount_verb(ns, 'no_such_verb')
+    eq(nil, bad); ok(why:find('not a verb', 1, true), why)
+    -- SUBTRACTION BY CONSTRUCTION: the module offers no way to put a verb back or add one
+    eq(nil, agent.mount_verb, 'there is no verb-mount operation')
+    eq(true, agent.mounted(full, 'mentions'), 'and the earlier value is untouched (unshare is free)')
+end)
+
+test('agentwrite (CART-1977): an unmounted verb REFUSES with its mounted siblings; the cockpit path is unchanged', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false)
+    local root = mkroot { ['m.lua'] = CSE_LUA }
+    ingest(root)
+    local ns = assert(agent.umount_verb(nil, 'txn_plan_optimize'))
+    ns = assert(agent.umount_verb(ns, 'node_at'))
+    local d = agent.answer(store, 'node_at', { file = 'm.lua', line = 2 }, { mounts = ns })
+    eq(false, d.ok)
+    eq('unmounted', d.refusal.rule)
+    eq('host-flag', d.refusal.candidates[1].kind); eq('--umount', d.refusal.candidates[1].name)
+    local sib = {}
+    for _, c in ipairs(d.refusal.candidates) do if c.kind == 'verb' then sib[c.name] = c end end
+    ok(sib.node_find, 'the mounted sibling answering the same question is offered')
+    -- graph_info in that session says so, and an unmounted sibling is never a candidate
+    local gi = agent.answer(store, 'graph_info', {}, { mounts = ns })
+    local by = {}
+    for _, r in ipairs(gi.result) do by[r.verb] = r end
+    eq(false, by.node_at.mounted); eq('unmounted', by.node_at.unavailable_rule)
+    eq(true, by.node_find.mounted)
+    -- THE COCKPIT PATH: no catalogue passed = the full set, and the session's call left nothing behind
+    local plain = agent.answer(store, 'node_at', { file = 'm.lua', line = 2 })
+    eq(true, plain.ok, 'a caller that passes no catalogue is unaffected: ' .. vim.inspect(plain.refusal))
+    for _, r in ipairs(agent.answer(store, 'graph_info', {}).result) do
+        eq(true, r.mounted, r.verb .. ' is mounted for a caller with no session')
+    end
+    -- A RECIPE INHERITS ITS SESSION: a saved planner invocation replayed by txn_load cannot reach an unmounted verb
+    local p = call('txn_plan_optimize', { kind = 'cse', node = idof('M.f') })
+    eq(true, p.ok, 'planned in the full catalogue: ' .. vim.inspect(p.refusal))
+    local path = recipe_with(p.subject.plan)
+    local l = agent.answer(store, 'txn_load', { path = path }, { mounts = ns })
+    eq(false, l.ok, 'the replayed step is refused in a session that unmounted its verb')
+    ok(vim.inspect(l.refusal):find('unmounted', 1, true), 'and says why: ' .. vim.inspect(l.refusal))
+    eq(true, agent.answer(store, 'txn_load', { path = path }).ok, 'while the full catalogue replays it')
+    os.remove(path)
+end)

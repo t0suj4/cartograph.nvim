@@ -1097,6 +1097,34 @@ test('mcpserve: a missing binary is a DECLARED need — graph_info and tools/lis
     vim.fn.delete(bin, 'rf')
 end)
 
+-- CART-1977: an agent host started with --umount holds the full catalogue minus those verbs — advertised, refused
+-- with `unmounted`, and its siblings offered; an unknown name is refused at startup
+test('mcpserve: --umount subtracts verbs from THIS session: listed, refused `unmounted`, siblings offered', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    local c, err = mcp.connect { cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l',
+        repo('tools/mcpserve.lua'), root, '--umount', 'mentions,node_at' }, timeout = 60000 }
+    ok(c ~= nil, 'mcpserve did not come up with --umount: ' .. tostring(err))
+    local list = c:request('tools/list', vim.empty_dict())
+    local desc = {}
+    for _, t in ipairs(list.tools) do desc[t.name] = t.description end
+    ok(desc.mentions, 'an unmounted verb is ADVERTISED, not hidden')
+    ok(desc.mentions:find('`unmounted`', 1, true), 'with its rule')
+    eq(nil, desc.node_find:find('`unmounted`', 1, true), 'a mounted verb says nothing of it')
+    local d = c:call('node_at', { file = 'm.lua', line = 3 })
+    eq('unmounted', d.refusal.rule)
+    local sib = false
+    for _, cand in ipairs(d.refusal.candidates) do if cand.name == 'node_find' then sib = true end end
+    ok(sib, 'node_find, mounted and answering the same question, is offered')
+    ok(c:call('node_find', { query = 'pub' }).ok, 'and a mounted verb answers')
+    c:close()
+    -- an unknown verb name is a caller error at startup, never silently ignored
+    local c2 = mcp.connect { cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l',
+        repo('tools/mcpserve.lua'), root, '--umount', 'no_such_verb' }, timeout = 20000 }
+    eq(nil, c2, 'the host refuses to start with an unknown --umount')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('mcpserve: with helm on PATH the helm need is MET — the gate is not a constant refusal', function ()
     if not ready() then skip('no treesitter') end
     if vim.fn.exepath('helm') == '' then skip('no helm on this machine') end

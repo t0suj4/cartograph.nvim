@@ -60,7 +60,7 @@ Two hosts, same envelope.
 
 ```bash
 # a session — MCP, newline-delimited JSON-RPC 2.0, one JSON object per line
-nvim --headless -u NONE -l tools/mcpserve.lua <root>... [--index-only] [--write]
+nvim --headless -u NONE -l tools/mcpserve.lua <root>... [--index-only] [--write] [--umount <verb>[,<verb>...]]
 
 # one shot — the `alibi` verb ONLY (every other verb: mcpserve); one JSON document on stdout, nothing else
 nvim --headless -u NONE -l tools/agentq.lua <root> alibi <file> <line>
@@ -203,7 +203,12 @@ unavailable, look at its siblings. A refusal lists them for you in
 `refusal.candidates`: `kind = 'verb'` rows (same question, available here, serving
 the file's language; `same_subject = false` means you must re-address, e.g. a name
 → a node), `kind = 'host-flag'` rows (`--write` to add, `--index-only` to remove)
-and `kind = 'band'` rows. An empty list is a claim: nothing here answers it. `txn_plan_optimize`'s subject is `statement`:
+and `kind = 'band'` rows. An empty list is a claim: nothing here answers it.
+
+A session can hold the full verb set MINUS some verbs: start the host with
+`--umount mentions,node_at`. The verbs stay listed, `graph_info` shows
+`mounted = false`, and a call refuses with rule **`unmounted`** and the mounted
+siblings as candidates. It only subtracts; without it you have every verb. `txn_plan_optimize`'s subject is `statement`:
 the full node address, optionally narrowed to one statement by `target_line`.
 
 ⚠ **A wrong-language planner does not error, so this column is the only warning you
