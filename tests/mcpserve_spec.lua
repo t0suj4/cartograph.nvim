@@ -809,6 +809,8 @@ test('mcpserve: the handshake completes and tools/list advertises every verb', f
         eq('object', by[name].inputSchema.type, name .. ' carries a JSON Schema')
         ok(by[name].description:find('absence', 1, true),
             name .. "'s description states the envelope, so a client that never reads our docs still learns it")
+        ok(by[name].description:find(('QUESTION: %q'):format(agent.QUESTION[agent.VERBS[name].answers]), 1, true),
+            name .. ': tools/list carries the question it answers (CART-1976)')
         eq(nil, by[name].description:find('`thin-index`', 1, true),
             name .. ': a FULL graph discloses no thin-index refusal it would never give (CART-1978)')
         -- CART-1975: the disclosure is the central gate's answer, so it follows THIS host (helm may or may not be here)

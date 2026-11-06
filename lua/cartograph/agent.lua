@@ -522,6 +522,8 @@ local function v_graph_info(store)
             -- handle fits — which is the whole of the routing question that ticket
             -- was opened to design a table for.
             subject = v.subject or NUL,
+            -- CART-1976: the QUESTION this verb answers, as a closed slug and its question-index heading
+            answers = v.answers, question = M.QUESTION[v.answers],
             -- CART-0581: WHICH QUANTIFIER produced the headline `tier`. Without
             -- it, `tier: inferred` from a floor verb and from a peak verb are
             -- the same string carrying opposite claims.
@@ -3575,6 +3577,9 @@ end
 --
 --   'node'         addressed by the full ADDRESS: node | ref | file+line
 --   'node-handle'  node | ref only — no position (declare, annotate)
+--   'statement'    the full node address, optionally narrowed to ONE statement inside it by `target_line` (1-based,
+--                  the same base as `line`); without it the whole function is the subject (CART-1976, CUI-0009 b).
+--                  ⚠ NO `region` KIND: no verb takes a line RANGE today, and a kind nobody declares is dead vocabulary
 --   'set'          a SET of nodes (moveset's seed / seed_refs)
 --   'position'     a file+line that is not resolved to a definition (why, node_at)
 --   'plan'         a plan handle from a txn_plan_* verb
@@ -3595,6 +3600,32 @@ end
 -- names `node`/`ref`/`file`/`line` on every tool, so a client reading tools/list can
 -- see the shape; `langs` had no other expression and had to be written out. A second
 -- rendering of something already visible is a thing to keep in sync for nothing.
+
+-- ── THE FIFTH AXIS: WHAT QUESTION A VERB ANSWERS (CART-1976, CUI-0009 b) ─────
+-- `summary` says it in prose, and nothing machine-readable did, so an agent could not ask "which other verb answers
+-- this?" — the question a refusal's candidates need (CART-1979). The vocabulary is NOT invented here: each value is a
+-- `## ` heading of the skill's question index (.claude/skills/cartograph/references/questions.md), which is where a
+-- reader already looks for "question -> instrument", and tests/agentwrite_spec.lua fences that every heading below
+-- exists there verbatim, every verb declares exactly one, every value is used, and the verb is NAMED in its section.
+-- ★ ONE QUESTION PER VERB, deliberately: two verbs that answer the same question are ALTERNATIVES for each other, and a
+-- multi-valued field would make every planner an alternative for every other one through a shared "change it".
+M.ANSWERS = {
+    { 'where-is-it', 'Where is it?' },
+    { 'who-uses-it', 'Who uses it?' },
+    { 'what-it-uses', 'What does it use?' },
+    { 'graph-right', 'Is the graph right? Did something drift?' },
+    { 'already-here', 'Is it already here? (ask BEFORE implementing something or searching elsewhere)' },
+    { 'reach-for', 'What does the tree reach for? (environment, dependencies)' },
+    { 'dead-or-alive', 'Dead or alive?' },
+    { 'templates', 'Templates, clones, the algebra' },
+    { 'performance', 'Performance' },
+    { 'deployment', 'What does the deployment do? (Kubernetes, Helm, kustomize)' },
+    { 'change-it', 'Change it: what would the edit be?' },
+    { 'review-apply', 'Review, apply or take back a change' },
+    { 'what-changed', 'What changed?' },
+}
+M.QUESTION = {}
+for _, a in ipairs(M.ANSWERS) do M.QUESTION[a[1]] = a[2] end
 
 -- ── THE VERB TABLE ──────────────────────────────────────────────────────────
 -- `absences` lists the absence values a verb can actually produce. It is
@@ -3851,6 +3882,7 @@ end
 
 M.VERBS = {
     k8s_findings = {
+        answers = 'deployment',
         summary = 'Kubernetes manifests in this graph: soft-edge references that dangle, selectors that match no pod, peers absent from their own release — the edges GC never walks, derived from the API types',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -3858,6 +3890,7 @@ M.VERBS = {
         run = v_k8s_findings,
     },
     k8s_traces = {
+        answers = 'deployment',
         summary = 'REQUEST-PATH TRACES from a Kubernetes workload: every peer it names (an env *_SERVICE_ADDR, a URL host), hop by hop — the naming line -> the peer\'s Service and port -> the workload it selects -> that workload listening (containerPort) -> its health probe — each hop at its declaring line; a peer with no Service ends dangling',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'unavailable' },
@@ -3869,6 +3902,7 @@ M.VERBS = {
         run = v_k8s_traces,
     },
     helm_chart = {
+        answers = 'deployment',
         summary = 'a Helm chart RENDERED by Helm itself and read: dangling references, empty selectors, and the silent-success lints on its templates (dangling / orphan values, chomped separators, checksum coverage)',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'refused', 'frontier' },
@@ -3882,6 +3916,7 @@ M.VERBS = {
         run = v_helm_chart,
     },
     kustomize_overlays = {
+        answers = 'deployment',
         summary = 'every kustomize overlay BUILT by kustomize itself and read as a release — components resolved inside the overlays that compose them: dangling references, selectors matching nothing, the deletion frontier',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent', 'refused' },
@@ -3890,6 +3925,7 @@ M.VERBS = {
         run = v_kustomize_overlays,
     },
     helmfile_releases = {
+        answers = 'deployment',
         summary = 'a HELMFILE repo\'s releases: chart, pinned version, namespace, needs and each values layer (read / templated / missing) per cluster file; no-op overrides, chart version skew between releases, hosts served by several releases, secrets as a private frontier',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -3897,6 +3933,7 @@ M.VERBS = {
         run = v_helmfile_releases,
     },
     helm_stages = {
+        answers = 'deployment',
         summary = 'a plain chart deployed per stage by the repo\'s own helm command lines: each stage\'s values chain, must-override placeholders left, no-op overrides, plaintext secret count, and the drift between stages',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent' },
@@ -3906,6 +3943,7 @@ M.VERBS = {
         run = v_helm_stages,
     },
     graph_info = {
+        answers = 'graph-right',
         summary = 'this graph: provider, counts, capability per verb, and the frontier (what was NOT looked at)',
         subject = 'graph',
         tier_basis = 'observation', absences = {},
@@ -3913,6 +3951,7 @@ M.VERBS = {
         run = v_graph_info,
     },
     node_find = {
+        answers = 'where-is-it',
         summary = 'find definitions by name (exact, tail — M.foo ~ foo — or substring); each row says HOW it matched',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
@@ -3924,6 +3963,7 @@ M.VERBS = {
         run = v_node_find,
     },
     node_at = {
+        answers = 'where-is-it',
         summary = 'the definitions containing file:line, innermost first — addressing a position',
         subject = 'position',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
@@ -3934,6 +3974,7 @@ M.VERBS = {
         run = v_node_at,
     },
     edges_callers = {
+        answers = 'who-uses-it',
         summary = 'who calls this — each row with its own resolution tier and `prov`, the resolvers that landed its edge (base, super, typed_receiver, … ; not-a-call for a reference)',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
@@ -3942,6 +3983,7 @@ M.VERBS = {
         run = v_edges_callers,
     },
     edges_callees = {
+        answers = 'what-it-uses',
         summary = 'what this calls — each row with its own resolution tier and `prov` (which resolvers landed the edge); refused and external sites ride as notes',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
@@ -3950,6 +3992,7 @@ M.VERBS = {
         run = v_edges_callees,
     },
     why = {
+        answers = 'graph-right',
         summary = 'the honesty record for what is at file:line — how a call resolved, or which rule refused it',
         subject = 'position',
         -- `why` answers about ONE position, so its result is one row and floor
@@ -3965,6 +4008,7 @@ M.VERBS = {
         run = v_why,
     },
     lint_run = {
+        answers = 'dead-or-alive',
         summary = 'the graph-aware lint findings, each carrying its rule disposition (authoritative vs suggestive)',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -3979,6 +4023,7 @@ M.VERBS = {
     -- ── the analysis catalogue ──────────────────────────────────────────────
 
     clones_find = {
+        answers = 'templates',
         summary = 'duplicated code: exact structural clone GROUPS and near-clone PAIRS with the value holes that would become a shared helper\'s parameters',
         subject = 'graph',
         tier_basis = 'observation',
@@ -3992,6 +4037,7 @@ M.VERBS = {
         run = v_clones_find,
     },
     cone = {
+        answers = 'what-it-uses',
         summary = 'everything reachable from a node, transitively — direction `out` (what it reaches) or `in` (what reaches it)',
         subject = 'node',
         -- NOT 'observation' and NOT 'resolution'. A cone member was reached
@@ -4010,6 +4056,7 @@ M.VERBS = {
         run = v_cone,
     },
     ladder = {
+        answers = 'graph-right',
         summary = 'the call-resolution distribution — how many call sites landed on each rung, for one function or the whole graph',
         subject = 'node',
         tier_basis = 'observation', needs_calls = true,
@@ -4025,6 +4072,7 @@ M.VERBS = {
         run = v_ladder,
     },
     territory = {
+        answers = 'dead-or-alive',
         summary = 'the architecture by reachability: which entry point owns each node, plus commons, core and the borders between them',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4037,6 +4085,7 @@ M.VERBS = {
         run = v_territory,
     },
     census = {
+        answers = 'graph-right',
         summary = "the graph's epistemic state as counts: edges by trust tier, calls by disposition, refusals by rule, the outside-the-corpus buckets",
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4046,6 +4095,7 @@ M.VERBS = {
         run = v_census,
     },
     mentions = {
+        answers = 'who-uses-it',
         summary = 'which FILES mention an identifier — the weaker, name-level question that still answers when resolution refused',
         subject = 'query',
         tier_basis = 'observation',
@@ -4058,6 +4108,7 @@ M.VERBS = {
         run = v_mentions,
     },
     externals = {
+        answers = 'reach-for',
         summary = 'the external surface: every call base that leaves this graph, with its members, its files and how the boundary was decided',
         subject = 'graph',
         tier_basis = 'observation', needs_calls = true,
@@ -4071,6 +4122,7 @@ M.VERBS = {
     -- ── the version axis (CART-0595) ────────────────────────────────────────
 
     portability_targets = {
+        answers = 'reach-for',
         summary = 'the environment profiles that ship, and what each can ANSWER — the from/to vocabulary for portability_move; an artifact that can be no target carries the mechanism that stops it',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4082,6 +4134,7 @@ M.VERBS = {
         run = v_portability_targets,
     },
     portability_move = {
+        answers = 'reach-for',
         summary = 'THE VERSION MOVE, over the READ surface: names this code reads that the OLD environment held and the NEW one does not — the port worklist. This is the strong one; a renamed data global (global.x -> storage.x) lives here and nowhere else',
         subject = 'query',
         tier_basis = 'observation',
@@ -4108,6 +4161,7 @@ M.VERBS = {
         run = v_portability_move,
     },
     portability_move_calls = {
+        answers = 'reach-for',
         summary = 'the same move over the CALL-derived requirement set — THE WEAKER QUESTION. A name that is READ and never invoked produces no call record, so a data-global rename is invisible here and this verb can answer "0 lost" on a large port. Ask portability_move first; use this only when you specifically mean CALLED names',
         subject = 'query',
         -- requires() reads the call records, so unlike portability_move this one
@@ -4139,6 +4193,7 @@ M.VERBS = {
     -- the one that says a rung would be invented.
 
     txn_plan_moveset = {
+        answers = 'change-it',
         summary = 'PROPOSE moving symbols to another file (or into a new one — an existing dest is a MOVE, a path that does not exist yet is an EXTRACT-MODULE). Writes nothing: returns a plan handle for txn_preview',
         subject = 'set',
         tier_basis = 'observation', needs_calls = true,
@@ -4159,6 +4214,7 @@ M.VERBS = {
         run = v_txn_plan_moveset,
     },
     txn_plan_extract_family = {
+        answers = 'templates',
         summary = 'PROPOSE ONE shared helper for a function\'s whole near-clone FAMILY (not just its nearest partner). Writes nothing: returns a plan handle for txn_preview, plus the per-member verdict when it cannot',
         subject = 'node',
         -- cloneextract's EXTRACT table is the whole language-specific part of the
@@ -4193,6 +4249,7 @@ M.VERBS = {
         run = v_txn_plan_extract_family,
     },
     txn_plan_clonemerge = {
+        answers = 'templates',
         summary = 'PROPOSE merging a function\'s EXACT clones into it — the copies are deleted and their call sites pointed at the survivor. Writes nothing: returns a plan handle for txn_preview',
         subject = 'node',
         -- `observation`, like every planner: the answer carries a PLAN, never a rung.
@@ -4211,6 +4268,7 @@ M.VERBS = {
         run = v_txn_plan_clonemerge,
     },
     txn_plan_invert = {
+        answers = 'change-it',
         summary = 'PROPOSE the INVERSE of a recorded extract-helper — inline the synthesized helper back into the sites it was taken from. ⚠ NOT txn_undo: undo restores that transaction\'s bytes and discards later work; this removes ONE abstraction from the tree as it stands, so a helper improved since is what comes back. Reads the argument/parameter correspondence off the transaction\'s own undo record instead of re-parsing our output. Writes nothing: returns a plan handle for txn_preview',
         -- ⚠ THE ONLY PLANNER WHOSE SUBJECT IS HISTORY. What it needs was computed by the
         -- fold and never written as text, so the address is a journal id, not a node.
@@ -4227,6 +4285,7 @@ M.VERBS = {
         run = v_txn_plan_invert,
     },
     txn_plan_transplant = {
+        answers = 'templates',
         summary = 'PROPOSE the edit demonstrated by one pair applied to a third definition -- a DERIVED replacement, not a supplied one. Give the exemplar pair `a` -> `b` and the target `c`; the operator derives c-prime from the tree and the plan records `origin = derived` and claims `unreviewed` rather than `none`. Writes nothing: returns a plan handle for txn_preview',
         -- THE SUBJECT IS THE DEFINITION BEING REWRITTEN. `a`/`b` are the EXEMPLAR --
         -- a parameter of the edit, not a second subject -- which is why this is a
@@ -4249,6 +4308,7 @@ M.VERBS = {
         run = v_txn_plan_transplant,
     },
     ports = {
+        answers = 'reach-for',
         summary = 'this graph\'s PORTS: every call its band honestly left unresolved that a profile DISPOSED (callee, full, the disposition, the enclosing fn, the 1-based line), plus the band identity (root, profile, a stamp of its file stamps). A client mounts this host as a band and derives the cross-band linkage itself; only ports cross the wire, never bodies',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4257,6 +4317,7 @@ M.VERBS = {
         run = function (store) return M._v_ports(store) end,
     },
     toolbelt_list = {
+        answers = 'already-here',
         summary = 'the NAMED TACTICS in the toolbelt: each entry\'s kind (write | discovery), params, the ticket a discovery measures, its EXAMPLES (the usage, which the toolbelt fence also runs as tests), its TAGS with their source (declared | derived | scope) and its binding CHAIN (the mount that runs it and what it shadows); `name` or `tag` looks tactics up, `at` is the subject whose scoped tags and applicability count',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4269,6 +4330,7 @@ M.VERBS = {
         run = v_toolbelt_list,
     },
     toolbelt_run = {
+        answers = 'already-here',
         summary = 'run a named tactic: a DISCOVERY re-measures this graph and says whether its finding still holds; a WRITE tactic PREVIEWS (dry, up to the first write) unless `apply` is set on a writable host. Params are coerced by the entry: a ref may be `file::name`, a string `@path`',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4281,6 +4343,7 @@ M.VERBS = {
         run = v_toolbelt_run,
     },
     txn_plan_propagate = {
+        answers = 'templates',
         summary = 'PROPOSE carrying an edit made to ONE member of a near-clone family to the others. Give the member and its NEW text; the edit is classified (value / template / mixed; a straddle or unsupported shape refuses) and each member it reaches is re-rendered from its OWN text and verified by reparse against its predicted values. The SCOPE is yours: without `scope` the plan is the member alone, with a `propagate-scope` decision naming the wider scopes',
         subject = 'node',
         tier_basis = 'observation',
@@ -4298,6 +4361,7 @@ M.VERBS = {
         run = v_txn_plan_propagate,
     },
     txn_plan_replace = {
+        answers = 'change-it',
         summary = 'PROPOSE swapping a definition\'s text for text YOU supply — the destination for a rendered edit (transplant). ⚠ ITS GUARANTEE IS THE WEAKEST OF THE WRITE VERBS: the text is not derived from this graph, so the plan checks only that the result PARSES and that the file has not moved. It does NOT check that the replacement defines the same name, keeps its arity, or relates to what it replaces',
         subject = 'node',
         tier_basis = 'observation',
@@ -4320,8 +4384,9 @@ M.VERBS = {
         run = v_txn_plan_replace,
     },
     txn_plan_optimize = {
+        answers = 'performance',
         summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',
-        subject = 'node',
+        subject = 'statement',
         tier_basis = 'observation', needs_calls = true,
         -- optapply emits lua syntax (`local x = …`), and its ASSIGN table, call-node
         -- test and no-throw `builtins` set are lua's. ⚠ Its own `lang_of` ADMITS all
@@ -4349,6 +4414,7 @@ M.VERBS = {
         run = v_txn_plan_optimize,
     },
     txn_plan_declare = {
+        answers = 'change-it',
         summary = 'PROPOSE adding a member to a declared container (a table/array/object literal). Writes nothing: returns a plan handle for txn_preview',
         subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
@@ -4370,6 +4436,7 @@ M.VERBS = {
         run = v_txn_plan_declare,
     },
     txn_plan_annotate = {
+        answers = 'change-it',
         summary = 'PROPOSE attaching prose above a definition, in the file\'s own comment style. Writes nothing: returns a plan handle for txn_preview',
         subject = 'node-handle',
         tier_basis = 'observation', needs_calls = false,
@@ -4388,6 +4455,7 @@ M.VERBS = {
         run = v_txn_plan_annotate,
     },
     txn_save = {
+        answers = 'review-apply',
         summary = 'SAVE a held plan to a file so another session can apply it. Planning needs no write capability and applying does, so this is the handoff: plan on a read-only host, review the file, apply on an armed one',
         subject = 'plan',
         -- `observation`: the answer carries a PATH, never a rung.
@@ -4403,6 +4471,7 @@ M.VERBS = {
         run = v_txn_save,
     },
     txn_load = {
+        answers = 'review-apply',
         summary = 'LOAD a saved plan and hold it here, returning a fresh handle. Every stamp the plan pinned is re-checked against disk first, and the plan must still be previewed before it can be applied',
         subject = 'path',
         tier_basis = 'observation', needs_calls = false,
@@ -4417,6 +4486,7 @@ M.VERBS = {
         run = v_txn_load,
     },
     txn_preview = {
+        answers = 'review-apply',
         summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',
         subject = 'plan',
         tier_basis = 'observation',
@@ -4429,6 +4499,7 @@ M.VERBS = {
         run = v_txn_preview,
     },
     journal_list = {
+        answers = 'what-changed',
         summary = 'the transaction history for this root, newest first — metadata only (id, when, verb, status, files); journal_get serves the bytes',
         subject = 'graph',
         tier_basis = 'observation',
@@ -4442,6 +4513,7 @@ M.VERBS = {
         run = v_journal_list,
     },
     journal_get = {
+        answers = 'what-changed',
         summary = 'one journal entry in full: its per-file diff, hashes and status — what a transaction actually did',
         subject = 'journal',
         tier_basis = 'observation',
@@ -4452,6 +4524,7 @@ M.VERBS = {
         run = v_journal_get,
     },
     txn_apply = {
+        answers = 'review-apply',
         summary = 'WRITE a held plan to disk, journalled and reversible. Refuses unless the plan has been through txn_preview, and runs the full late-bound ladder before any byte moves',
         subject = 'plan',
         tier_basis = 'observation', needs_calls = true, mutates = true,
@@ -4464,6 +4537,7 @@ M.VERBS = {
         run = v_txn_apply,
     },
     txn_undo = {
+        answers = 'review-apply',
         summary = 'roll back the newest applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since',
         subject = 'graph',
         tier_basis = 'observation', mutates = true,

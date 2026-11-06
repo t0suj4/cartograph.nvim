@@ -17,10 +17,77 @@ Three habits make that true:
 All commands run from the repo root as `nvim --headless -u NONE -l tools/<tool>.lua …`; the argument lists below are
 the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
+## Where is it?
+
+The MCP verbs below declare which section they answer (`answers` in `graph_info` and in tools/list, CART-1976). A
+verb's section is the question it answers, so two verbs in one section are alternatives for each other.
+
+| Question | Instrument |
+|---|---|
+| Find a definition by name (exact, tail `M.foo ~ foo`, substring), each row saying how it matched | MCP `node_find { query }` |
+| Which definitions contain this file:line, innermost first? | MCP `node_at { file, line }` |
+
+## Who uses it?
+
+| Question | Instrument |
+|---|---|
+| Who calls this, each row with its resolution tier and the resolvers that landed it (`prov`)? | MCP `edges_callers { node | ref | file+line }` |
+| Which FILES mention this identifier — the name-level question that still answers when resolution refused? | MCP `mentions { name, from? }` (refuses `no-mention-index` on a graph without one) |
+
+## What does it use?
+
+| Question | Instrument |
+|---|---|
+| What does this call, with tiers and `prov`; refused and external sites as notes? | MCP `edges_callees { node | ref | file+line }` |
+| Everything reachable from a node, transitively (`out`), or everything that reaches it (`in`) | MCP `cone { node, direction }` |
+
+## What does the deployment do? (Kubernetes, Helm, kustomize)
+
+| Question | Instrument |
+|---|---|
+| Dangling soft references, selectors matching no pod, peers absent from their release | MCP `k8s_findings` |
+| The request path from a workload to its peers, hop by hop at the declaring lines | MCP `k8s_traces { object | file+line }` |
+| A chart rendered by Helm itself: dangling references, empty selectors, silent-success template lints | MCP `helm_chart { chart }` (needs helm: `no-helm`) |
+| Each stage's values chain from the repo's own helm command lines | MCP `helm_stages` |
+| Every kustomize overlay built and read as a release | MCP `kustomize_overlays` (needs kubectl or kustomize: `no-kustomize`) |
+| A helmfile repo's releases, pinned versions and values layers per cluster | MCP `helmfile_releases` |
+
+## Change it: what would the edit be?
+
+Every verb here PROPOSES: it writes nothing and returns a plan handle for the next section.
+
+| Question | Instrument |
+|---|---|
+| Move symbols to another file, or extract them into a new one | MCP `txn_plan_moveset { seed, dest }` |
+| Add a member to a declared container literal | MCP `txn_plan_declare { node, member }` |
+| Attach prose above a definition, in the file's comment style | MCP `txn_plan_annotate { node, text }` |
+| Swap a definition's text for text I supply | MCP `txn_plan_replace { node, text }` |
+| Inline a synthesized helper back into the sites it was taken from (not undo) | MCP `txn_plan_invert { id }` |
+
+## Review, apply or take back a change
+
+| Question | Instrument |
+|---|---|
+| The exact diff a held plan would write, nothing written | MCP `txn_preview { plan }` |
+| Hand a plan to another session (plan on a read-only host, apply on a writable one) | MCP `txn_save { plan, path }` / `txn_load { path }` |
+| Write a previewed plan, journalled and reversible | MCP `txn_apply { plan }` (needs a `--write` host) |
+| Roll back the newest applied transaction byte-exact | MCP `txn_undo` (needs a `--write` host) |
+
+## What changed?
+
+| Question | Instrument |
+|---|---|
+| The transaction history for this root, newest first | MCP `journal_list` |
+| What one transaction actually did: per-file diff, hashes, status | MCP `journal_get { id }` |
+
 ## Is the graph right? Did something drift?
 
 | Question | Instrument |
 |---|---|
+| This graph: provider, counts, each verb's capability and why it is unavailable (`unavailable_rule`), the frontier | MCP `graph_info` |
+| How did the call at file:line resolve, or which rule refused it? | MCP `why { file, line }` |
+| How many call sites landed on each resolution rung, for one function or the graph? | MCP `ladder` |
+| The graph's epistemic state as counts: edges by tier, calls by disposition, refusals by rule | MCP `census` |
 | Do all corpora still produce their pinned counts / the saved graph, and do the oracles agree? | `tools/matrix.lua [<corpus>...] [--cols counts,struct,dfpar,fold,silent,cache,par] [--save] [--jobs N]` |
 | One corpus against its pin and baseline | `tools/gate.lua <corpus> [--save]` |
 | WHAT KIND of node moved vs the baseline (a grammar upgrade reading locals as functions shows as `+ function bare`) | `tools/gate.lua <corpus> --kinds` (graphdiff.by_kind) |
@@ -54,6 +121,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
+| Is there already a named tactic for this — its kind, params, examples? Run it (a discovery re-measures, a write previews) | MCP `toolbelt_list` / `toolbelt_run { name }` |
 | Does the tree already contain this functionality, compiled out by default? How is it turned on? (erlang + rebar + autoconf) | `tools/features.lua <root> [--all]` — configure switch and default -> rebar variable -> macro / dependency -> the `-ifdef` code it compiles out, with line ranges and functions. ejabberd: SIP (~1,400 lines, `--enable-sip`), Elixir, roster gateway workaround, multihost SQL schema |
 | Is a missing dependency or behaviour producer really missing, or just behind a disabled feature? | `tools/producers.lua <root>` marks each one `[compiled out by default: MACRO — ./configure --enable-x]` |
 
@@ -61,6 +129,9 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
+| Every call base that leaves this graph, with members, files and how the boundary was decided | MCP `externals` |
+| Which environment profiles ship, and what names a version move loses (read surface / call surface) | MCP `portability_targets`, `portability_move { from, to }`, `portability_move_calls { from, to }` |
+| Every call this band left unresolved that a profile disposed (its ports) | MCP `ports` |
 | What does a vendored artifact reach for, and does anything supply it? | `tools/surface.lua` |
 | Distil a surface into an L2 environment profile | `tools/nodedistill.lua`, `tools/npmdistill.lua <corpus|dir>`, `tools/domdistill.lua`, `tools/erldistill.lua` (now also OTP behaviour callbacks), `tools/hrldistill.lua --from <dir-or-.hrl>`, `tools/dtsread.lua`, `tools/nvimdistill.lua [--show]` (the `nvim` profile from the running Neovim runtime's own LuaLS annotations — declared returns, e.g. `vim.fn.system` -> string; activated by the nvim-plugin / nvim-config shapes; shares `cartograph.metaread` with luadistill), `tools/wowdistill.lua --annotations <vscode-wow-api>/Annotations/Core [--show]` (the `wow` profile from Ketho's vscode-wow-api, CART-1827: `Lua/` in full — string.trim / split / join and the compat aliases strtrim, tinsert … — and the documented GLOBALS with a primitive FIRST return only, because the annotations describe today's client and addons target older ones; no `C_*` namespaces; activated by the wow-addon shape: a `.toc` manifest with `## Interface:` at the root or one level down) |
 | The Maven build layer, and the java import resolver against package declarations | `tools/pomtree.lua <repo>…`, `tools/javaimports.lua <repo>…` (⚠ `tools/mavenpoms.lua` DOWNLOADS from Maven Central — network) |
@@ -74,6 +145,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
+| Which entry point owns each node; commons, core and the borders between them | MCP `territory` |
 | Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117; `dead-function` skips a function whose VALUE is read (`escapes`: returned, passed, stored) since CART-1655 |
 | Which records does an erlang tree declare and never use; which fields are never named? | `tools/erlrecordcensus.lua --unused` |
 
@@ -108,6 +180,8 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
+| Exact clone groups and near-clone pairs, with the holes a shared helper would take | MCP `clones_find` |
+| Propose one helper for a near-clone family, a merge of exact clones, an edit carried to the other members, or a demonstrated edit applied to a third definition | MCP `txn_plan_extract_family`, `txn_plan_clonemerge`, `txn_plan_propagate { text }`, `txn_plan_transplant { a, b }` |
 | Other implementations of one concept, incomplete ones included | `tools/variants.lua <corpus|dir> --query <name>` |
 | What should a template be able to say? What do container members share? | `tools/divergecensus.lua <corpus|path>`, `tools/membercensus.lua <corpus|dir>` |
 | The helper signature of every near pair; does the pairwise lgg compose? | `tools/hocensus.lua`, `tools/familydiff.lua <corpus|dir>` |
@@ -129,6 +203,7 @@ the tools' own usage lines. Corpus names come from `tools/corpora.lua`.
 
 | Question | Instrument |
 |---|---|
+| Propose an optimizer rewrite inside one function, or at ONE statement of it (`target_line`) | MCP `txn_plan_optimize { node, kind, target_line? }` |
 | Every shipped performance lens over every function, with its denominator | `tools/perfscan.lua <root> [--files <pat>]` |
 | What is a function's LOOP COST — how many input-sized loops nest around its work, counting the loops in its CALLEES (the hidden quadratic: a linear scan called once per element of an outer walk)? and the same over ALLOCATION? | `require('cartograph.loopcost').analyze(store, data, { files = <pat> })` → findings with `depth` (input-sized loop nesting across calls; a builtin priced by `spec/lua_costs.lua`: const / n / nlogn in one argument, a call with no entry a HOLE, never a zero), `chain` (the outer loop -> call -> inner loop witness), kind `hidden-shared` > `hidden` > `visible` (a callee scanning state that outlives the call ranks first); `LC.depth_text(f)` = `2` / `2..4` / `>=1` with holes; `opts.unit = 'bytes'` = the same over allocation sites. One function in the cockpit: `:CartographLoopCost` (`LC.report(store, id)`); a whole tree: `tools/perfscan.lua`. ⚠ A SHAPE (the growth EXPONENT), NOT A COST: no constants and no sizes — the verdict needs a workload (CART-1058); the bytes unit is accepted by measuring allocation at two sizes against the static degree. CART-1057 |
 | Redundant idempotent setup, and where one copy would do | `tools/redundancy.lua <root>` |

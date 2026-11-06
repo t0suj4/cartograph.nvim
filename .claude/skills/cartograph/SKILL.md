@@ -196,6 +196,12 @@ is the rule the call would refuse with, in the gate's order (permission first):
   verb serves any file, which is true of every read verb and of `txn_plan_moveset`
   (it moves text and *discloses* the wiring it will not guess).
 
+Each verb also declares the ONE question it answers (`answers`, a slug, and
+`question`, its heading in `references/questions.md`; tools/list carries it too).
+Verbs that declare the same question are alternatives for each other: when one is
+unavailable, look at its siblings. `txn_plan_optimize`'s subject is `statement`:
+the full node address, optionally narrowed to one statement by `target_line`.
+
 ⚠ **A wrong-language planner does not error, so this column is the only warning you
 get.** Before `langs` existed, aiming the lua optimizer at a Ruby function produced
 a clean empty answer with per-site declines phrased as facts about *your* code.

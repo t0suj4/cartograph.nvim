@@ -257,6 +257,10 @@ local function tools_list()
         local rule, uwhy = agent.unavailable(store, name)
         local t = (rule and rule ~= 'read-only')
             and (' THIS VERB IS UNAVAILABLE ON THIS HOST: every call REFUSES with rule `%s` — %s.'):format(rule, uwhy) or ''
+        -- ★ THE QUESTION RIDES HERE TOO (CART-1976). `subject` stays out because the inputSchema already shows it;
+        -- `answers` has no other expression on this surface — the `langs` case, not the `subject` one.
+        local a = (' QUESTION: %q (answers=%s; verbs declaring the same question are alternatives for each other).')
+            :format(agent.QUESTION[v.answers], v.answers)
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
@@ -264,7 +268,7 @@ local function tools_list()
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
             description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (%s) — never a bare list — plus a `warrant` (%s) saying why nothing OBSERVED it; every verb here is static, so that is `%s`. tier_basis=%s%s.%s')
                 :format(v.summary, kinds_of(tiers.ABSENCE), kinds_of(tiers.WARRANT),
-                    tiers.WARRANT_DEFAULT, v.tier_basis, q, w .. t .. g) }
+                    tiers.WARRANT_DEFAULT, v.tier_basis, q, a .. w .. t .. g) }
     end
     return { tools = out }
 end

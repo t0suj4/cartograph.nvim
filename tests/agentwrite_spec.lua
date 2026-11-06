@@ -983,7 +983,7 @@ end)
 -- only the ADDRESSABLE shapes are checked against their own arg lists. Same split as
 -- `@langs`: declare everything, fence what is fenceable.
 test('agentwrite: every verb declares what it is ADDRESSED AT', function ()
-    local SHAPES = { node = true, ['node-handle'] = true, set = true, position = true,
+    local SHAPES = { node = true, ['node-handle'] = true, statement = true, set = true, position = true,
         plan = true, journal = true, path = true, query = true, graph = true }
     for _, name in ipairs(agent.ORDER) do
         local v = agent.VERBS[name]
@@ -1000,6 +1000,10 @@ test('agentwrite: the declared subject shape MATCHES the arguments it accepts', 
         if v.subject == 'node' then
             ok(a.node and a.ref and a.file and a.line,
                 name .. ' declares `node` so it must take the FULL address')
+        elseif v.subject == 'statement' then
+            -- CART-1976: the full node address AND the statement narrowing; without target_line it is `node`
+            ok(a.node and a.ref and a.file and a.line and a.target_line,
+                name .. ' declares `statement` so it takes the full address and target_line')
         elseif v.subject == 'node-handle' then
             ok(a.node and a.ref, name .. ' declares `node-handle` so it takes node and ref')
             ok(not (a.file and a.line),
@@ -1019,6 +1023,33 @@ test('agentwrite: the declared subject shape MATCHES the arguments it accepts', 
     end
 end)
 
+-- CART-1976 (CUI-0009 b): the QUESTION a verb answers is a closed slug whose text is a `## ` heading of the skill's
+-- question index — the vocabulary lives there, and this is the fence that keeps the two in step.
+test('agentwrite: every verb declares the ONE question it answers, from the question index', function ()
+    local fd = assert(io.open('.claude/skills/cartograph/references/questions.md', 'rb'))
+    local text = fd:read('a'); fd:close()
+    local sections, cur = {}, nil
+    for line in (text .. '\n'):gmatch('([^\n]*)\n') do
+        local h = line:match('^## (.+)$')
+        if h then cur = h; sections[h] = '' elseif cur then sections[cur] = sections[cur] .. line .. '\n' end
+    end
+    local used = {}
+    for _, q in ipairs(agent.ANSWERS) do
+        ok(sections[q[2]], ('answers %q: its question %q is a heading of the question index'):format(q[1], q[2]))
+    end
+    for _, name in ipairs(agent.ORDER) do
+        local v = agent.VERBS[name]
+        eq('string', type(v.answers), name .. ' declares exactly one question')
+        local qt = agent.QUESTION[v.answers]
+        ok(qt, name .. ' answers a KNOWN question, not ' .. tostring(v.answers))
+        used[v.answers] = true
+        ok(qt and sections[qt] and sections[qt]:find('`' .. name .. '`', 1, true) or
+            (qt and sections[qt] and sections[qt]:find('`' .. name .. ' ', 1, true)),
+            ('%s is NAMED in its own section %q, so a reader of the index finds it'):format(name, tostring(qt)))
+    end
+    for _, q in ipairs(agent.ANSWERS) do ok(used[q[1]], q[1] .. ' is declared by at least one verb (no dead vocabulary)') end
+end)
+
 test('agentwrite: graph_info CARRIES the column, derived from the declaration', function ()
     if not ready() then skip('no treesitter') end
     permit(true)
@@ -1028,6 +1059,9 @@ test('agentwrite: graph_info CARRIES the column, derived from the declaration', 
     eq('node', by.txn_plan_extract_family.subject)
     eq('node-handle', by.txn_plan_annotate.subject, 'the two that take no position')
     eq('set', by.txn_plan_moveset.subject)
+    eq('statement', by.txn_plan_optimize.subject, 'the optimizer can be pointed at ONE statement (CART-1976)')
+    eq('performance', by.txn_plan_optimize.answers)
+    eq('Who uses it?', by.edges_callers.question)
     eq('graph', by.lint_run.subject, 'a finding surface is addressed at nothing')
     -- DERIVED, NOT RETYPED: whatever the verb table declares is what the column shows.
     for verb, row in pairs(by) do
