@@ -811,6 +811,10 @@ test('mcpserve: the handshake completes and tools/list advertises every verb', f
             name .. "'s description states the envelope, so a client that never reads our docs still learns it")
         eq(nil, by[name].description:find('`thin-index`', 1, true),
             name .. ': a FULL graph discloses no thin-index refusal it would never give (CART-1978)')
+        -- CART-1975: the disclosure is the central gate's answer, so it follows THIS host (helm may or may not be here)
+        local gated = by[name].description:find('UNAVAILABLE ON THIS HOST', 1, true) ~= nil
+        eq(false, gated and (name ~= 'helm_chart' and name ~= 'kustomize_overlays'),
+            name .. ': on a full graph only a binary need can make a verb unavailable')
     end
     -- the names a client may actually use: `.` is rejected by several clients
     for _, t in ipairs(res.tools) do
@@ -878,15 +882,19 @@ test('mcpserve: the thin-index CAPABILITY REFUSAL is reachable by a caller', fun
     eq(true, by.node_find.available, 'while the observation verbs still serve')
 
     -- CART-1978: and tools/list says it too, before any call, for exactly the verbs graph_info marks unavailable
+    -- on that axis. ⚠ COMPARED PER RULE, not against `available`: a verb can be unavailable for a declared need
+    -- (CART-1975 — mentions on a thin graph) and that is a different rule with a different remedy.
     local list = c:request('tools/list', vim.empty_dict())
     for _, t in ipairs(list.tools) do
         local says = t.description:find('`thin-index`', 1, true) ~= nil
-        eq(agent.VERBS[t.name].needs_calls or false, says,
-            t.name .. ': tools/list discloses thin-index iff the verb needs the call graph')
-        if by[t.name] and not agent.VERBS[t.name].mutates then
-            eq(not by[t.name].available, says, t.name .. ': tools/list and graph_info agree')
-        end
+        -- (a WRITE verb on this read-only host is unavailable for PERMISSION first — the gate's order, and the rule it
+        -- would actually refuse with — so it discloses read-only, not thin-index)
+        local v = agent.VERBS[t.name]
+        eq((v.needs_calls and not v.mutates) or false, says,
+            t.name .. ': tools/list discloses thin-index iff the verb needs the call graph and permission is not first')
+        eq(by[t.name].unavailable_rule == 'thin-index', says, t.name .. ': tools/list and graph_info agree')
     end
+    eq('no-mention-index', by.mentions.unavailable_rule, 'a declared need is its own rule (CART-1975)')
 
     -- the refusal itself, over the wire — NOT an empty list, NOT an error
     local d, why, raw = c:call('edges_callers', { file = 'm.lua', line = 3 })
@@ -1037,6 +1045,57 @@ test('mcpserve: mentions REFUSES on a thin index rather than reporting zero file
     eq('no-mention-index', d.refusal.rule)
     ok(#d.refusal.remedy > 10, 'and says what to change')
     eq(vim.NIL, d.absence, 'a missing INSTRUMENT is not an absence in the code')
+end)
+
+-- CART-1975 (CUI-0009 a): a BINARY need is declared, so the catalogue says it before the call and the refusal comes
+-- from the central gate. ⚠ DETERMINISTIC BY CONSTRUCTION: the server runs with a PATH holding only git, so helm and
+-- kubectl are absent whatever this machine has installed.
+test('mcpserve: a missing binary is a DECLARED need — graph_info and tools/list say so, and the call refuses with its rule', function ()
+    if not ready() then skip('no treesitter') end
+    local git = vim.fn.exepath('git')
+    if git == '' then skip('no git') end
+    local bin = vim.fn.tempname(); vim.fn.mkdir(bin, 'p')
+    assert(vim.uv.fs_symlink(git, bin .. '/git'))
+    local root = mkfixture()
+    local c, err = mcp.connect { cmd = { 'env', 'PATH=' .. bin, vim.v.progpath, '--headless', '-u', 'NONE', '-l',
+        repo('tools/mcpserve.lua'), root }, timeout = 60000 }
+    ok(c ~= nil, 'mcpserve did not come up without helm on PATH: ' .. tostring(err))
+    local info = c:call('graph_info', vim.empty_dict())
+    local by = {}
+    for _, r in ipairs(info.result) do by[r.verb] = r end
+    eq(false, by.helm_chart.available)
+    eq('no-helm', by.helm_chart.unavailable_rule)
+    eq('helm', by.helm_chart.needs)
+    eq('no-kustomize', by.kustomize_overlays.unavailable_rule)
+    eq(true, by.mentions.available, 'a full graph meets the mention-index need')
+    local list = c:request('tools/list', vim.empty_dict())
+    local desc = {}
+    for _, t in ipairs(list.tools) do desc[t.name] = t.description end
+    ok(desc.helm_chart:find('`no-helm`', 1, true), 'tools/list discloses the binary need before any call')
+    ok(desc.kustomize_overlays:find('`no-kustomize`', 1, true))
+    eq(nil, desc.node_find:find('UNAVAILABLE ON THIS HOST', 1, true), 'a verb with no unmet need says nothing')
+    local d, why, raw = c:call('helm_chart', { chart = 'charts/x' })
+    ok(d ~= nil, 'the refusal arrives as content: ' .. tostring(why))
+    eq(false, raw.isError)
+    eq('no-helm', d.refusal.rule, 'the same rule the verb raised before it was declared')
+    ok(#d.refusal.remedy > 5)
+    local k = c:call('kustomize_overlays', vim.empty_dict())
+    eq('no-kustomize', k.refusal.rule)
+    c:close()
+    vim.fn.delete(bin, 'rf')
+end)
+
+test('mcpserve: with helm on PATH the helm need is MET — the gate is not a constant refusal', function ()
+    if not ready() then skip('no treesitter') end
+    if vim.fn.exepath('helm') == '' then skip('no helm on this machine') end
+    local c = client(false)
+    local info = c:call('graph_info', vim.empty_dict())
+    for _, r in ipairs(info.result) do
+        if r.verb == 'helm_chart' then
+            eq(vim.NIL, r.unavailable_rule)
+            eq(true, r.available)
+        end
+    end
 end)
 
 -- ── ★★★ N ROOTS ON THE AGENT SURFACE (CART-0823) ────────────────────────────

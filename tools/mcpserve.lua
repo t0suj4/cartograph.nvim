@@ -250,12 +250,13 @@ local function tools_list()
             table.concat(v.langs, ' / '):upper())
             .. ' REFUSES with rule `lang-scope`, because the rewrite it emits is'
             .. " written in that language's syntax." or ''
-        -- ★ AND THE THIRD AXIS, THE GRAPH'S CAPABILITY (CART-1978, CUI-0009 d). graph_info's per-verb column said a
-        -- needs_calls verb is unavailable on an index-only host, and tools/list did not: a client that reads only
-        -- the list learned it as a refusal on the call. Read off the SAME predicate the central gate refuses on
-        -- (agent.has_calls of the active band), so the advertisement and the refusal cannot disagree.
-        local t = (v.needs_calls and not agent.has_calls(store))
-            and ' THIS VERB NEEDS THE CALL GRAPH and this host serves an INDEX-ONLY graph: every call REFUSES with rule `thin-index`. Restart the host without --index-only (a full extract) to enable it.' or ''
+        -- ★ AND THE GRAPH/HOST CAPABILITY AXES (CART-1978 thin-index, CART-1975 declared needs; CUI-0009 a, d).
+        -- graph_info's per-verb column said a verb is unavailable and tools/list did not: a client that reads only the
+        -- list learned it as a refusal on the call. Read off agent.unavailable — the central gate's own checks, in its
+        -- order — so the advertisement and the refusal cannot disagree. (read-only rides in `w` above, in its own words.)
+        local rule, uwhy = agent.unavailable(store, name)
+        local t = (rule and rule ~= 'read-only')
+            and (' THIS VERB IS UNAVAILABLE ON THIS HOST: every call REFUSES with rule `%s` — %s.'):format(rule, uwhy) or ''
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'

@@ -397,6 +397,52 @@ function M.has_calls(store)
     return (store.data or {}).calls ~= nil
 end
 
+-- ★★ A NEED KNOWABLE BEFORE THE CALL IS DECLARED, NOT DISCOVERED (CART-1975, CUI-0009 a). These were raised ad hoc
+-- inside each verb's run, so a reader of the catalogue (graph_info, tools/list) could not see that mentions needs a
+-- mention index or helm_chart a helm binary until it called. Each is a fact about the HOST or the GRAPH — never about
+-- the arguments — so it is checked once, centrally, in M.answer, and disclosed the way needs_calls is. The rule names
+-- are the ones the verbs raised before; clients key on them. ⚠ A refusal that depends on the ARGUMENTS (which profile,
+-- which tactic, which path) cannot be decided before the call and is NOT a need: it stays in the verb's run.
+M.NEEDS = {
+    ['mention-index'] = { rule = 'no-mention-index',
+        check = function (store) return store.has_mention_index() end,
+        reason = 'this graph carries no identifier mention index, so "no file mentions this name" would be a property of the extraction, not of the code (index_only skips the collect pass that builds it; some languages opt out with spec.name_index = false)',
+        remedy = 'reopen the root with a full extract, or ask edges_callers, which answers the stronger resolved-reference question',
+        unavailable = 'this graph has no mention index (index-only, or a language that opts out) — the verb refuses rather than answering "no file mentions it"' },
+    helm = { rule = 'no-helm',
+        check = function () return require('cartograph.helm').binary() ~= nil end,
+        reason = 'no helm binary on PATH: a chart is read through its renderer',
+        remedy = 'install helm (pkgit -i helm)',
+        unavailable = 'no helm binary on this host\'s PATH — a chart is read through its renderer' },
+    kustomize = { rule = 'no-kustomize',
+        check = function () return require('cartograph.kustomize').binary() ~= nil end,
+        reason = 'no kubectl or kustomize on PATH: an overlay is read through its builder',
+        remedy = 'install kubectl (pkgit -i kubectl)',
+        unavailable = 'no kubectl or kustomize on this host\'s PATH — an overlay is read through its builder' },
+}
+
+--- the first declared need of verb `v` this store/host does not meet: name, NEEDS entry | nil
+function M.unmet(store, v)
+    for _, n in ipairs(v.needs or {}) do
+        local d = assert(M.NEEDS[n], 'undeclared need ' .. tostring(n))
+        if not d.check(store) then return n, d end
+    end
+end
+
+--- why verb `name` cannot be called on this store/host, in the CENTRAL GATE'S ORDER (permission, graph, needs):
+--- rule, why | nil. graph_info and tools/list read this, so the catalogue and the refusal cannot disagree.
+function M.unavailable(store, name)
+    local v = M.VERBS[name]
+    if v.mutates and not M.WRITABLE then
+        return 'read-only', 'this host was started read-only — the verb writes to the tree and refuses rather than doing it without permission'
+    end
+    if v.needs_calls and not M.has_calls(store) then
+        return 'thin-index', 'this graph has no call graph (index-only) — the verb refuses rather than answering "none"'
+    end
+    local _, d = M.unmet(store, v)
+    if d then return d.rule, d.unavailable end
+end
+
 -- ── verb results ────────────────────────────────────────────────────────────
 -- A verb returns ONE of:
 --   { result = rows, tier?, absence?, absence_why?, notes?, subject? }
@@ -459,18 +505,12 @@ local function v_graph_info(store)
     local rows = {}
     for _, name in ipairs(ORDER) do
         local v = M.VERBS[name]
-        local available, why = true, nil
-        if v.needs_calls and not M.has_calls(store) then
-            available, why = false, 'this graph has no call graph (index-only) — the verb refuses rather than answering "none"'
-        end
-        -- THE WRITE PERMISSION IS A SECOND CAPABILITY AXIS (CART-0146), and it is
-        -- reported the same way the first one is. `needs_calls` is about the
-        -- GRAPH, `mutates` about the HOST — a verb can be unavailable for either
-        -- reason and an agent's next move differs, so they never merge into one
-        -- boolean.
-        if v.mutates and not M.WRITABLE then
-            available, why = false, 'this host was started read-only — the verb writes to the tree and refuses rather than doing it without permission'
-        end
+        -- THE WRITE PERMISSION IS A SECOND CAPABILITY AXIS (CART-0146), and the declared needs a third (CART-1975).
+        -- `needs_calls` is about the GRAPH, `mutates` about the HOST, `needs` about either — a verb can be unavailable
+        -- for any of them and an agent's next move differs, so the RULE rides beside the boolean: it is the rule the
+        -- central gate would refuse with, in the gate's own order (M.unavailable).
+        local rule, why = M.unavailable(store, name)
+        local available = rule == nil
         rows[#rows + 1] = { verb = name, summary = v.summary,
             tier_basis = v.tier_basis, mutates = v.mutates or false,
             -- CART-0304: the LANGUAGES this verb serves, or null for a verb that
@@ -487,7 +527,8 @@ local function v_graph_info(store)
             -- the same string carrying opposite claims.
             tier_headline = nn(v.tier_headline),
             needs_calls = v.needs_calls or false,
-            available = available, unavailable_why = nn(why),
+            needs = v.needs and table.concat(v.needs, ' ') or NUL,
+            available = available, unavailable_why = nn(why), unavailable_rule = nn(rule),
             absences = v.absences }
     end
     -- ★★ THE ROSTER RIDES ON THE NEGOTIATION SURFACE (CART-0823). graph_info's
@@ -1462,11 +1503,7 @@ local function v_mentions(store, args)
     -- THE REFUSAL COMES FIRST, and mentions.lua is explicit about why: an empty
     -- mentioning() means EITHER "no file mentions this" OR "this graph has no
     -- mention index", and those are opposite claims. The thin index has none.
-    if not store.has_mention_index() then
-        return refuse('no-mention-index',
-            'this graph carries no identifier mention index, so "no file mentions this name" would be a property of the extraction, not of the code (index_only skips the collect pass that builds it; some languages opt out with spec.name_index = false)',
-            'reopen the root with a full extract, or ask edges_callers, which answers the stronger resolved-reference question')
-    end
+    -- (the mention index is a declared need since CART-1975: M.answer refuses `no-mention-index` before this runs)
     local from
     if args.from and args.from ~= '' then
         local f, why, hits = resolve_file(store, args.from)
@@ -3672,7 +3709,7 @@ end
 local function v_helm_chart(store, args)
     local dir = chart_dir(store, args.chart)
     local H = require 'cartograph.helm'
-    if not H.binary() then return refuse('no-helm', 'no helm binary on PATH: a chart is read through its renderer', 'install helm (pkgit -i helm)') end
+    -- (the helm binary is a declared need since CART-1975: M.answer refuses `no-helm` before this runs)
     local s, why, cause = H.attach(dir, { release = args.release, values = args.values, set = args.set, schema = false })
     if not s then
         -- THE REMEDY FROM THE CAUSE (CART-1384). A dependency Helm could not find keeps its own; a template error is a
@@ -3778,7 +3815,7 @@ end
 local function v_kustomize_overlays(store)
     local root = store.data and store.data.root or vim.fn.getcwd()
     local KZ = require 'cartograph.kustomize'
-    if not KZ.binary() then return refuse('no-kustomize', 'no kubectl or kustomize on PATH: an overlay is read through its builder', 'install kubectl (pkgit -i kubectl)') end
+    -- (kubectl/kustomize is a declared need since CART-1975: M.answer refuses `no-kustomize` before this runs)
     local files = {}
     local r = vim.system({ 'git', '-C', root, 'ls-files', '-z' }, { text = true }):wait()
     if r.code == 0 then for f in (r.stdout or ''):gmatch('([^%z]+)') do files[#files + 1] = f end end
@@ -3835,6 +3872,7 @@ M.VERBS = {
         summary = 'a Helm chart RENDERED by Helm itself and read: dangling references, empty selectors, and the silent-success lints on its templates (dangling / orphan values, chomped separators, checksum coverage)',
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'refused', 'frontier' },
+        needs = { 'helm' }, -- CART-1975: checked by M.answer, disclosed by graph_info and tools/list
         args = {
             { name = 'chart', type = 'string', required = true, desc = 'the chart directory (or its Chart.yaml), relative to the graph root or absolute' },
             { name = 'release', type = 'string', desc = 'release name (default "release")' },
@@ -3847,6 +3885,7 @@ M.VERBS = {
         summary = 'every kustomize overlay BUILT by kustomize itself and read as a release — components resolved inside the overlays that compose them: dangling references, selectors matching nothing, the deletion frontier',
         subject = 'graph',
         tier_basis = 'observation', absences = { 'absent', 'refused' },
+        needs = { 'kustomize' }, -- CART-1975: checked by M.answer, disclosed by graph_info and tools/list
         args = {},
         run = v_kustomize_overlays,
     },
@@ -4011,6 +4050,7 @@ M.VERBS = {
         subject = 'query',
         tier_basis = 'observation',
         absences = { 'absent', 'frontier' },
+        needs = { 'mention-index' }, -- CART-1975: checked by M.answer, disclosed by graph_info and tools/list
         args = {
             { name = 'name', type = 'string', required = true, desc = 'the identifier to look for' },
             { name = 'from', type = 'string', desc = 'the asking file — confines the answer to its resolution scope, which is what a resolver would consider' },
@@ -4640,6 +4680,11 @@ function M.answer(store, verb, args)
         return refusal { rule = 'thin-index',
             reason = ('this graph is index-only (%d nodes, no call graph), so %s would report an absence that is a property of the INDEX, not of the code'):format(graph.counts.nodes, verb),
             remedy = 'reopen the root without --index-only (a full extract), or ask a verb graph_info reports as available' }
+    end
+    -- THE DECLARED NEEDS (CART-1975), after the call graph: both are facts about the host or graph, never the subject
+    do
+        local _, d = M.unmet(store, v)
+        if d then return refusal { rule = d.rule, reason = d.reason, remedy = d.remedy } end
     end
 
     -- LANGUAGE SCOPE, last of the three capability axes and the only one that has

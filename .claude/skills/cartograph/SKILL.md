@@ -173,8 +173,9 @@ exists: `txn_apply` will not take a plan that has not been previewed here, so
 previewing IS the review. Save without previewing and there is no witness at all —
 `reviewed_match` comes back null, and that absence is stated rather than defaulted.
 
-Ask `graph_info` before assuming a verb works. Three capability axes are reported
-separately because your next move differs on each:
+Ask `graph_info` before assuming a verb works. Four capability axes are reported
+separately because your next move differs on each; each row's `unavailable_rule`
+is the rule the call would refuse with, in the gate's order (permission first):
 
 - **`needs_calls`** — about the GRAPH. On an index-only graph a call verb *refuses*
   rather than answering "none", and its tools/list description says so before
@@ -182,6 +183,12 @@ separately because your next move differs on each:
 - **`mutates`** — about the HOST. `mcpserve` is **read-only by default**; `--write`
   grants the mutating verbs. Gated verbs are still advertised, with the gate stated
   in their description.
+- **`needs`** — about the HOST or GRAPH, declared per verb: `helm_chart` needs a
+  helm binary (rule **`no-helm`**), `kustomize_overlays` kubectl or kustomize
+  (**`no-kustomize`**), `mentions` a mention index (**`no-mention-index`**). An
+  unmet need is disclosed in tools/list and refused before the verb runs. A
+  refusal that depends on your ARGUMENTS (which profile, tactic or path) is not a
+  need and is only known on the call.
 - **`langs`** — about the SUBJECT. A planner that emits code emits it in *one*
   language's syntax: `txn_plan_optimize` is `lua`, `txn_plan_extract_family` is
   `lua javascript`. Aim one at a function in another language and it refuses with
