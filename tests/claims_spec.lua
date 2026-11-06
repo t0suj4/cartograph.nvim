@@ -214,6 +214,7 @@ test('claims: CHARTER.md is scanned, and its closed-schema claim holds', functio
     -- our own schema is exactly what nothing re-reads.
     local v = require 'cartograph.validate'
     local function n(t) local c = 0 for _ in pairs(t) do c = c + 1 end return c end
-    eq(6, n(v.NODE_KINDS))
+    -- (and again: CART-1575 minted `field` as a seventh, which validate never learned until CART-0717)
+    eq(7, n(v.NODE_KINDS))
     eq(4, n(v.EDGE_KINDS))
 end)

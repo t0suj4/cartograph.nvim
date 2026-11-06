@@ -166,12 +166,13 @@ analysis). A calibration on a real framework-wired application is still owed.
 called by Hibernate. Since CART-0673 a definition another file can name is a
 `frontier` while any other file mentions its name (CART-0681).
 
-**The schema is closed.** Six node kinds, four edge kinds. A new axis is a new
-predicate value, not a new kind. When something does not fit, the answer is
+**The schema is closed.** Seven node kinds, four edge kinds (the seventh,
+`field`, is instance state on the write axis — CART-1575, registered by
+CART-0717). A new axis is a new predicate value, not a new kind. When something does not fit, the answer is
 almost always that it is an edge you have not named yet.
 
-<!-- @claim charter-schema: The schema is closed at six node kinds and four edge kinds. -->
-<!-- check: (function () local v = require 'cartograph.validate' local function n(t) local c = 0 for _ in pairs(t) do c = c + 1 end return c end return n(v.NODE_KINDS) == 6 and n(v.EDGE_KINDS) == 4 end)() -->
+<!-- @claim charter-schema: The schema is closed at seven node kinds and four edge kinds. -->
+<!-- check: (function () local v = require 'cartograph.validate' local function n(t) local c = 0 for _ in pairs(t) do c = c + 1 end return c end return n(v.NODE_KINDS) == 7 and n(v.EDGE_KINDS) == 4 end)() -->
 
 **Never draw the graph.** A rendered node-and-arrow picture fabricates
 spatial relationships the data does not have, and it is a hairball at any real

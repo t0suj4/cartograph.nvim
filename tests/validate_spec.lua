@@ -17,6 +17,37 @@ test('validate: a clean graph is OK', function ()
     eq(2, r.checked.nodes)
 end)
 
+-- (CART-0717: a producer minted a node field the closed schema never learned, and `valid` stayed RED on self and zig —
+-- the gate column nobody's sweep claimed. By 2026-11-06 it was FOUR unregistered facts: node fields `override`
+-- (CART-0616) and `anon` (CART-1490), node kind `field` (CART-1575), call field `gp` (CART-1567). A fixture that MINTS
+-- each, through the real extractor, so the next field a producer adds turns this red in the suite, not in a matrix)
+test('validate: a real extraction minting override / anon / field / gp is schema-clean (CART-0717)', function ()
+    if not parser_available('lua') then return skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    put('a.lua', 'local M = {}\nfunction M.get() return 1 end\nreturn M\n')
+    put('patch.lua', "local a = require 'a'\na.get = function () return 2 end\n")
+    put('c.lua', table.concat({
+        'local Cache = {}', 'Cache.__index = Cache',
+        'function Cache:fill()', '    if self._v == nil then self._v = {} end', '    return self._v', 'end',
+        'local function run(verbose, xs)', "    if verbose then log('x') end",
+        '    table.sort(xs, function (p, q) return p < q end)', '    return xs', 'end',
+        'return { Cache = Cache, run = run }', '' }, '\n'))
+    local data = require('cartograph.providers.treesitter').extract(root)
+    vim.fn.delete(root, 'rf')
+    -- the fixture reaches all four (else the clean verdict below proves nothing)
+    local seen = {}
+    for _, n in ipairs(data.nodes) do
+        if n.override then seen.override = true end
+        if n.anon then seen.anon = true end
+        if n.kind == 'field' then seen.field = true end
+    end
+    for _, c in ipairs(data.calls) do if c.gp then seen.gp = true end end
+    eq({ anon = true, field = true, gp = true, override = true }, seen)
+    local r = validate.check(data)
+    ok(r.ok, 'schema-clean: ' .. vim.inspect(r.violations, { newline = ' ' }))
+end)
+
 test('validate: each violation class is caught', function ()
     local r = validate.check({
         nodes = { node('a'), node('a'),                  -- dup id

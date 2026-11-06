@@ -13,7 +13,9 @@ local callrec = require 'cartograph.callrec'
 
 M.NODE_KINDS = { module = true, ['function'] = true, method = true,
     var = true, region = true,
-    external = true } -- a minted stdlib symbol (no local def; file = 'zig-std')
+    external = true, -- a minted stdlib symbol (no local def; file = 'zig-std')
+    field = true } -- instance state on the write axis: one per (file, class, field) a method reads or writes through
+                   -- its receiver, the target of `use` edges (CART-1575); no `var`, so module-variable censuses skip it
 M.EDGE_KINDS = { ref = true, import = true, use = true, reg = true }
 
 M.NODE_FIELDS = {
@@ -107,6 +109,10 @@ M.NODE_FIELDS = {
     -- folded flow slice (flow.fold, same lifecycle): _flow = store ref, _flow0/_flown =
     -- row slice, _flowp0/_flowpn = params slice.
     _flow = true, _flow0 = true, _flown = true, _flowp0 = true, _flowpn = true,
+    override = true, -- (CART-0616) the monkey-patch fence: a def that overrides a member its own imported module
+                     -- declares, kept OUT of the name indexes and marked here — a finding, not a secret (CART-0717)
+    anon = true,     -- (CART-1490) an anonymous fn (callback, returned closure `X#ret`): never a call target by name,
+                     -- so relink's index leaves it out as link does (CART-0717)
 }
 --- The three strengths the charter names. A fact carrying none of these is
 --- `observed` by default — the parse said so, and the file is re-readable.
@@ -214,6 +220,8 @@ M.CALL_FIELDS = {
     cb = true, cbe = true, -- a bare callee's BOUND value: its binder's declaration rows (CART-1602)
     cba = true, -- a bare callee bound to a same-name FIELD alias: its by-name edge is inferred (CART-1715)
     crk = true, -- a dotted callee's ROOT binder key: matched against the def's drk (CART-1715)
+    gp = true, -- the call runs only under a param predicate (±param index): effects discharge it per call site
+               -- (CART-1567, registered by CART-0717)
 }
 
 local SAMPLES = 5 -- violations kept per rule
