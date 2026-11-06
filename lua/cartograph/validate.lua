@@ -152,6 +152,8 @@ M.EDGE_FIELDS = {
     -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
+    xdisc = true, -- (CART-0725) minted by a DISCOVERED registry binding: a key match that is itself a hypothesis,
+                  -- so the edge stays `inferred` and never claims `xlang`
     stdlib = true, -- stdlib tier: resolved to a minted external std node via an
                    -- alias binding / env profile ([[cartograph-stdlib-profile]])
     bind = true, -- import edges: the local name the import binds (v8);

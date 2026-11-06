@@ -111,12 +111,13 @@ test('refresh sweep: a string-keyed REGISTRY\'s cross-language links keep one si
     store.ingest(ts.extract(root))
     local function xsites()
         local e, n = 0, 0
-        for _, x in ipairs(store.data.edges) do if x.xlang then e = e + 1; n = n + #(x.at or {}) end end
+        -- (the edges xlang.link mints: `xlang` for a declared binding, `xdisc` for a discovered one like this, CART-0725)
+        for _, x in ipairs(store.data.edges) do if x.xlang or x.xdisc then e = e + 1; n = n + #(x.at or {}) end end
         return e, n
     end
     refresh.file('lib/util.lua')
     local e1, n1 = xsites()
-    ok(e1 >= 3, 'the registry is linked (' .. e1 .. ' xlang edges)')
+    ok(e1 >= 3, 'the registry is linked (' .. e1 .. ' link edges)')
     for _ = 1, 3 do refresh.file('lib/util.lua') end
     local e4, n4 = xsites()
     eq(e1, e4); eq(n1, n4, 'xlang.link appended its sites again on every save')

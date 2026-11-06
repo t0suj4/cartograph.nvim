@@ -95,7 +95,8 @@ local function one_run()
     xl.link(d, bindings)
     l = {}
     for _, e in ipairs(d.edges or {}) do
-        if e.xlang then l[#l + 1] = ('%s>%s:%d'):format(tostring(e.from), tostring(e.to),
+        -- (both kinds of link edge: a discovered binding's are xdisc since CART-0725, and those are the ones that varied)
+        if e.xlang or e.xdisc then l[#l + 1] = ('%s>%s:%d'):format(tostring(e.from), tostring(e.to),
             #(e.at or {})) end
     end
     put('xlang', l)

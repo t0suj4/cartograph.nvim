@@ -460,15 +460,22 @@ function M.link(data, bindings, opts)
         end
         return true
     end
-    local function addref(from, to, at)
+    -- ★ A DISCOVERED BINDING'S KEY MATCH IS ITSELF A HYPOTHESIS (CART-0725). For a declared binding (a boundary, a
+    -- profile idiom, the user's own) the key relation was ASSERTED, so it outranks a name match: the edge is `xlang`
+    -- and its `inferred` is cleared. A binding greenspun DISCOVERED is a name/shape guess, and promoting its key match
+    -- above name hypotheses is circular — on our own lua/ it minted 34 edges, every one wrong, and ladder counted each
+    -- as PROVEN through `xlang`. Its edges stay inferred and say where they came from (`xdisc`), never `xlang`; an edge
+    -- that already existed keeps whatever standing it had.
+    local function addref(from, to, at, disc)
         local k = from .. '\31' .. to
         local e = refEdge[k]
         if not e then
-            e = { from = from, to = to, kind = 'ref', at = {}, xlang = true }
+            e = { from = from, to = to, kind = 'ref', at = {} }
+            if disc then e.xdisc, e.inferred = true, true else e.xlang = true end
             refEdge[k] = e
             data.edges[#data.edges + 1] = e
         end
-        e.inferred = nil -- the key match outranks a name hypothesis
+        if not disc then e.inferred = nil end -- the key match outranks a name hypothesis
         if at and fresh_site(e, at) then e.at[#e.at + 1] = at end
     end
     -- ★ A PIN'S EDGE IS DECLARED, NOT KEY-MATCHED (CART-0610). The pin loop below used addref, so a target A PERSON
@@ -490,12 +497,12 @@ function M.link(data, bindings, opts)
     for _, e in ipairs(data.edges) do
         if e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
     end
-    local function addreg(from, to, at)
+    local function addreg(from, to, at, disc)
         if not from or not to then return end
         local k = from .. '\31' .. to
         local e = regEdge[k]
         if not e then
-            e = { from = from, to = to, kind = 'reg', at = {}, xlang = true }
+            e = { from = from, to = to, kind = 'reg', at = {}, xlang = (not disc) or nil, xdisc = disc or nil }
             regEdge[k] = e
             data.edges[#data.edges + 1] = e
         end
@@ -598,6 +605,7 @@ function M.link(data, bindings, opts)
     end
     for _, b in ipairs(bindings) do
         coop.tick()
+        local disc = b.discovered or nil -- (greenspun.registries stamps its proposals; CART-0725)
         -- A BINDING WITH NO IMPORT SIDE IS A DECLARATION, NOT A LINK (CART-0226): a
         -- profile's registry idiom is usually engine-dispatched, so there is no
         -- importer in the corpus to link to. Skipping it here is also what stops
@@ -663,7 +671,7 @@ function M.link(data, bindings, opts)
                         -- the registration itself references the handler
                         local from = callrec.fn(c)
                         if from then
-                            addref(from, h, key and key_range(c, key) or nil)
+                            addref(from, h, key and key_range(c, key) or nil, disc)
                         else
                             -- ★ A TOP-LEVEL REGISTRATION IS THE MODULE'S. Most of
                             -- them are: a factorio mod's control.lua registers its
@@ -674,7 +682,7 @@ function M.link(data, bindings, opts)
                             -- readable both ways — and it is what the callback
                             -- mirror in the resolver already emits when a call has
                             -- no enclosing function.
-                            addreg(callrec.file(c), h, key and key_range(c, key) or nil)
+                            addreg(callrec.file(c), h, key and key_range(c, key) or nil, disc)
                         end
                         stats.registered = (stats.registered or 0) + 1
                     else
@@ -732,11 +740,14 @@ function M.link(data, bindings, opts)
                     if #hs == 1 then
                         -- (a module-level call newly resolved here is OWNED below, now — not one relink later: CART-1474)
                         if not callrec.to(c) and not callrec.fn(c) then newly_module[#newly_module + 1] = c end
-                        c.to = callrec.to(c) or hs[1]
+                        if not callrec.to(c) then
+                            c.to = hs[1]
+                            if disc then c.inferred = true end -- (a discovered binding's resolution is a hedge)
+                        end
                     end
                     if callrec.fn(c) then
                         for _, h in ipairs(hs) do
-                            addref(callrec.fn(c), h, key_range(c, key))
+                            addref(callrec.fn(c), h, key_range(c, key), disc)
                         end
                     end
                     stats.links = stats.links + 1
