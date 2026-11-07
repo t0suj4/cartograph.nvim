@@ -329,9 +329,13 @@ function M.build(rec, X, sink)
             if not bad and sf.port then
                 if X.top and X.top[sf.port] then bad = true
                 else
-                    -- (holding NOTHING it was handed a level — a number is no object, CART-1840)
+                    -- (handed a LEVEL: nothing held — CART-1840 — or a number, its type object since CART-1901)
                     local any = false
-                    for o in X.each(sf.port) do any = true; if X.fnports[o] then bad = true; break end end
+                    for o in X.each(sf.port) do
+                        any = true
+                        local tn = X.TNAME and X.TNAME[o]
+                        if X.fnports[o] or tn == 'number' or tn == 'integer' then bad = true; break end
+                    end
                     if not any then bad = true end
                 end
             end
@@ -395,14 +399,20 @@ function M.build(rec, X, sink)
     -- ★ A TYPE'S METATABLE (CART-1957): debug.setmetatable(v, mt) on a value that is no table sets the metatable of its
     -- whole TYPE. On a string the solve applies it to the string library; on a function to every function (prototype
     -- links the IR's one `setmeta` does not carry); a number / boolean / nil holds no object, and nothing reads through
-    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds nothing (a scalar or nil
+    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds a number / boolean type object
+    -- (CART-1901) or nothing (nil
     -- literal) or holds a function — the IR cannot say "every value of this type"
     for _, u in ipairs(X.TYPEMTCALLS or {}) do
         local t = u.args[1]
         local gap = not t or (X.top and X.top[t]) or false
         if not gap then
             local any = false
-            for o in X.each(t) do any = true; if X.fnports[o] then gap = true; break end end
+            for o in X.each(t) do
+                any = true
+                -- (a number / boolean holds its type object since CART-1901: a scalar target, as nothing held was)
+                local tn = X.TNAME and X.TNAME[o]
+                if X.fnports[o] or tn == 'number' or tn == 'integer' or tn == 'boolean' then gap = true; break end
+            end
             if not any then gap = true end
         end
         if gap then rec.gap(u.fn, 'debug-typemeta', u.args) end

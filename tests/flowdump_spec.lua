@@ -448,7 +448,9 @@ test('flowdump: a dynamic store through a tainted target makes escaped tables we
     flowtype.CAP = 2
     local ok_, D = pcall(dump, table.concat({ '',
         'local x, y, z = {}, {}, {}',
-        'local T = (#arg == 1 and x) or (#arg == 2 and y) or z',          -- saturates past CAP 2: x, y, z escape
+        -- (saturates past CAP 2: x, y, z escape. Not `(#arg == 1 and x) or …` since CART-1901: a comparison holds its
+        -- boolean, which saturated the inner `or` instead, and z then reached T exactly — not escaped)
+        'local T = x or y or z',
         'local NM = { f = tostring(#arg) }',
         'T[NM.f] = 1',                                                    -- through T, a string key: may be "__mode"
         'local K = {}', 'T[K] = 2',                                       -- through T, an object key
@@ -667,7 +669,7 @@ test('flowdump: getfenv is no gap under fixed environments, and stays one when a
     end
 end)
 
--- (CART-1840: a LEVEL held in a variable — a number is no object, so the argument holds nothing. It sets the calling
+-- (CART-1840: a LEVEL held in a variable — the argument holds a number (its type object since CART-1901; nothing before). It sets the calling
 -- function's environment: no fixed-env, a setfenv gap, and the solve applies it)
 test('flowdump: a setfenv level held in a variable withholds fixed-env and keeps a gap; the solve applies it (CART-1840)', function ()
     if not parser_available('lua') then skip 'no lua parser' end

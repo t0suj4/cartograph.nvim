@@ -4634,3 +4634,29 @@ test('flowtype: a dynamic _G read with known literal keys naming no host global 
     ok(okc, tostring(Rs))
     eq(0, Rs.stats.hgskip, 'a saturated local behind the key: the host EXT stays')
 end)
+
+-- CART-1901 (flowpath FLOW-0126): a number or boolean literal holds its type object, as a string literal holds STR; an
+-- arithmetic / bitwise / length / unary-minus result a number, a comparison or `not` a boolean. "A scalar the solve does
+-- not track" no longer reads as "nothing flows here", and {string, number} are two types. nil stays empty (absence).
+test('flowtype: number and boolean values hold their type objects; nil stays empty (CART-1901)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'N = 5', 'B = true', 'F = false', 'Z = nil',
+        'M = N * 2 + 1', 'C = N < 3', 'L = #"xyz"', 'U = -N', 'NB = not B', 'BW = N & 1',
+        'SN = "s"', 'if B then SN = 1 end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    local function objs(name) local p = R.port('g:' .. name); local l = p and R.objs_of(p) or {}; table.sort(l); return l end
+    eq({ 'type:number' }, objs('N'), 'a number literal')
+    eq({ 'type:boolean' }, objs('B'), 'true')
+    eq({ 'type:boolean' }, objs('F'), 'false')
+    eq({}, objs('Z'), 'nil: nothing')
+    eq({ 'type:number' }, objs('M'), 'arithmetic')
+    eq({ 'type:boolean' }, objs('C'), 'a comparison')
+    eq({ 'type:number' }, objs('L'), 'a length')
+    eq({ 'type:number' }, objs('U'), 'unary minus')
+    eq({ 'type:boolean' }, objs('NB'), 'not')
+    eq({ 'type:number' }, objs('BW'), 'a bitwise operator')
+    eq({ 'type:number', 'type:string' }, objs('SN'), 'a string and a number: two types')
+end)

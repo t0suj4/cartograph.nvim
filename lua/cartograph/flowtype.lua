@@ -4119,6 +4119,12 @@ local function build(store, opts)
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
             if t == 'string' then local p = new(); addobj(p, STR); local c = n:field('content')[1]; G7.LITV[p] = c and txt(c) or ''; return p end -- (its text: CART-1820)
+            -- ★ A NUMBER OR A BOOLEAN IS A VALUE TOO (CART-1901, flowpath FLOW-0126): a number / true / false literal holds its
+            -- type object, as a string literal holds STR — it had been an EMPTY port, so "a scalar the solve does not track"
+            -- read as "nothing flows here" (on WoW w3, 59 of 68 top-level number writes and 22 of 24 boolean ones read
+            -- empty) and {string, number} counted as one type. nil stays empty: absence
+            if t == 'number' then local p = new(); addobj(p, typeobj('number')); return p end
+            if t == 'true' or t == 'false' then local p = new(); addobj(p, typeobj('boolean')); return p end
             if t == 'function_call' then return callv(n) end
             if t == 'function_definition' then return func(n) end
             if t == 'table_constructor' then
@@ -4168,6 +4174,8 @@ local function build(store, opts)
                 local res = new()
                 -- (`#x` runs __len, `-x` __unm, with the operand twice — CART-1702)
                 if xp and (op == '#' or op == '-') then local s0 = at(n); metacall(xp, op == '#' and '__len' or '__unm', { xp, xp }, res, curerr()); G7.WSITE = s0 end
+                -- (and its own value, CART-1901: `#x` / `-x` / `~x` a number — beside a handler's result —, `not x` a boolean)
+                if txt(n):match('^%s*not[%s%(]') then addobj(res, typeobj('boolean')) else addobj(res, typeobj('number')) end
                 return res
             end
             if t == 'binary_expression' then
@@ -4218,7 +4226,10 @@ local function build(store, opts)
                     end
                     if not CMPOP[op] then edge(hr, res) end -- (a comparison is a boolean whatever the handler returns)
                 end
-                if op == '..' then addobj(res, STR) end
+                if op == '..' then addobj(res, STR)
+                -- (CART-1901: a comparison is a boolean; arithmetic and bitwise operators a number — beside a handler's result)
+                elseif CMPOP[op] then addobj(res, typeobj('boolean'))
+                elseif METAOP[op] then addobj(res, typeobj('number')) end
                 return res
             end
             for _, x in tsutil.inamed, n, -1 do expr(x) end
@@ -4820,9 +4831,10 @@ local function build(store, opts)
         for _, fe in ipairs(G7.FENV) do
             local lv = fe.lvl
             if lv and not top[fe.port] then
-                local empty = true
-                for _ in each(fe.port) do empty = false; break end
-                if empty then
+                -- (a LEVEL: nothing held, or a number — its type object since CART-1901)
+                local empty, num = true, false
+                for o in each(fe.port) do empty = false; if TNAME[o] == 'number' or TNAME[o] == 'integer' then num = true end end
+                if empty or num then
                     more = true
                     local gp = lv.GPORT
                     proto(gp, fe.env)
