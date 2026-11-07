@@ -1419,10 +1419,36 @@ local function build(store, opts)
     end
     -- (a handler in x's metatable — `__call`, `__add`, `__newindex`… — called with args, its results into res: the
     -- metatable rides on the object as the hidden field `\1mt`, which `setmetatable` writes)
+    -- ★ A CALLABLE TABLE AS THE HANDLER (CART-1926, flowpath FLOW-0048 / FLOW-0141): Lua calls a handler as it calls
+    -- anything — a table runs ITS `__call` with itself first. For an operator's handler (`__add`, `__lt`, `__concat`,
+    -- `__tostring`, `__gc` …) in every version: `box + b` with `__add = h`, h callable, runs h's __call(h, box, b). A
+    -- `__call` that is itself a table only on 5.4 (5.1 / 5.2 / 5.3 / LuaJIT raise "attempt to call a table value"), and
+    -- there it CHAINS: c0's __call = t1, t1's = f, `c0(x)` runs f(t1, c0, x), each level prepending the object called.
+    -- callc binds only the FUNCTIONS of a port, so the table was never followed. Level 2 is positional; on 5.4 every
+    -- deeper level is one merged port closed over its own `__call` (a fixpoint: cycles stop), called with that port
+    -- first and every earlier callee and argument after it as one spread — an over-approximation of the positions.
+    -- The 5.4 rules hold unless the profile STATES an older version: an unstated one covers every version's behaviour
     local function metacall(x, mm, args, res, cerr, site)
         local h = field(field(x, '\1mt', true), mm) -- (non-strict: a handler written `mt[k] = f` counts)
         METAH[h] = mm
         callc(h, args, res, site, cerr)
+        local pre54 = G7.LUAVSTATED and G7.LUAVER < 54 -- (a version the profile STATES; unstated: every version's behaviour)
+        if mm == '__call' and pre54 then return end
+        local h2 = field(field(h, '\1mt', true), '__call')
+        METAH[h2] = '__call'
+        local a2 = { h }
+        for _, ap in ipairs(args) do a2[#a2 + 1] = ap end
+        if args.spread then a2.spread = args.spread + 1 end
+        callc(h2, a2, res, site, cerr)
+        if pre54 then return end
+        local hs, va = new(), new()
+        edge(h2, hs)
+        local hc = field(field(hs, '\1mt', true), '__call')
+        METAH[hc] = '__call'
+        edge(hc, hs)
+        for _, ap in ipairs(a2) do edge(ap, va) end
+        edge(hs, va)
+        callc(hc, { hs, va, spread = 2 }, res, site, cerr)
     end
     -- (a value a BUILTIN calls — pcall's and xpcall's function, xpcall's handler, a generic for's iterator — is called as
     -- Lua calls anything: a callable TABLE runs its __call with itself first, as a direct call does (CART-1701).
@@ -2174,6 +2200,7 @@ local function build(store, opts)
         local lv = okp and prf and tonumber(prf.lua_version)
         G7.LUA52 = lv ~= nil and lv >= 5.2
         G7.LUAVER = lv and math.floor(lv * 10 + 0.5) or 51 -- (the dump's `ver`: 51 unless the profile says, CART-1810)
+        G7.LUAVSTATED = lv ~= nil -- (CART-1926: a 5.4-only route is followed unless the profile states an older version)
     end -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'

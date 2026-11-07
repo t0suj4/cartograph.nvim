@@ -4468,3 +4468,28 @@ test('flowtype: open mode\'s outside arguments come before the string-method rul
     eq('string', closed and closed.kind, 'closed: no caller, s:upper() returned a string: ' .. vim.inspect(closed))
     ok(not (opened and opened.kind == 'string'), 'open: s may be any outside value, no string answer: ' .. vim.inspect(opened))
 end)
+
+-- CART-1926: a 5.4 `__call` CHAIN (c0's __call is the table t1, t1's is f: `c0(b)` runs f(t1, c0, b)) is followed unless
+-- the profile STATES an older version — there it raises, and following it would invent a call. With no stated version
+-- the walk covers every version's behaviour (the route fixtures callchain / callchain3 pin the 5.4 run).
+test('flowtype: a __call chain is followed unless the profile states a pre-5.4 Lua (CART-1926)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local callrec = require 'cartograph.callrec'
+    local function v_of(profile)
+        local root = tree({ ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
+            'local a, b = setmetatable({}, { __index = A }), setmetatable({}, { __index = B })',
+            'local function use(p) return p:m() end', 'use(a)',
+            'local t1 = setmetatable({}, { __call = function (t, c, x) return use(x) end })',
+            'local c0 = setmetatable({}, { __call = t1 })', 'print(c0(b))' }, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        store.data.profile = profile
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then return R.verdict(c) end end
+    end
+    local v = v_of(nil)
+    ok(v and #v.targets == 2, 'unstated: the chain reaches use(b): ' .. vim.inspect(v))
+    local v52 = v_of('lua-factorio') -- (lua_version 5.2)
+    ok(v52 and v52.kind == 'exact' and #v52.targets == 1 and tostring(v52.targets[1]):match('A%.m'), '5.2 stated: no chain, A.m alone: ' .. vim.inspect(v52))
+end)
