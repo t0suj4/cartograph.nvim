@@ -796,10 +796,11 @@ test('flowdump: what is handed to unknown code keeps its unknown-code root after
     vim.fn.delete(root, 'rf')
     flowtype.CAP = cap
     assert(okd, D); assert(oks, R); assert(okb, RB)
-    -- (the eight, by the dump's labels: a, a.x, the three `{}`, b, b.y, and type:string)
-    eq(8, RD.stats.unknown_code, 'dump: every object handed reaches the unknown-code rule')
-    eq(8, R.stats.unknown_code, 'with the ⊤ node')
-    eq(8, RB.stats.unknown_code, 'with bitsets')
+    -- (the seven, by the dump's labels: a, a.x, the three `{}`, b, b.y — and not type:string, the tables' key sets' type:
+    -- a scalar's type object is no object outside code may write, CART-1869)
+    eq(7, RD.stats.unknown_code, 'dump: every object handed reaches the unknown-code rule')
+    eq(7, R.stats.unknown_code, 'with the ⊤ node')
+    eq(7, RB.stats.unknown_code, 'with bitsets')
     local id = {}
     for _, s in ipairs(D.sites) do id[s.label] = s.id end
     local cls = {}

@@ -4493,3 +4493,34 @@ test('flowtype: a __call chain is followed unless the profile states a pre-5.4 L
     local v52 = v_of('lua-factorio') -- (lua_version 5.2)
     ok(v52 and v52.kind == 'exact' and #v52.targets == 1 and tostring(v52.targets[1]):match('A%.m'), '5.2 stated: no chain, A.m alone: ' .. vim.inspect(v52))
 end)
+
+-- CART-1869: a SCALAR handed to unknown code is a value, no table it may write — type:string / number / boolean stay
+-- out of the unknown-code closure (it had put type:string in it: the root of 26 partial answers on WoW w3, handed at
+-- 3,182 sites). What a string reaches — the string metatable, its __index — every code reaches by getmetatable(""),
+-- under the never-escaping library sites. A TABLE handed over still escapes, with what it holds (the control).
+test('flowtype: a scalar handed to unknown code puts no type object in the unknown-code closure; a table still escapes (CART-1869)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local f = loadstring(io.read())',
+        'f("handed", 1, true)',
+        'local inner = {}',
+        'local T = { inner = inner, [1] = false }',
+        'f(T)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, explain = true })
+    vim.fn.delete(root, 'rf')
+    local function esc(key)
+        local o = R.object(key)
+        local e = o and R.escape_of(o)
+        return e and e[2] ~= '<- not escaped', vim.inspect(e)
+    end
+    for _, k in ipairs({ 'type:string', 'type:number', 'type:boolean' }) do
+        local e, d = esc(k)
+        ok(not e, k .. ' is not in the unknown-code closure: ' .. d)
+    end
+    local et, dt = esc('tbl:m.lua:3:10')
+    ok(et, 'the handed table escapes: ' .. dt)
+    local ei, di = esc('tbl:m.lua:2:14')
+    ok(ei, 'and what it holds: ' .. di)
+    for k in pairs(R.xclosure()) do ok(not k:find('type:', 1, true), 'no type object counted as a hand-out root: ' .. k) end
+end)

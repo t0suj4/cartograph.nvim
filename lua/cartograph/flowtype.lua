@@ -1487,7 +1487,10 @@ local function build(store, opts)
     -- type objects and the profiles' declared returns
     typeobj = function (t)
         local o = TYPEOBJ[t]
-        if not o then o = newobj('type:' .. t); TYPEOBJ[t] = o; TNAME[o] = t end
+        if not o then
+            o = newobj('type:' .. t); TYPEOBJ[t] = o; TNAME[o] = t
+            if SCALAR[t] and G7.NOESC then G7.NOESC[o] = true end -- (a scalar's type object never escapes: CART-1869)
+        end
         return o
     end
     local STR = typeobj('string')
@@ -2179,6 +2182,10 @@ local function build(store, opts)
     -- states it a FIXED host site (host prim), which the E-tables drop. (The string library, the
     -- method path, and nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
+    -- (★ A SCALAR'S TYPE OBJECT NEVER ESCAPES, CART-1869: type:string, number, boolean, nil stand for VALUES — no table
+    -- outside code may write. A handed table's key set holds type:string, and the escape closure had followed it; the
+    -- string metatable and its __index, what a string reaches, are never-escaping library sites. Those made before here)
+    for t, o in pairs(TYPEOBJ) do if SCALAR[t] then G7.NOESC[o] = true end end
     G7.NAMEDRUN = { ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true,
         ['debug#getupvalue'] = true, ['debug#upvaluejoin'] = true }
     G7.UPVGAP = { ['debug#setupvalue'] = 'debug-upvalue', ['debug#getupvalue'] = 'debug-upvalue', ['debug#upvaluejoin'] = 'debug-upvalue',
@@ -5001,7 +5008,13 @@ local function build(store, opts)
     G7.XPAR = ESCAT and {} or nil
     do
         local q = {}
-        local function skip(x) return x == EXT or G7.XC[x] or G7.ISG[x] end -- (_G: every code reaches it, the contract)
+        -- (_G: every code reaches it, the contract. And a SCALAR's type object — type:string, number, boolean, nil — CART-1869:
+        -- a string handed to unknown code is a value, no table it may write; what a string reaches (the string metatable,
+        -- its __index — the library, or a table tree code put there) every code reaches by getmetatable(""), whether or
+        -- not it was handed a string, and those are the never-escaping library sites (C2, libraries-never-escape). On WoW
+        -- w3 type:string was the root of 26 partial answers, handed at 3,182 sites: every call of unknown code passing a
+        -- string)
+        local function skip(x) return x == EXT or G7.XC[x] or G7.ISG[x] or (TNAME[x] and SCALAR[TNAME[x]]) end
         for o in each(G7.EXTCALL) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end
         for o in sorted(G7.XHB) do if not skip(o) and not XESC[o] then XESC[o] = true; q[#q + 1] = o end end -- (past CAP, CART-1850)
         local i = 1
