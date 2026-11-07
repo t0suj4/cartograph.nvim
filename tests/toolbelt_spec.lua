@@ -452,3 +452,80 @@ test('toolbelt (CART-1915): a WRITABLE host runs a declared executor, and its ro
     for _, x in ipairs(l.result) do if x.name == 'door-trap' then row = x end end
     eq({ 'lua', 'process' }, row and row.executes, 'toolbelt_list carries the declaration')
 end)
+
+-- CART-1916 (found by the CART-0607 audit): LISTING a tactic ran it — toolbelt_list dofile'd every mounted file, and a
+-- project's mount is the analysed tree, so an agent host serving any root ran that root's Lua on its first listing. A
+-- tactic outside the built-in mount is now READ (M.meta: the returned table literal), never run, to list it; it runs
+-- only when run (CART-1915 refuses that on a read-only host). The reader is accepted against the loader on every
+-- built-in: each field it reads equals the loaded entry's, or is named UNKNOWN — never silently different.
+test('toolbelt (CART-1916): a project tactic is LISTED from its source, never run; the reader agrees with the loader on every built-in', function ()
+    if not ready() then skip 'no lua parser or algebra' end
+    -- the oracle: every built-in, read vs loaded
+    local files = tb.files()
+    local names, agree, unreadable = {}, 0, {}
+    for n in pairs(files) do names[#names + 1] = n end
+    table.sort(names)
+    for _, n in ipairs(names) do
+        local e = assert(tb.load(n))
+        local m, why = tb.meta(files[n])
+        if not m then unreadable[#unreadable + 1] = n .. ': ' .. tostring(why)
+        else
+            local ok_all = true
+            local function same(k, a, b)
+                if m.unknown[k] then return end -- (named unknown: allowed)
+                if not vim.deep_equal(a, b) then ok_all = false; error(('%s.%s: read %s, loaded %s'):format(n, k, vim.inspect(b), vim.inspect(a))) end
+            end
+            for _, k in ipairs({ 'name', 'kind', 'summary', 'measures', 'tags', 'params', 'executes' }) do same(k, e[k], m[k]) end
+            for _, k in ipairs({ 'build', 'measure', 'claim', 'applies' }) do same(k, type(e[k]) == 'function', m[k] == true) end
+            if not m.unknown.examples then
+                local en, mn = {}, {}
+                for i, x in ipairs(e.examples) do en[i] = x.name end
+                for i, x in ipairs(m.examples) do mn[i] = x.name end
+                same('examples', en, mn)
+            end
+            if ok_all then agree = agree + 1 end
+        end
+    end
+    ok(agree >= 50, ('the reader agrees with the loader on %d of %d built-ins'):format(agree, #names))
+    ok(#unreadable <= 3, 'a built-in the reader refuses is named: ' .. vim.inspect(unreadable))
+    -- the CART-0607 shape: a project tactic whose top level writes a marker is LISTED, and the marker never appears
+    project { ['fe.lua'] = FAMILY }
+    vim.fn.mkdir(root .. '/.cartograph/tactics', 'p')
+    local marker = vim.fn.tempname()
+    local function put(name, body) local fd = assert(io.open(root .. '/.cartograph/tactics/' .. name .. '.lua', 'w')); fd:write(body); fd:close() end
+    put('evil', ('io.open(%q, "w"):write("x")\nlocal function measure() return 1 end\nreturn { name = "evil", kind = "discovery", summary = "a" .. " planted one", tags = { "probe" }, params = { x = "string?" },\n'
+        .. '  examples = { { name = "first", files = SOMETHING } }, measure = measure, claim = function () return true end,\n'
+        .. '  applies = function () io.open(%q, "w"):write("x") return true end }\n'):format(marker, marker))
+    put('opaque', 'local S = "s"\nreturn { name = "opaque", kind = "discovery", summary = S, examples = { { name = "e" } }, measure = function () end, claim = function () end }\n')
+    local entries, broken = tb.list(nil, root)
+    eq(0, vim.fn.filereadable(marker), 'listing ran no project code')
+    local ev
+    for _, e in ipairs(entries) do if e.name == 'evil' then ev = e end end
+    ok(ev and ev.parsed and ev.scope == 'project', 'the planted tactic is listed, read: ' .. vim.inspect(broken))
+    eq({ 'discovery', 'a planted one', { 'probe' }, { x = 'string?' }, 'first' }, { ev.kind, ev.summary, ev.tags, ev.params, ev.examples[1].name })
+    ok(broken.opaque and broken.opaque:find('read, not run', 1, true), 'a summary that is no literal is refused by name: ' .. tostring(broken.opaque))
+    local okx, xwhy = tb.example(ev, ev.examples[1])
+    ok(not okx and tostring(xwhy):find('read, not loaded', 1, true), 'a READ entry is never run as one: ' .. tostring(xwhy))
+    eq(0, vim.fn.filereadable(marker), 'and running its example ran nothing')
+    -- a LISTING find (exec = false, the agent's): its applies() is not evaluated, nothing runs
+    local rows = tb.find('evil', { root = root, at = root, exec = false })
+    eq(1, #rows); eq(nil, rows[1].applicable); ok(rows[1].why_not:find('not evaluated', 1, true), rows[1].why_not)
+    eq(0, vim.fn.filereadable(marker), 'a listing find ran no project code either')
+    -- the agent verb, on a read-only host
+    local agent = require 'cartograph.agent'
+    agent.set_writable(false)
+    local r = agent.answer(store, 'toolbelt_list', {})
+    agent.set_writable(true)
+    ok(r.ok, vim.inspect(r.refusal))
+    eq(0, vim.fn.filereadable(marker), 'toolbelt_list on a read-only host ran no project code')
+    local seen = false
+    for _, row in ipairs(r.result) do if row.name == 'evil' then seen = true end end
+    ok(seen, 'and lists the project tactic')
+    -- (the other side: a LOOKUP FOR USE — T.use of a tag, the CLI's find — loads the tactic to evaluate its applies(),
+    -- as running it would: CART-1448's design, under CART-1915's trap on a read-only host)
+    local used = tb.find('evil', { root = root, at = root })
+    eq(true, used[1].applicable, 'a lookup for use evaluates applies()')
+    eq(1, vim.fn.filereadable(marker), 'and that ran the tactic\'s code, as a run would')
+    os.remove(marker)
+    vim.fn.delete(root .. '/.cartograph', 'rf')
+end)

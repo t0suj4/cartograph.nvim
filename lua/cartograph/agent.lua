@@ -2911,7 +2911,8 @@ local function v_toolbelt_list(store, args)
     local found = {}
     local query = (args.name ~= nil and args.name ~= NUL and args.name ~= '') and args.name
         or ((args.tag ~= nil and args.tag ~= NUL and args.tag ~= '') and { tag = args.tag } or nil)
-    local frows, fnotes = tb.find(query or { tag = nil }, { root = root, at = at })
+    -- (a LISTING: a project / user tactic is read, never run — its applies() included, CART-1916)
+    local frows, fnotes = tb.find(query or { tag = nil }, { root = root, at = at, exec = false })
     for _, r in ipairs(frows) do found[r.name] = r end
     local rows = {}
     for _, e in ipairs(entries) do

@@ -120,7 +120,50 @@ function M.files(d, root)
             end
         end
     end
-    return out, conflicts, promoted, overridden
+    return out, conflicts, promoted, overridden, owner
+end
+
+--- the mount a tactic file is from: 'built-in' (cartograph's own) | 'user' | 'project'
+function M.scope_of(path)
+    local ud = M.user_dir()
+    return (path:sub(1, #dir()) == dir()) and 'built-in' or (ud and path:sub(1, #ud + 1) == ud .. '/') and 'user' or 'project'
+end
+
+--- a READ entry (M.meta), its shape checked as M.load checks a loaded one — a required field that is no literal is
+--- refused by name: it cannot be listed without running the file
+function M.read(name, path, over)
+    local e, why = M.meta(path)
+    if not e then return nil, why, 'unbuilt' end
+    -- (examples BUILT by code — `examples = make()` — are there, not readable: listed as none, never counted as missing)
+    if e.examples == nil and e.unknown.examples then e.examples, e.examples_computed = {}, true end
+    for field, ty in pairs(REQUIRED) do
+        if type(e[field]) ~= ty then
+            return nil, ('%s: `%s` must be a %s%s'):format(path, field, ty,
+                e.unknown[field] and (' literal — it is ' .. e.unknown[field] .. ', and a tactic outside the built-in mount is read, not run, to list it') or ''), 'unbuilt'
+        end
+    end
+    if e.name ~= name then return nil, ('%s declares name `%s` — an entry is named by its FILE'):format(path, e.name), 'unbuilt' end
+    if not KINDS[e.kind] then return nil, ('%s: kind `%s` is not write | discovery'):format(path, e.kind), 'unbuilt' end
+    if e.kind == 'write' and e.build ~= true then return nil, path .. ': a write tactic needs build(params)', 'unbuilt' end
+    if e.kind == 'discovery' and (e.measure ~= true or e.claim ~= true) then
+        return nil, path .. ': a discovery needs measure(store, params) and claim(value)', 'unbuilt'
+    end
+    if #e.examples == 0 and not e.examples_computed then return nil, path .. ': at least one example — it is the usage AND the test', 'unbuilt' end
+    if e.tags ~= nil then
+        if type(e.tags) ~= 'table' then return nil, path .. ': `tags` must be a list of words', 'unbuilt' end
+        for _, t in ipairs(e.tags) do
+            if type(t) ~= 'string' or not t:match(TAG) then return nil, ('%s: tag `%s` is not a lowercase word (%s)'):format(path, tostring(t), TAG), 'unbuilt' end
+        end
+    end
+    if e.executes ~= nil then
+        if type(e.executes) ~= 'table' then return nil, path .. ': `executes` must be a list of lua | process', 'unbuilt' end
+        for _, x in ipairs(e.executes) do
+            if not EXECUTES[x] then return nil, ('%s: `executes` names `%s`, not lua | process'):format(path, tostring(x)), 'unbuilt' end
+        end
+    end
+    e.path, e.scope = path, M.scope_of(path)
+    if over then e.overrides, e.override_hash = over.over, over.use end
+    return e
 end
 
 --- a loaded entry, or nil, why — the SHAPE is checked here, by name, not trusted
@@ -162,23 +205,150 @@ function M.load(name, d, root)
     end
     if e.applies ~= nil and type(e.applies) ~= 'function' then return nil, path .. ': `applies` must be a function (subject) -> ok, why', 'unbuilt' end
     e.path = path
-    local ud = M.user_dir()
-    e.scope = (path:sub(1, #dir()) == dir()) and 'built-in' or (ud and path:sub(1, #ud + 1) == ud .. '/') and 'user' or 'project'
+    e.scope = M.scope_of(path)
     -- an override says so on the entry: what it replaced, and the hash the user chose
     if overridden[name] then e.overrides, e.override_hash = overridden[name].over, overridden[name].use end
     return e
 end
 
+-- ★ AN ENTRY'S METADATA, READ — NOT RUN (CART-1916, found by the CART-0607 audit). Listing a tactic dofile'd it, and a
+-- project's mount is the ANALYSED tree: an agent host serving any root ran that root's Lua on its first toolbelt_list.
+-- So a tactic from outside cartograph's own built-in mount is LISTED from its source ([[code is data by parsing]]): the
+-- table the file returns — `return { … }`, or `local E = { … } … return E` with its top-level `E.k = …` — read as a
+-- literal: strings (a `..` of literals folded), numbers, booleans, tables of those. A function-valued field is noted
+-- as PRESENT (build / measure / claim / applies), never run; any other value (a call, a variable) is UNKNOWN, by name.
+-- It runs only when RUN (M.load), where a read-only host refuses it (CART-1915).
+-- -> entry { name, kind, summary, params, tags, executes, measures, examples = { { name } }, build / measure / claim /
+--    applies = true when a function is there, parsed = true, unknown = { field -> why } } | nil, why
+local FN, UNK = {}, {} -- (the markers for a function value and for a value that is no literal, inside a table)
+function M.meta(path)
+    local src = slurp(path)
+    if not src then return nil, ('cannot read %s'):format(path), 'unbuilt' end
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    if not okp or not parser then return nil, 'no Lua parser to read ' .. path, 'unbuilt' end
+    local root = parser:parse()[1]:root()
+    local function txt(n) return vim.treesitter.get_node_text(n, src) end
+    local tsutil = require 'cartograph.spec.tsutil'
+    local function kids(n) local l = {}; for _, c in tsutil.inamed, n, -1 do l[#l + 1] = c end; return l end
+    local function lit(n) -- -> value | nil, why
+        local ty = n:type()
+        if ty == 'string' or ty == 'number' then
+            -- (a node the parser says IS one literal: evaluating its text alone, in an empty environment, runs nothing)
+            local f = load('return ' .. txt(n), '=literal', 't', {})
+            local ok, v = pcall(f or error)
+            if f and ok then return v end
+            return nil, 'an unreadable literal', 'unbuilt'
+        elseif ty == 'true' then return true
+        elseif ty == 'false' then return false
+        elseif ty == 'function_definition' then return FN
+        elseif ty == 'parenthesized_expression' then return lit(kids(n)[1])
+        elseif ty == 'binary_expression' then
+            local op
+            for _, c in tsutil.inext, n, -1 do if not c:named() then op = txt(c) end end
+            local l, r = n:field('left')[1], n:field('right')[1]
+            if op == '..' and l and r then
+                local a, wa = lit(l); local b, wb = lit(r)
+                if type(a) == 'string' and type(b) == 'string' then return a .. b end
+                return nil, wa or wb or 'a concatenation of non-strings', 'unbuilt'
+            end
+            return nil, 'an expression (' .. tostring(op) .. ')', 'unbuilt'
+        elseif ty == 'table_constructor' then
+            local out, i = {}, 0
+            for _, fld in ipairs(kids(n)) do
+                if fld:type() == 'field' then
+                    local nm, key, val = fld:field('name')[1], nil, fld:field('value')[1]
+                    if nm and nm:type() == 'identifier' then key = txt(nm)
+                    elseif nm then key = lit(nm); if key == nil then return nil, 'a computed key', 'unbuilt' end
+                    else i = i + 1; key = i end
+                    -- (a value that is no literal stays UNKNOWN inside the table, its siblings read: an example's `files =
+                    -- SRC` does not hide its name)
+                    local v = val and lit(val)
+                    if v == nil then v = UNK end
+                    out[key] = v
+                end
+            end
+            return out
+        end
+        return nil, ('%s, not a literal'):format(ty), 'unbuilt'
+    end
+    -- the returned table: the chunk's last top-level return
+    local top = kids(root)
+    local ret
+    for _, c in ipairs(top) do if c:type() == 'return_statement' then ret = c end end
+    if not ret then return nil, path .. ' returns nothing at its top level', 'unbuilt' end
+    local rx = kids(ret)[1]
+    if rx and rx:type() == 'expression_list' then rx = kids(rx)[1] end
+    if not rx then return nil, path .. ' returns nothing', 'unbuilt' end
+    local tbl, extra = rx, {}
+    if rx:type() == 'identifier' then
+        local name = txt(rx)
+        tbl = nil
+        for _, c in ipairs(top) do
+            if c:type() == 'variable_declaration' then
+                local a = kids(c)[1]
+                if a and a:type() == 'assignment_statement' then
+                    local vl, el = a:named_child(0), a:named_child(1)
+                    if vl and el and vl:named_child_count() == 1 and txt(vl:named_child(0)) == name then tbl = el:named_child(0) end
+                end
+            elseif c:type() == 'assignment_statement' and tbl then
+                -- (`E.k = v` at the top level, after the table: a field of the entry)
+                local vl, el = c:named_child(0), c:named_child(1)
+                local v0 = vl and vl:named_child(0)
+                if vl and vl:named_child_count() == 1 and v0:type() == 'dot_index_expression' and txt(v0:field('table')[1]) == name then
+                    extra[#extra + 1] = { txt(v0:field('field')[1]), el:named_child(0) }
+                end
+            end
+        end
+        if not tbl then return nil, ('%s returns `%s`, which no top-level `local %s = { … }` declares'):format(path, name, name), 'unbuilt' end
+    end
+    if tbl:type() ~= 'table_constructor' then return nil, ('%s does not return a table literal'):format(path), 'unbuilt' end
+    local e, unknown = { parsed = true, unknown = {} }, nil
+    unknown = e.unknown
+    -- (a FUNCTION's role — build / measure / claim / applies — is known by the field being there: `measure = measure`
+    -- names a local function; it is never run here)
+    local ROLE = { build = true, measure = true, claim = true, applies = true }
+    local function take(k, node)
+        local v, why = lit(node)
+        if ROLE[k] then e[k] = true; unknown[k] = nil
+        elseif v == nil then unknown[k] = why or 'not a literal'
+        else e[k] = v; unknown[k] = nil end
+    end
+    for _, fld in ipairs(kids(tbl)) do
+        local nm, val = fld:field('name')[1], fld:field('value')[1]
+        if fld:type() == 'field' and nm and nm:type() == 'identifier' and val then take(txt(nm), val) end
+    end
+    for _, x in ipairs(extra) do take(x[1], x[2]) end
+    for k, v in pairs(e) do if v == FN then e[k] = true elseif v == UNK then e[k] = nil; unknown[k] = 'not a literal' end end
+    -- (a list's unknown members: tags / executes holding a variable are not readable as a whole)
+    for _, k in ipairs({ 'tags', 'executes', 'params' }) do
+        if type(e[k]) == 'table' then for _, x in pairs(e[k]) do if x == UNK or x == FN then e[k] = nil; unknown[k] = 'a member is not a literal'; break end end end
+    end
+    -- (the examples: their NAMES, what a listing shows; a function-valued field inside one is fine, never run)
+    if type(e.examples) == 'table' then
+        local ex = {}
+        for i, x in ipairs(e.examples) do ex[i] = { name = type(x) == 'table' and type(x.name) == 'string' and x.name or ('example ' .. i) } end
+        e.examples = ex
+    end
+    return e
+end
+
 --- every entry, loaded: { entries }, { broken = { name -> why } }, { promoted = { name -> path } }, { overridden }
+--- (one from outside the built-in mount is READ, not run — M.meta, CART-1916)
 function M.list(d, root)
     local entries, broken = {}, {}
-    local files, conflicts, promoted, overridden = M.files(d, root)
+    local files, conflicts, promoted, overridden, owner = M.files(d, root)
     local names = {}
     for name in pairs(files) do names[#names + 1] = name end
     for name in pairs(conflicts) do if not files[name] then names[#names + 1] = name end end
     table.sort(names)
     for _, name in ipairs(names) do
-        local e, why = M.load(name, d, root)
+        local e, why
+        local path = files[name]
+        -- (READ: the mounts from outside — the USER's config and the analysed PROJECT. The built-in mount and a directory
+        -- the caller named (`d`) are the caller's own choice: loaded as before)
+        local sc = owner and owner[name]
+        if path and not conflicts[name] and (sc == 'project' or sc == 'user') then e, why = M.read(name, path, overridden[name])
+        else e, why = M.load(name, d, root) end
         if e then entries[#entries + 1] = e else broken[name] = why end
     end
     return entries, broken, promoted, overridden
@@ -260,7 +430,19 @@ function M.find(query, opts)
             for _, t in ipairs(tags) do if t.tag == want_tag then has = true end end
             if has then
                 local applicable, why_not = true, nil
-                if e.applies and at then
+                local ae = e
+                if e.parsed and e.applies and at then
+                    -- (a READ entry's applies() is code. A LOOKUP FOR USE — T.use of a tag, the CLI's find — loads it, as
+                    -- running would (on a read-only host under CART-1915's trap); a LISTING (opts.exec == false: the
+                    -- agent's toolbelt_list) does not, and says so — CART-1916)
+                    if opts.exec == false then ae = nil; applicable, why_not = nil, 'its applies() is not evaluated: a tactic outside the built-in mount is read, not run, to list it'
+                    else
+                        local le, lwhy = M.load(e.name, opts.d, opts.root)
+                        if le then ae = le else ae = nil; applicable, why_not = false, 'it does not load: ' .. tostring(lwhy) end
+                    end
+                end
+                if ae and ae.applies and at then
+                    e = ae
                     local okp, r, w = pcall(e.applies, at)
                     if not okp then applicable, why_not = false, 'its applies() raised: ' .. tostring(r)
                     elseif not r then applicable, why_not = false, tostring(w or 'it does not apply here') end
@@ -631,6 +813,8 @@ end
 --- An example may declare `requires = function () -> ok, why end` (a compiler, a parser): unmet, it is SKIPPED —
 --- ok, nil, { skipped = why } — and a caller counts it as a skip, never as a pass.
 function M.example(e, ex)
+    -- (a READ entry — listed from its source, CART-1916 — holds no code to run: its function fields are mere `true`)
+    if e.parsed then return false, ('%s was read, not loaded: load it (toolbelt.load) to run its examples'):format(tostring(e.name)) end
     if ex.requires then
         local met, why = ex.requires()
         if not met then return true, nil, { skipped = tostring(why) } end
