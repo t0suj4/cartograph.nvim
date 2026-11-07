@@ -113,6 +113,61 @@ test('planguards: a CREATED file must stand on its own', function ()
     eq(pg.PASS, good[1].verdict)
 end)
 
+-- ★★★ A RESERVED WORD IS A FACT ABOUT THE LANGUAGE *VERSION* (CART-1012; USER CONDITION 2026-11-07: "version sensitive
+-- reserved word list", NOT an unconditional per-language blacklist). `local goto = 1` parses, and nvim's LuaJIT compiles
+-- it — 5.1 and LuaJIT allow it, 5.2+ refuse it. The sets are distilled from each interpreter (tools/luareserved.lua);
+-- the version is the profile's lua_version, and an unstated / undistilled one is SAID, never guessed into a refusal
+local function with_profile(lv, fn)
+    local P = require 'cartograph.spec.profile'
+    local old = P.load
+    P.load = function () return { lua_version = lv } end
+    local okr, err = pcall(fn, { data = { profile = 'stub' } })
+    P.load = old
+    if not okr then error(err, 0) end
+end
+
+test('planguards: an identifier the profile Lua VERSION reserves fails; another version passes it (CART-1012)', function ()
+    if not ready() then skip('no lua parser') end
+    local B, A = { ['a.lua'] = 'local x = 1\n' }, { ['a.lua'] = 'local goto = 1\nlocal y = t.goto\n' }
+    with_profile('5.4', function (st)
+        local r = pg.GUARDS.parses(st, nil, B, A)[1]
+        eq(pg.FAIL, r.verdict, 'Lua 5.4 reserves goto')
+        ok(r.why:find('`goto`', 1, true) and r.why:find('5.4', 1, true), r.why)
+    end)
+    with_profile(5.1, function (st) eq(pg.PASS, pg.GUARDS.parses(st, nil, B, A)[1].verdict, '5.1: goto is a name') end)
+    -- the FIELD position too: 5.4 refuses `t.goto` as well as `local goto`
+    with_profile('5.4', function (st)
+        eq(pg.FAIL, pg.GUARDS.parses(st, nil, B, { ['a.lua'] = 'local y = t.goto\n' })[1].verdict, 'a field name is an identifier')
+    end)
+end)
+
+test('planguards: an UNSTATED or UNDISTILLED Lua version is no-claim, never a silent refusal (CART-1012)', function ()
+    if not ready() then skip('no lua parser') end
+    local B, A = { ['a.lua'] = 'local x = 1\n' }, { ['a.lua'] = 'local goto = 1\n' }
+    local r = pg.GUARDS.parses(nil, nil, B, A)[1]
+    eq(pg.NO_CLAIM, r.verdict, 'no store, no profile: the version is unknown')
+    ok(r.why:find('states no Lua version', 1, true), r.why)
+    -- lua-factorio states 5.2, and no 5.2 interpreter was distilled: said, not inferred from 5.4
+    local r2 = pg.GUARDS.parses({ data = { profile = 'lua-factorio' } }, nil, B, A)[1]
+    eq(pg.NO_CLAIM, r2.verdict)
+    ok(r2.why:find('Lua 5.2 has no distilled', 1, true), r2.why)
+    -- and a word NO version disputes is not dragged in: an ordinary edit stays PASS with no version known
+    eq(pg.PASS, pg.GUARDS.parses(nil, nil, B, { ['a.lua'] = 'local global = 1\n' })[1].verdict)
+end)
+
+test('planguards: only a reserved identifier the edit INTRODUCED counts (CART-1012)', function ()
+    if not ready() then skip('no lua parser') end
+    local B = { ['a.lua'] = 'local goto = 1\nreturn goto\n' }
+    with_profile('5.4', function (st)
+        eq(pg.PASS, pg.GUARDS.parses(st, nil, B, { ['a.lua'] = 'local goto = 2\nreturn goto\n' })[1].verdict,
+            'an edit beside an existing goto variable is not its fault')
+        eq(pg.FAIL, pg.GUARDS.parses(st, nil, B, { ['a.lua'] = 'local goto = 2\nreturn goto + goto\n' })[1].verdict)
+        -- a real goto STATEMENT is the keyword, not an identifier
+        eq(pg.PASS, pg.GUARDS.parses(st, nil, { ['a.lua'] = 'local x = 1\n' },
+            { ['a.lua'] = 'for i = 1, 2 do goto continue\n::continue::\nend\n' })[1].verdict)
+    end)
+end)
+
 test('planguards: a plan naming an unregistered guard FAILS rather than skipping it', function ()
     local rows, failed = pg.run(nil, { verb = 'x', guards = { 'no-such-guard' } }, {}, {})
     ok(failed, 'a declared obligation nobody can meet is a refusal, not a pass')

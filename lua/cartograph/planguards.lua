@@ -99,8 +99,23 @@ local function compiles(text, lang)
     if not (oks and type(spec) == 'table' and spec.compiles) then return nil end
     return spec.compiles(text)
 end
-M.GUARDS.parses = function (_, _, before, after)
+-- the identifiers in `text` spelled with a word the profile's language VERSION reserves (`spec.reserved_uses`, CART-1012)
+-- -> { version, n, words, unknown? } | nil (the language's spec cannot say)
+local function reserved_uses(text, lang, prof)
+    local oks, spec = pcall(require, 'cartograph.spec.' .. lang)
+    if not (oks and type(spec) == 'table' and spec.reserved_uses) then return nil end
+    local ok, r = pcall(spec.reserved_uses, text, prof)
+    return ok and r or nil
+end
+local function profile_of(store)
+    local ok, prf = pcall(function ()
+        return store and store.data and store.data.profile and require('cartograph.spec.profile').load(store.data.profile)
+    end)
+    return ok and prf or nil
+end
+M.GUARDS.parses = function (store, _, before, after)
     local rows, rels = {}, {}
+    local prof = profile_of(store) -- (the language version a reserved word is judged under, CART-1012)
     for rel in pairs(after or {}) do rels[#rels + 1] = rel end
     table.sort(rels) -- a total order, or the report is not a fact
     for _, rel in ipairs(rels) do
@@ -136,7 +151,26 @@ M.GUARDS.parses = function (_, _, before, after)
                         rows[#rows + 1] = { verdict = M.FAIL, file = rel,
                             why = ('the edited file parses but no longer COMPILES as %s: %s'):format(lang, tostring(cwhy)) }
                     else
-                        rows[#rows + 1] = { verdict = M.PASS, file = rel }
+                        -- ★★★ A RESERVED WORD IS A FACT ABOUT THE LANGUAGE *VERSION* (CART-1012, the user's condition):
+                        -- `local goto = 1` parses, and nvim's LuaJIT compiles it, and Lua 5.2+ refuses it. Judged under
+                        -- the profile's version, distilled from that version's interpreter; an unstated or undistilled
+                        -- version is SAID (no-claim, which does not block), never guessed into a refusal. Only what the
+                        -- edit INTRODUCED counts — an edit beside a 5.1 file's existing `goto` variable is not its fault
+                        local ra = reserved_uses(after[rel] or '', lang, prof)
+                        local rb = ra and ra.n > 0 and pre and reserved_uses(pre, lang, prof) or nil
+                        if ra and ra.n > (rb and rb.n or 0) then
+                            local ws = '`' .. table.concat(ra.words, '`, `') .. '`'
+                            if ra.unknown then
+                                rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                                    why = ('the edited file parses and compiles, but uses %s as an identifier — reserved '
+                                        .. 'in some %s versions and not others, and %s'):format(ws, lang, ra.unknown) }
+                            else
+                                rows[#rows + 1] = { verdict = M.FAIL, file = rel,
+                                    why = ('the edited file uses %s as an identifier, reserved in %s %s'):format(ws, lang, ra.version) }
+                            end
+                        else
+                            rows[#rows + 1] = { verdict = M.PASS, file = rel }
+                        end
                     end
                 end
             end

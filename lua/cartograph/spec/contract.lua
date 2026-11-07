@@ -83,6 +83,9 @@ M.SLOTS = {
     declaration = 'SCOPE&KEY',
     -- compiles(text) -> ok, why: the language's own compiler accepts the text (planguards' parses guard, CART-1559)
     compiles = 'SCOPE&KEY',
+    -- reserved_uses(text, profile) -> { version, n, words, unknown? }: identifiers spelled with a word the profile's
+    -- language VERSION reserves (planguards' parses guard, CART-1012)
+    reserved_uses = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing

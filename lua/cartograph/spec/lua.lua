@@ -1032,6 +1032,55 @@ local function lua_meta_file(src)
     end
     return META_IS
 end
+-- reserved_uses(text, profile) — the identifiers in `text` spelled with a word the analysed code's Lua VERSION
+-- reserves (CART-1012). ★★★ USER CONDITION (2026-11-07): reserved words are LANGUAGE AND VERSION-SENSITIVE, not an
+-- unconditional per-language blacklist — `goto` is a keyword from 5.2 on and a plain name in 5.1 and LuaJIT, and
+-- nvim's loadstring (spec.compiles) answers for LuaJIT only. The word sets are DISTILLED from each version's interpreter
+-- (tools/luareserved.lua → spec/luareserved.lua); the version is the profile's `lua_version`, read the way flowtype reads
+-- it (tonumber, CART-1802), and an UNSTATED or UNDISTILLED version is not guessed:
+--   known (a distilled version)  -> { version, n = identifiers it reserves, words }
+--   unknown                       -> { version = nil|'5.2', n = identifiers some distilled version reserves and another
+--                                     does not (the VERSION-DEPENDENT words), words, unknown = why }
+-- Words every distilled version reserves are left to `compiles` (LuaJIT refuses them already) and the parse.
+local function lua_reserved_uses(text, prof)
+    local R = require 'cartograph.spec.luareserved'
+    local lv = prof and tonumber(prof.lua_version)
+    local key = lv and ('%.1f'):format(lv) or nil
+    local known = key and R.versions[key]
+    local set, any, cnt, nver = {}, {}, {}, 0
+    if known then
+        for _, w in ipairs(known.words) do set[w] = true end
+    else
+        for _, v in pairs(R.versions) do
+            nver = nver + 1
+            for _, w in ipairs(v.words) do cnt[w] = (cnt[w] or 0) + 1 end
+        end
+        for w, c in pairs(cnt) do if c < nver then any[w] = true end end
+        set = any
+    end
+    local out = { version = key, n = 0, words = {} }
+    if not known then
+        out.unknown = key and ('Lua %s has no distilled reserved-word set (no interpreter for it when '
+            .. 'tools/luareserved.lua ran)'):format(key)
+            or 'the project states no Lua version (its profile has no lua_version)'
+    end
+    if next(set) == nil then return out end
+    local okp, parser = pcall(vim.treesitter.get_string_parser, text, 'lua')
+    if not okp or not parser then return nil end
+    local tree = parser:parse()[1]
+    local q = vim.treesitter.query.parse('lua', '(identifier) @id')
+    local seen = {}
+    for _, node in q:iter_captures(tree:root(), text) do
+        local w = vim.treesitter.get_node_text(node, text)
+        if set[w] then
+            out.n = out.n + 1
+            if not seen[w] then seen[w] = true; out.words[#out.words + 1] = w end
+        end
+    end
+    table.sort(out.words)
+    return out
+end
+
 local function lua_declaration(defn, src)
     return type(src) == 'string' and defn:field('body')[1] == nil and lua_meta_file(src) or false
 end
@@ -1707,6 +1756,8 @@ return {
         local f, err = loadstring((text:gsub('^#![^\n]*', '')))
         return f ~= nil, err
     end,
+    -- the identifiers spelled with a word the profile's Lua version reserves (CART-1012: version-sensitive, distilled)
+    reserved_uses = lua_reserved_uses,
     -- a table whose __index requires `<prefix> .. key` is a module namespace (CART-1619)
     scan_imports = lua_lazy_imports,
     -- stdlib receivers must not tail-match a project def: string.format
