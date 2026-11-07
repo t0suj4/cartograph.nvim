@@ -121,4 +121,12 @@ function M.resolve(ref, candidates, ctx)
     return nil, ('ambiguous: %d same-named candidates'):format(#cands)
 end
 
+--- ★ ONE TAIL RULE (CART-0718, moved here CART-1989): `name` ends with `query` after a `.` or `:` (`M.foo`, `M:foo`,
+--- `T::foo` ~ `foo`), case-insensitive. node_find's match, the agent's ref fallback and the tactic ref params share it, so
+--- no two surfaces disagree about whether a tail is a name.
+function M.tail_match(name, query)
+    local ln, lq = tostring(name):lower(), tostring(query):lower()
+    return ln ~= lq and ln:match('[.:]' .. lq:gsub('(%W)', '%%%1') .. '$') ~= nil
+end
+
 return M

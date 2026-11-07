@@ -858,10 +858,8 @@ end
 --- branch on missing-vs-ambiguous should not have to parse a sentence.
 --- ★ ONE TAIL RULE (CART-0718): `name` ends with `query` after a `.` or `:` (`M.foo`, `M:foo`, `T::foo` ~ `foo`),
 --- case-insensitive — node_find's own match, shared so the two surfaces cannot disagree about whether a tail is a name.
-function M.tail_match(name, query)
-    local ln, lq = tostring(name):lower(), tostring(query):lower()
-    return ln ~= lq and ln:match('[.:]' .. lq:gsub('(%W)', '%%%1') .. '$') ~= nil
-end
+--- (the rule lives in refs.lua since CART-1989: store.resolve_caller_ref and the tactic ref params use it too)
+M.tail_match = require('cartograph.refs').tail_match
 
 local function stale_ref(ref, why, remedy, candidates)
     local ambiguous = why:sub(1, 9) == 'ambiguous'
@@ -895,40 +893,20 @@ end
 ---                      when nothing anywhere matches — says the definition is gone, a claim it has now CHECKED
 --- Returns id, caveat, tail (true when the caveat is a tail match) | nil, refusal.
 local function resolve_ref_honest(store, ref)
-    local id, why = store.resolve_ref(ref)
-    if id then return id, why end
-    why = why or 'missing'
-    if why ~= 'missing' then return nil, stale_ref(ref, why) end
-    local hits = {}
-    for _, n in ipairs(store.by_file and store.by_file[ref.file] or {}) do
-        if n.kind == ref.kind and M.tail_match(n.name, ref.name) then hits[#hits + 1] = n.id end
-    end
-    table.sort(hits)
-    if #hits == 1 then
-        local n = store.node(hits[1])
-        return hits[1], ('tail-match: the ref names %q, the definition in that file is %q — the ref was underqualified'):format(
-            tostring(ref.name), tostring(n and n.name)), true
-    end
-    if #hits > 1 then
-        return nil, stale_ref(ref, ('ambiguous-tail: %d definitions in %s end with %q'):format(#hits, tostring(ref.file), tostring(ref.name)),
+    -- (the decision is store.resolve_caller_ref, shared with the tactic ref params — CART-1989; this wraps it as a refusal)
+    local id, why, more = store.resolve_caller_ref(ref)
+    if id then return id, why, more end
+    if why:sub(1, 14) == 'ambiguous-tail' then
+        return nil, stale_ref(ref, why,
             'the name is UNDERQUALIFIED, not gone: several definitions in that file end with it — pass one of the candidate refs (each is the qualified name node_find reports)',
-            ref_rows(store, hits))
+            ref_rows(store, more))
     end
-    local elsewhere = {}
-    for name, ids in pairs(store.by_name or {}) do
-        if name == ref.name or M.tail_match(name, ref.name) then
-            for _, nid in ipairs(ids) do
-                local n = store.node(nid)
-                if n and n.kind == ref.kind and n.file ~= ref.file then elsewhere[#elsewhere + 1] = nid end
-            end
-        end
-    end
-    table.sort(elsewhere)
-    if #elsewhere > 0 then
+    if why ~= 'missing' then return nil, stale_ref(ref, why) end
+    if #more > 0 then
         return nil, stale_ref(ref, 'missing',
             ('no %s named %q (exactly or as a tail) is in %s any more, and %d with that name is in another file — if it moved, the candidate refs say where'):format(
-                tostring(ref.kind), tostring(ref.name), tostring(ref.file), #elsewhere),
-            ref_rows(store, elsewhere))
+                tostring(ref.kind), tostring(ref.name), tostring(ref.file), #more),
+            ref_rows(store, more))
     end
     return nil, stale_ref(ref, 'missing',
         ('no %s named %q — exactly or as a tail — is anywhere in this graph: it was deleted or renamed. node_find with a fragment of the name finds a rename'):format(

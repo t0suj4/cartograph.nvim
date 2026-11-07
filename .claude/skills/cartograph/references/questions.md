@@ -121,7 +121,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 
 | Question | Instrument |
 |---|---|
-| Is there already a named tactic for this — its kind, params, examples? Run it (a discovery re-measures, a write previews) | MCP `toolbelt_list` / `toolbelt_run { name }` |
+| Is there already a named tactic for this — its kind, params, examples? Run it (a discovery re-measures, a write previews) | MCP `toolbelt_list` / `toolbelt_run { name }` — a `ref` param is `file::name` or a ref table; an underqualified name (`foo` for `M.foo`) resolves for a discovery when one definition in the file ends with it, and a write tactic refuses it naming the qualified ref (CART-1989) |
 | Does the tree already contain this functionality, compiled out by default? How is it turned on? (erlang + rebar + autoconf) | `tools/features.lua <root> [--all]` — configure switch and default -> rebar variable -> macro / dependency -> the `-ifdef` code it compiles out, with line ranges and functions. ejabberd: SIP (~1,400 lines, `--enable-sip`), Elixir, roster gateway workaround, multihost SQL schema |
 | Is a missing dependency or behaviour producer really missing, or just behind a disabled feature? | `tools/producers.lua <root>` marks each one `[compiled out by default: MACRO — ./configure --enable-x]` |
 

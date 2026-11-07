@@ -127,9 +127,10 @@ function M.plan(store, args)
     -- file (a snippet that also occurs in a sibling is fine), and the slice is spliced back. Text, so any language.
     local slice_of
     if args.within ~= nil then
-        local id = type(args.within) == 'table' and store.resolve_ref(args.within) or args.within
+        -- (a caller-built ref: tail rule + the write-side caveat rule, store.ref_param — CART-1989)
+        local id, rwhy = store.ref_param(args.within, true)
         local n = id and store.node(id)
-        if not n then return nil, ('the function to edit within does not resolve (%s)'):format(vim.inspect(args.within)), 'stale' end
+        if not n then return nil, rwhy or ('the function to edit within does not resolve (%s)'):format(vim.inspect(args.within)), 'stale' end
         if n.file ~= rel then return nil, ('%s is in %s, not %s'):format(tostring(n.name), tostring(n.file), rel), 'ill-posed' end
         if not text then return nil, ('cannot read %s'):format(rel), 'stale' end
         local atr = require 'cartograph.at'

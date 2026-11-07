@@ -1162,6 +1162,76 @@ function M.resolve_ref(ref)
     })
 end
 
+--- ★★ A REF A CALLER BUILT (CART-0718 core, moved below the agent CART-1989). resolve_ref is EXACT on purpose: a minted
+--- ref (pin, journal, staged plan) always carries the definition's own name (CART-1988 measured 508 durable refs, none a
+--- tail). A ref typed by a caller — an agent argument, a tactic param over toolbelt_run — may be UNDERQUALIFIED (`foo`
+--- for `M.foo`, the bare name node_find shows). On an exact `missing` the tail rule runs in the ref's file and kind, then
+--- the whole graph is asked. Plain data, no envelope — agent.lua and the tactics each wrap it in their own refusal:
+---   -> id, caveat?, tail?         resolved (tail = true when the caveat is a tail match)
+---   -> nil, why, candidate_ids    'ambiguous…' (refs.lua's, or 'ambiguous-tail: …'), or 'missing' with the same-kind
+---                                 matches in OTHER files (empty when nothing anywhere matches)
+function M.resolve_caller_ref(ref)
+    local id, why = M.resolve_ref(ref)
+    if id then return id, why end
+    why = why or 'missing'
+    if why ~= 'missing' then return nil, why, {} end
+    local refs = require 'cartograph.refs'
+    local hits = {}
+    for _, n in ipairs(M.by_file[ref.file] or {}) do
+        if n.kind == ref.kind and refs.tail_match(n.name, ref.name) then hits[#hits + 1] = n.id end
+    end
+    table.sort(hits)
+    if #hits == 1 then
+        local n = M.node(hits[1])
+        return hits[1], ('tail-match: the ref names %q, the definition in that file is %q — the ref was underqualified'):format(
+            tostring(ref.name), tostring(n and n.name)), true
+    end
+    if #hits > 1 then
+        return nil, ('ambiguous-tail: %d definitions in %s end with %q'):format(#hits, tostring(ref.file), tostring(ref.name)), hits
+    end
+    local elsewhere = {}
+    for name, ids in pairs(M.by_name or {}) do
+        if name == ref.name or refs.tail_match(name, ref.name) then
+            for _, nid in ipairs(ids) do
+                local n = M.node(nid)
+                if n and n.kind == ref.kind and n.file ~= ref.file then elsewhere[#elsewhere + 1] = nid end
+            end
+        end
+    end
+    table.sort(elsewhere)
+    return nil, 'missing', elsewhere
+end
+
+--- A TACTIC'S REF PARAM (CART-1989): a node id passes through; a ref table goes through resolve_caller_ref. `write` =
+--- the agent's write-side rule (resolve_write_ref): ANY caveat refuses — a tail match, a drifted witness, a rename —
+--- because txn.verify refuses the same caveat at apply time; the message names the qualified ref to pass instead.
+--- -> id, caveat? (only without `write`) | nil, why (a sentence carrying the resolver's why and the candidates' refs)
+function M.ref_param(x, write)
+    if type(x) ~= 'table' then return x end
+    local id, why, more = M.resolve_caller_ref(x)
+    local function named(ids)
+        local out = {}
+        for i = 1, math.min(#ids, 5) do
+            local r = M.ref_of(ids[i])
+            out[i] = r and ('{ file = %q, kind = %q, name = %q }'):format(tostring(r.file), tostring(r.kind), tostring(r.name)) or tostring(ids[i])
+        end
+        return table.concat(out, ', ')
+    end
+    if id and not (write and why) then return id, why end
+    local head = ('the ref %s::%s (%s)'):format(tostring(x.file), tostring(x.name), tostring(x.kind))
+    if id then
+        return nil, ('%s resolved only WITH A CAVEAT — %s — and a write is not made on a merely probable handle: pass %s, or the node id if you checked it'):format(
+            head, why, more and named({ id }) or 'a fresh ref from node_find')
+    end
+    if #more > 0 then
+        return nil, ('%s does not resolve: %s — %s: %s'):format(head, why,
+            why == 'missing' and 'not in that file, but the same name is in another; if it moved, pass one of' or 'the name is UNDERQUALIFIED, not gone; pass one of',
+            named(more))
+    end
+    return nil, ('%s does not resolve: %s%s'):format(head, why,
+        why == 'missing' and ' — no definition of that kind is named so, exactly or as a tail, anywhere in this graph' or '')
+end
+
 -- ── the working set: what the user is working ON ────────────────────────────
 -- Marked nodes, held as REFS (the durable identity — survives refresh
 -- remaps, follows renames with a note) and persisted per project root in

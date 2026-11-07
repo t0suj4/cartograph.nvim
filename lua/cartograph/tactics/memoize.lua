@@ -25,9 +25,10 @@ local T = require('cartograph.tactic').T
 local RESIDENCES = { weak = true, strong = true, generation = true }
 
 local function build(p, store)
-    local id = type(p.ref) == 'table' and store.resolve_ref(p.ref) or p.ref
+    -- (a caller-built ref: tail rule + the write-side caveat rule, store.ref_param — CART-1989)
+    local id, rwhy = store.ref_param(p.ref, true)
     local n = id and store.node(id)
-    if not n then return nil, ('the function to memoize does not resolve (%s)'):format(vim.inspect(p.ref)), 'stale' end
+    if not n then return nil, rwhy or ('the function to memoize does not resolve (%s)'):format(vim.inspect(p.ref)), 'stale' end
     if not tostring(n.file):match('%.lua$') then return nil, ('memoize writes Lua; %s is not a .lua file'):format(tostring(n.file)), 'unbuilt' end
     if p.residence and not RESIDENCES[p.residence] then return nil, ('residence = weak | strong | generation, not %q'):format(p.residence), 'ill-posed' end
     if p.residence == 'generation' and not p.generation then return nil, 'residence = generation needs generation = <a Lua expression>', 'ill-posed' end

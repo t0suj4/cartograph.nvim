@@ -96,16 +96,11 @@ local function one_ref(store, args)
         return nil, 'a step addresses its symbol by `ref` (durable), never by a session id: an id dies at the first apply', 'ill-posed'
     end
     if type(args.ref) ~= 'table' then return nil, 'the step names no `ref`', 'ill-posed' end
-    local id, why = store.resolve_ref(args.ref)
-    if not id then
-        return nil, ('ref %s in %s does not resolve: %s'):format(tostring(args.ref.name), tostring(args.ref.file),
-            tostring(why)), 'stale'
-    end
-    -- ⚠ and a caveat refuses (the moveset adapter's note above; the agent's resolve_write_ref rule)
-    if why then
-        return nil, ('ref %s in %s resolved only WITH A CAVEAT — %s — and a write is not planned on a merely probable handle')
-            :format(tostring(args.ref.name), tostring(args.ref.file), tostring(why)), 'stale'
-    end
+    -- ⚠ a caveat refuses (the moveset adapter's note above; the agent's resolve_write_ref rule) — and a step's ref may be
+    -- one a CALLER built (align-family hands its `ref` param here), so an exact miss runs the tail rule and names the
+    -- candidates: store.ref_param with the write rule (CART-1989). A minted ref resolves exactly as before.
+    local id, why = store.ref_param(args.ref, true)
+    if not id then return nil, why, 'stale' end
     return id
 end
 

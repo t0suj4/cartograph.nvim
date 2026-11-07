@@ -17,10 +17,20 @@ function M.host_call(f, a) return pack(f(unpack(a, 1, a.n or #a))) end
 --- ★ WITH ITS CALL CONE first (mixalg.program over the function's own file: its `M.x` and file-local helpers assembled
 --- in, so a helper is code, not a free name) — and ALONE when the cone does not lower (a helper outside S) or the
 --- function is a method (the assembly takes a header's written parameters: `self` is implicit).
---- -> prog, params (names, in order), entry (the function's name in prog), how = { cone = bool, members, why }
+--- -> prog, params (names, in order), entry (the function's name in prog), how = { cone = bool, members, why, ref_caveat? }
 ---  | nil, why, class
+--- (a READ: a caller ref that resolves only with a caveat — a tail match, a drifted witness — still lowers, and the
+--- caveat rides as how.ref_caveat; store.ref_param without the write rule — CART-1989)
 function M.lower_ref(store, ref)
-    local id = type(ref) == 'table' and store.resolve_ref(ref) or ref
+    local id, caveat = store.ref_param(ref)
+    if not id then return M.lower_alone(store, ref) end
+    local prog, names, entry, how = M.lower_resolved(store, id)
+    if prog and caveat then how.ref_caveat = caveat end
+    return prog, names, entry, how
+end
+
+--- (the cone-or-alone lowering of a RESOLVED node id)
+function M.lower_resolved(store, id)
     local n = id and store.node(id)
     if n and tostring(n.file):match('%.lua$') and not tostring(n.name):find(':', 1, true) then
         local MA = require 'cartograph.mixalg'
@@ -39,18 +49,18 @@ function M.lower_ref(store, ref)
             end
             why = okl and ('no entry ' .. entry) or M.why(prog)
         else why = tostring(text) end
-        local prog, names, entry, how = M.lower_alone(store, ref)
+        local prog, names, entry, how = M.lower_alone(store, id)
         if prog then how.why = 'its call cone does not lower: ' .. why end
         return prog, names, entry, how
     end
-    return M.lower_alone(store, ref)
+    return M.lower_alone(store, id)
 end
 
 --- the function ALONE: its header renamed to a standalone `local function f(…)` -> prog, params, 'f', { cone = false }
 function M.lower_alone(store, ref)
-    local id = type(ref) == 'table' and store.resolve_ref(ref) or ref
+    local id, rwhy = store.ref_param(ref)
     local n = id and store.node(id)
-    if not n then return nil, ('the function does not resolve (%s)'):format(vim.inspect(ref)), 'stale' end
+    if not n then return nil, rwhy or ('the function does not resolve (%s)'):format(vim.inspect(ref)), 'stale' end
     if not tostring(n.file):match('%.lua$') then return nil, ('mix reads Lua; %s is not a .lua file'):format(tostring(n.file)), 'unbuilt' end
     local text = require('cartograph.txn').read_file(store.data.root, n.file)
     if not text then return nil, ('cannot read %s'):format(n.file), 'stale' end

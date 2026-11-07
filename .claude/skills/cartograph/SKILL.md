@@ -276,7 +276,9 @@ ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
   `ref-tail-match` note carrying the qualified ref (a write verb refuses it as
   `ref-caveat` and hands you that ref). Several matches refuse as
   `ambiguous-tail` with candidate refs; "gone" is said only after the whole graph
-  was searched.
+  was searched. The same rule holds for a TACTIC's ref param over `toolbelt_run`
+  (CART-1989), in both forms — `file::name` and a ref table: a discovery resolves a
+  unique tail, a write tactic refuses it naming the qualified ref to pass.
 
 ## Writing
 

@@ -294,7 +294,9 @@ end
 --- JSON, a `T.use` in a term), so a param means the same thing however it arrives. `params = { name = 'type' }`, a
 --- trailing `?` marks it optional:
 ---   ref     a durable ref table, or `file::name` — resolved against the graph; a miss says DID YOU MEAN, with the
----           near names in that file (cartograph.near), never a guess applied
+---           near names in that file (cartograph.near), never a guess applied. An underqualified name (`foo` for
+---           `M.foo`) is node_find's tail rule: one match resolves for a discovery, a write refuses naming it (CART-1989);
+---           a TABLE ref is resolved by the tactic through store.ref_param (same rule)
 ---   string  as given; `@path` reads the file (a tactic's `text` is usually a whole definition)
 ---   list    a table, or `a,b,c`
 ---   term    an algebra term, template or term graph, as a table (from a `T.use`, an example, an MCP client) — no text
@@ -325,12 +327,25 @@ function M.coerce(store, e, raw)
             if type(v) == 'string' then
                 local file, name = v:match('^(.-)::(.+)$')
                 if not file then return nil, ('param `%s`: a ref is `file::name`, got %q'):format(k, v), 'ill-posed' end
-                local hit, names = nil, {}
+                local hit, names, tails = nil, {}, {}
+                local tail_match = require('cartograph.refs').tail_match
                 for _, n in ipairs((store.data and store.data.nodes) or {}) do
                     if n.file == file and (n.kind == 'function' or n.kind == 'method') then
                         names[#names + 1] = n.name
-                        if n.name == name then hit = n end
+                        if n.name == name then hit = n elseif tail_match(n.name, name) then tails[#tails + 1] = n end
                     end
+                end
+                -- ★ AN UNDERQUALIFIED NAME (CART-1989): `f.lua::foo` for `M.foo` — node_find's tail rule. One match on a
+                -- READ (discovery) resolves; a WRITE refuses and names the qualified ref (the agent's write-side rule,
+                -- ref-caveat); several name them all. Never the edit-distance guess below, which may name a stranger.
+                if not hit and #tails == 1 and e.kind ~= 'write' then hit = tails[1] end
+                if not hit and #tails > 0 then
+                    local qs = {}
+                    for i, n in ipairs(tails) do qs[i] = file .. '::' .. n.name end
+                    table.sort(qs)
+                    return nil, ('param `%s`: %s is UNDERQUALIFIED in %s — %s; pass %s'):format(k, name, file,
+                        #tails == 1 and 'a write is not made on a tail match' or ('%d definitions end with it'):format(#tails),
+                        table.concat(qs, ' or ')), 'ill-posed'
                 end
                 if not hit then
                     local near = {}

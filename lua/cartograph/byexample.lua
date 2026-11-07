@@ -890,9 +890,10 @@ function M.plan(store, opts)
     -- table) — and the slice is spliced back; nothing outside the function can match. Terms carry no spans, so the
     -- scope is the TEXT the graph's range names, not a position filter.
     if opts.within ~= nil then
-        local id = type(opts.within) == 'table' and store.resolve_ref(opts.within) or opts.within
+        -- (a caller-built ref: tail rule + the write-side caveat rule, store.ref_param — CART-1989)
+        local id, rwhy = store.ref_param(opts.within, true)
         local n = id and store.node(id)
-        if not n then return nil, ('the function to edit within does not resolve (%s)'):format(vim.inspect(opts.within)), 'stale' end
+        if not n then return nil, rwhy or ('the function to edit within does not resolve (%s)'):format(vim.inspect(opts.within)), 'stale' end
         local atr = require 'cartograph.at'
         local text = txn.read_file(root, n.file)
         if not text then return nil, ('cannot read %s'):format(n.file), 'stale' end
