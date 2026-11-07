@@ -694,6 +694,12 @@ local function v_graph_info(store)
             -- handle fits — which is the whole of the routing question that ticket
             -- was opened to design a table for.
             subject = v.subject or NUL,
+            -- CART-1936: the argument ALIASES it accepts, `alias -> argument` (a sibling verb's spelling of the same subject)
+            aliases = (function ()
+                local l = {}
+                for _, a in ipairs(v.args) do for _, al in ipairs(a.aliases or {}) do l[#l + 1] = al .. ' -> ' .. a.name end end
+                return #l > 0 and l or NUL
+            end)(),
             -- CART-1976: the QUESTION this verb answers, as a closed slug and its question-index heading
             answers = v.answers, question = M.QUESTION[v.answers],
             -- CART-0581: WHICH QUANTIFIER produced the headline `tier`. Without
@@ -4217,7 +4223,9 @@ M.VERBS = {
         subject = 'query',
         tier_basis = 'observation', absences = { 'absent', 'frontier' },
         args = {
-            { name = 'query', type = 'string', required = true, desc = 'the name to look for' },
+            -- (`name` is an ALIAS: mentions / why spell the same subject `name`, and an agent guesses from the sibling verb —
+            -- CART-1936, the BNW 2.1 port bot's -32602)
+            { name = 'query', type = 'string', required = true, desc = 'the name to look for', aliases = { 'name' } },
             { name = 'kind', type = 'string', desc = 'restrict to a node kind (function, method, class, variable, module)' },
             { name = 'limit', type = 'integer', desc = 'max rows (default 100); a clip is reported as a note' },
         },
@@ -4374,7 +4382,7 @@ M.VERBS = {
         absences = { 'absent', 'frontier' },
         needs = { 'mention-index' }, -- CART-1975: checked by M.answer, disclosed by graph_info and tools/list
         args = {
-            { name = 'name', type = 'string', required = true, desc = 'the identifier to look for' },
+            { name = 'name', type = 'string', required = true, desc = 'the identifier to look for', aliases = { 'query' } }, -- (node_find's spelling, CART-1936)
             { name = 'from', type = 'string', desc = 'the asking file — confines the answer to its resolution scope, which is what a resolver would consider' },
         },
         run = v_mentions,
@@ -4883,6 +4891,10 @@ function M.schema(verb)
         end
         props[a.name] = p
         if a.required then req[#req + 1] = a.name end
+        -- (an ALIAS is published too — its own property, never required, saying whose alias it is: CART-1936)
+        for _, al in ipairs(a.aliases or {}) do
+            props[al] = { type = a.type, description = ('an alias of `%s`: %s'):format(a.name, tostring(a.desc)) }
+        end
     end
     -- ★★ THE BAND ARGUMENT IS DECLARED, NOT DOCUMENTED (CART-0823). A router an
     -- agent cannot DISCOVER is a router it will not use: tools/list publishes
@@ -4980,6 +4992,23 @@ local function answer(store, verb, args)
     if not v then
         return { ok = false, verb = nn(verb), error = { kind = 'usage',
             reason = ('unknown verb %q'):format(tostring(verb)), verbs = M.ORDER } }, 'usage'
+    end
+    -- ★ ARGUMENT ALIASES (CART-1936): an argument may declare `aliases` — the same subject as a sibling verb spells it
+    -- (node_find's `query` is mentions' `name`). The alias is read AS the argument, on a copy of the caller's table;
+    -- both spellings with different values is a usage error, never a silent pick
+    for _, a in ipairs(v.args) do
+        for _, al in ipairs(a.aliases or {}) do
+            if args[al] ~= nil then
+                if args[a.name] ~= nil and args[a.name] ~= args[al] then
+                    return { ok = false, verb = verb, error = { kind = 'usage',
+                        reason = ('%s: `%s` is an alias of `%s`, and the two were given different values'):format(verb, al, a.name) } }, 'usage'
+                end
+                local c = {}
+                for k, x in pairs(args) do c[k] = x end
+                c[a.name], c[al] = args[al], nil
+                args = c
+            end
+        end
     end
     local bad = validate(verb, args)
     if bad then

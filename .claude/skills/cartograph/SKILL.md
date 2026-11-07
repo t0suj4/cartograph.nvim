@@ -279,6 +279,10 @@ ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
   was searched. The same rule holds for a TACTIC's ref param over `toolbelt_run`
   (CART-1989), in both forms — `file::name` and a ref table: a discovery resolves a
   unique tail, a write tactic refuses it naming the qualified ref to pass.
+- Argument ALIASES: a verb may accept a sibling verb's spelling of the same subject —
+  `node_find` takes `name` for `query`, `mentions` takes `query` for `name`
+  (CART-1936). The schema publishes each alias (never required), graph_info's
+  `aliases` column lists them, and both spellings with different values refuse.
 
 ## Writing
 

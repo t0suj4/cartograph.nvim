@@ -456,3 +456,39 @@ test('agent: an underqualified ref resolves by node_find\'s tail rule, refuses a
     eq('M.solo', wr.refusal.candidates[1].value.name)
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-1936 (the BNW 2.1 port bot): node_find{name = …} was invalid params — its argument is `query`, while mentions /
+-- why spell the same subject `name`, and an agent guesses from the sibling verb. An argument now DECLARES its aliases:
+-- node_find's `query` takes `name`, mentions' `name` takes `query`. The alias answers as the argument does; both
+-- spellings with different values are a usage error; the schema publishes the alias, graph_info lists it.
+test('agent: node_find takes `name` as an alias of `query`, mentions `query` as an alias of `name` — declared, published (CART-1936)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local agent = require 'cartograph.agent'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write('local M = {}\nfunction M.solo() return 1 end\nreturn M\n'); fd:close()
+    store.ingest(ts.extract(root))
+    vim.fn.delete(root, 'rf')
+    local q = agent.answer(store, 'node_find', { query = 'solo' })
+    local n, status = agent.answer(store, 'node_find', { name = 'solo' })
+    eq('ok', status, vim.inspect(n.error))
+    eq(vim.inspect(q.result), vim.inspect(n.result), 'the alias answers as the argument does')
+    local args = { name = 'solo' }
+    agent.answer(store, 'node_find', args)
+    eq({ name = 'solo' }, args, 'the caller\'s table is not rewritten')
+    local m1 = agent.answer(store, 'mentions', { name = 'solo' })
+    local m2, s2 = agent.answer(store, 'mentions', { query = 'solo' })
+    eq('ok', s2, vim.inspect(m2.error))
+    eq(vim.inspect(m1.result), vim.inspect(m2.result), 'mentions takes node_find\'s spelling too')
+    local b, bs = agent.answer(store, 'node_find', { query = 'solo', name = 'other' })
+    eq('usage', bs); ok(b.error.reason:find('alias of `query`', 1, true), b.error.reason)
+    local same, ss = agent.answer(store, 'node_find', { query = 'solo', name = 'solo' })
+    eq('ok', ss, 'both spellings with ONE value are fine: ' .. vim.inspect(same.error))
+    -- published: the schema has the alias as its own property, graph_info lists it
+    local sch = agent.schema('node_find')
+    ok(sch.properties.name and sch.properties.name.description:find('alias of `query`', 1, true), vim.inspect(sch.properties.name))
+    eq({ 'query' }, sch.required, 'the alias is never required')
+    local gi = agent.answer(store, 'graph_info', {})
+    local row
+    for _, r in ipairs(gi.result) do if r.verb == 'node_find' then row = r end end
+    eq({ 'name -> query' }, row and row.aliases)
+end)
