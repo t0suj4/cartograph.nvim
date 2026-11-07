@@ -4158,9 +4158,10 @@ test('flowtype: a dynamic _G read sees the named global its literal key names (C
             end
         end
     end
-    -- (+nonfn since CART-1864: the dynamic read also holds EXT, "a global the host defines", and a member of unknown
-    -- code is unknown code — the one function is still Foo's g alone. Known literals naming no host global: CART-1865)
-    eq('m.lua::g@0 whole+nonfn', callee(3), 'the literal through a local: Foo alone')
+    -- (a key whose literals are all known and name no host global holds no "global the host defines" EXT — CART-1865:
+    -- Foo's g, whole, as `Foo.g()`. Through a parameter the key may hold anything a caller passes: +nonfn since CART-1864,
+    -- the dynamic read's EXT whose member is unknown code — the one function still Bar's g alone)
+    eq('m.lua::g@0 whole', callee(3), 'the literal through a local: Foo alone')
     eq('m.lua::g@1 whole+nonfn', callee(5), 'through a parameter: only the literal its caller passed')
 end)
 
@@ -4589,4 +4590,47 @@ test('flowtype: entry contracts grouped by file — at() equals the full scan, i
     assert(okc, sa)
     eq('s1', (sa['sub/a.lua:1:0'] or { rec = {} }).rec.id, 'the scoped site contract at its file')
     eq(nil, sb['sub/a.lua:1:0'], 'and not at another file of the scope')
+end)
+
+-- CART-1865: a dynamic `_G[k]` read whose key's literals are ALL known and name no host global reads what the named read
+-- of those names reads — no "global the host defines" EXT (whose members are unknown code, CART-1864): `local k = "Foo";
+-- _G[k]:m()` answers Foo's method, as `Foo:m()` does. Every key that may hold anything else keeps EXT: a computed string,
+-- a parameter, a field read, a reassignment from a call, a name the host defines.
+test('flowtype: a dynamic _G read with known literal keys naming no host global holds no host EXT (CART-1865)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local callrec = require 'cartograph.callrec'
+    local function v_of(tail)
+        local root = tree({ ['m.lua'] = table.concat({
+            'A = {}', 'function A.m(self) return "A" end', 'B = {}', 'function B.m(self) return "B" end',
+            'Foo = setmetatable({}, { __index = A })' }, '\n') .. '\n' .. tail })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'o:m' then return R.verdict(c), R end end
+    end
+    local function whole_A(v) return v and v.kind == 'exact' and not v.partial and #v.targets == 1 and tostring(v.targets[1]):match('A%.m') end
+    local named = v_of('local o = Foo\no:m()\n')
+    ok(whole_A(named), 'the named read: Foo\'s method, whole: ' .. vim.inspect(named))
+    local lit, R = v_of('local k = "Foo"\nlocal o = _G[k]\no:m()\n')
+    ok(whole_A(lit), 'the known literal key reads the same: ' .. vim.inspect(lit))
+    eq(1, R.stats.hgskip, 'one host-global EXT withheld')
+    -- every other key keeps EXT: no whole answer of Foo's method alone
+    for _, tail in ipairs({
+        'local k = "Fo" .. "o"\nlocal o = _G[k]\no:m()\n',                                      -- a computed string
+        'local function f(k) local o = _G[k]; o:m() end\nf("Foo")\n',                          -- a parameter
+        'local cfg = { name = "Foo" }\nlocal k = cfg.name\nlocal o = _G[k]\no:m()\n',           -- a field read
+        'local k = "Foo"\nif A then k = tostring(B) end\nlocal o = _G[k]\no:m()\n',             -- reassigned from a call
+        'local k = "print"\nlocal o = _G[k]\no:m()\n' }) do                                       -- a host global
+        local v, Rk = v_of(tail)
+        ok(not whole_A(v), 'keeps the host EXT: ' .. tail:gsub('\n', ' | ') .. ' => ' .. vim.inspect(v))
+        eq(0, Rk and Rk.stats.hgskip, 'and no host EXT withheld: ' .. tail:gsub('\n', ' | '))
+    end
+    -- a key fed by a SATURATED local (past CAP: what it held is lost) is not known
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local okc, _, Rs = pcall(v_of, 'local s = "Foo"\nif A then s = {} end\nif B then s = {} end\nif Foo then s = {} end\n'
+        .. 'local k = "Foo"\nif B then k = s end\nlocal o = _G[k]\no:m()\n')
+    flowtype.CAP = cap
+    ok(okc, tostring(Rs))
+    eq(0, Rs.stats.hgskip, 'a saturated local behind the key: the host EXT stays')
 end)

@@ -1026,7 +1026,13 @@ local function build(store, opts)
                 -- (`_G[k]`, k unknown: what a dynamic-key write stored, and a global the HOST defines — EXT. Not every
                 -- named global: on WoW `_G["Frame" .. i]` pulled every global's value set into each such read, and
                 -- the solve went 41 -> 632 s. The mirror of a STRICT global read, CART-1707)
-                pull(dst, ofp(o, '[]')); if G7.EXT then G7.eroot(dst, G7.EXT, G7.XARR and { 'host-global', G7.XLOC }) end
+                pull(dst, ofp(o, '[]'))
+                if G7.EXT then
+                    -- (deferred while the solve runs: a key whose literals are all known and name no host global gets
+                    -- none, CART-1865 — decided once CART-1823's literal rounds are done)
+                    if G7.HGDEFER then G7.HGPEND[#G7.HGPEND + 1] = { dst, G7.XLOC }
+                    else G7.eroot(dst, G7.EXT, G7.XARR and { 'host-global', G7.XLOC }) end
+                end
             elseif f == '[]' then
                 local m = ofield[o]
                 local named = G7.PKGL and G7.PKGL[o] and G7.PKGNAMED
@@ -1184,6 +1190,8 @@ local function build(store, opts)
     local funrets
     local clone_at -- (set below, with the walker: a per-site instance of a small closed function)
     G7.LOADK, G7.DYNL, G7.LDL, G7.STL, G7.DYNS, G7.LITV = {}, {}, {}, {}, {}, {}
+    -- (CART-1865: a dynamic `_G[k]` read's host-global EXT waits until its key's literals are known — G7.HGPEND)
+    G7.HGDEFER, G7.HGPEND, G7.HGSKIP = true, {}, 0
     -- (bindcall's `one`, hoisted — CART-1839, see G7.pull)
     function G7.bindone(i, r, o, args, rl, gen)
         local g = gen[i]
@@ -5160,6 +5168,62 @@ local function build(store, opts)
             solve()
         end
     end
+    -- ★ A KNOWN KEY NAMES NO HOST GLOBAL (CART-1865): a dynamic `_G[k]` read is also "a global the HOST defines" — EXT,
+    -- whose members are unknown code since CART-1864. Where the key's literals are ALL known and none names a host global
+    -- (`local k = "Foo"; _G[k].g()`), the host defines nothing it can read: it reads the named cells CART-1823 linked and
+    -- what dynamic writes stored, as the named read `Foo.g()` does. ALL KNOWN, conservatively, over the solved flow back
+    -- from the key: every port a literal, or a declared local that is no parameter (its values are the tree's own
+    -- assignments) — never a saturated port, a field read, a call's or an operator's result (a computed string), a
+    -- parameter (any caller, unknown code among them). (What such a closure holds is what literals and the tree's own local
+    -- assignments put there; a non-string among it names no global the host defines.) A HOST global: a profile
+    -- signature, a native, a library, a profile namespace, `_G`, `_VERSION`. Every other read gets its EXT now
+    do
+        G7.HGDEFER = false
+        local pend = G7.HGPEND
+        G7.HGPEND = {}
+        if #pend > 0 then
+            local keyof = {}
+            for _, a in ipairs(G7.DYNL) do if a[3] then keyof[a[3]] = a[2] end end
+            local keys = {}
+            for _, e in ipairs(pend) do local k = keyof[e[1]]; if k then keys[#keys + 1] = k end end
+            local lits = (#keys > 0 and next(G7.LITV)) and select(2, G7.strlits(keys)) or {}
+            local VARS, PARAMS, revall = {}, {}, nil
+            for _, l in pairs(G7.LOCALS) do for _, q in ipairs(l) do VARS[q] = true end end
+            for _, fp in pairs(fnports) do
+                for _, q in ipairs(fp.params or NOTHING) do PARAMS[q] = true end
+                if fp.vararg then PARAMS[fp.vararg] = true end
+            end
+            local function host(name)
+                return PSIGS[name] ~= nil or (G7.NATOBJ and G7.NATOBJ[name]) or G7.libname(name) or (G7.NSSET and G7.NSSET[name])
+                    or name == '_G' or name == '_VERSION'
+            end
+            local function closed(k)
+                if not revall then
+                    revall = {}
+                    for a, sa in pairs(succ) do for b in sit(sa) do local l = revall[b]; if not l then l = {}; revall[b] = l end; l[#l + 1] = a end end
+                end
+                local seen, q, i = { [k] = true }, { k }, 1
+                while i <= #q do
+                    local p = q[i]; i = i + 1
+                    if top[p] then return false end
+                    if not G7.LITV[p] then
+                        if not VARS[p] or PARAMS[p] then return false end
+                        for _, a in ipairs(revall[p] or NOTHING) do if not seen[a] then seen[a] = true; q[#q + 1] = a end end
+                    end
+                end
+                return true
+            end
+            for _, e in ipairs(pend) do
+                local k = keyof[e[1]]
+                local L = k and lits[k]
+                local known = L and L ~= true and next(L.set) ~= nil and closed(k)
+                if known then for name in pairs(L.set) do if host(name) then known = false; break end end end
+                if known then G7.HGSKIP = G7.HGSKIP + 1
+                else G7.eroot(e[1], G7.EXT, G7.XARR and { 'host-global', e[2] }) end
+            end
+            solve()
+        end
+    end
     -- ★ WHAT UNKNOWN CODE IS HANDED ESCAPES (CART-1707): load's chunk, a module outside the tree may write any field of
     -- it, set its metatable, keep it — closed over its fields and prototypes. Its field reads are tainted below, and
     -- it is prototype-incomplete; a function among them is called with EXT (G7.EXTCALL's call)
@@ -5991,7 +6055,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil, handlers = G7.HANDLERCALLS, hostcalls_hooks = G7.HOOKCALLS,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil, handlers = G7.HANDLERCALLS, hostcalls_hooks = G7.HOOKCALLS, hgskip = G7.HGSKIP,
         files = #files, ports = N, objects = NO, fedk_skips = G7.FEDKN }
     stats.vinstances = G7.VINSTN
     stats.unknown_code = G7.XESCN -- (objects handed to unknown code, with their fields and prototypes: CART-1707 / 1850)
