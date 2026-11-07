@@ -2532,3 +2532,53 @@ test('flowdump: pcall(error / assert, …) protects a synthetic function; anothe
     end
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- CART-1998 (flowpath FLOW-0075): what a module's chunk raises reaches the pcall protecting the code that requires it —
+-- `pcall(fc)`, fc doing `require("x")`, x raising an object. require is a copy of the module's result and the chunk is
+-- run by the program, so no call carried it: e held only the runtime-error string. The chunk now raises into its own port,
+-- which the require hands to the requiring function's; the dump lists the route in `require_raises`
+test('flowdump: a module chunk\'s raise reaches the pcall around its require; require_raises names it (CART-1998)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['lua/x.lua'] = 'local B = {}\nfunction B.m(self) return "B" end\nerror(setmetatable({}, { __index = B }))\n',
+        ['lua/quiet.lua'] = 'return {}\n',
+        ['m.lua'] = table.concat({
+            'local A = {}', 'function A.m(self) return "A" end',
+            'local a = setmetatable({}, { __index = A })',
+            'local function use(p) return p:m() end', 'use(a)',
+            'local function fc() return require("x") end',
+            'local ok, e = pcall(fc)',
+            'use(e)',
+            'local function fq() return require("quiet") end',
+            'local okq, eq_ = pcall(fq)',
+            'return eq_' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local callrec = require 'cartograph.callrec'
+    local v
+    for _, c in ipairs(store.data.calls) do if callrec.full(c) == 'p:m' then v = R.verdict(c) end end
+    local has = {}
+    for _, tg in ipairs(v and v.targets or {}) do has[tostring(tg):match('::(%a)%.m@') or ''] = true end
+    ok(v and has.A and has.B, 'e holds what x raised: B.m is a target of use(e): ' .. vim.inspect(v))
+    local D = vim.json.decode(R.dump)
+    local name = {}
+    for _, fn in ipairs(D.functions) do name[fn.id] = D.names.functions[fn.id + 1] end
+    local rr = {}
+    for _, e in ipairs(D.require_raises) do rr[#rr + 1] = name[e[1]] .. ' <- ' .. name[e[2]] .. ' @' .. e[3] .. ':' .. e[4] end
+    ok(vim.tbl_contains(rr, 'm.lua::fc@5 <- chunk:lua/x.lua @6:27'), 'fc requires x: ' .. vim.inspect(rr))
+    -- (the quiet module raises nothing of its own: x's object does not reach ITS requirer's pcall — per-chunk ports, not
+    -- one module-level set)
+    local V, label = {}, {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    for _, s in ipairs(D.sites) do label[s.id] = s.label end
+    local pc = {}
+    for _, fn in ipairs(D.functions) do
+        if name[fn.id] == 'chunk:m.lua' then for _, ins in ipairs(fn.body) do if ins[1] == 'pcall' then pc[#pc + 1] = ins end end end
+    end
+    eq(2, #pc, 'two pcalls in m.lua')
+    local caught = {}
+    for _, o in ipairs(V[pc[2][2][2]] or {}) do caught[#caught + 1] = label[o] end
+    for _, l in ipairs(caught) do ok(not l:find('lua/x.lua', 1, true), 'quiet\'s pcall catches nothing of x: ' .. vim.inspect(caught)) end
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

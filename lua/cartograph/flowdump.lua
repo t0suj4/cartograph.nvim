@@ -60,6 +60,8 @@
 --       set it off (escmore's fields / parameters); deterministic (the drain pops the lowest port),
 --     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
 --       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
+--     require_raises = [[fn, chunk fn, line, col] ...] — CART-1998: a require of a tree module in fn: what the module's
+--       chunk raises reaches fn's error port (the solve's route — require is a copy of the module's result, no call)
 --     positions = { files = [file ...], at = [[fn, index, file, line, col] ...] } — CART-1994 (flowpath FLOW-0074): the
 --       SOURCE POSITION of every dumped instruction that may run code (load / loadDyn / store / storeDyn / copyKeyed /
 --       call / pcall / op / resume): index 0-based in fn's body, file an index into `files` (a literal load's chunk is
@@ -1130,6 +1132,17 @@ function M.build(rec, X, sink)
     put('"functions":['); putl(fjson); put('],')
     put('"positions":{"files":'); put(jarr(posfiles))
     put(',"at":['); putl(posj); put(']},')
+    -- (CART-1998: [fn, chunk fn, line, col] — a require of a tree module, in fn at (line, col): what that module's chunk
+    -- raises reaches fn's error port in the solve, a route with no core instruction, require being a copy)
+    do
+        local rr, have = {}, {}
+        for _, k in ipairs(keys) do have[k] = true end
+        for _, e in ipairs(X.REQRAISE or {}) do
+            local ck = 'chunk:' .. tostring(e[2])
+            if e[1] and have[e[1]] and have[ck] then rr[#rr + 1] = jarr({ FN(e[1]), FN(ck), e[3], e[4] }) end
+        end
+        put('"require_raises":['); putl(rr); put('],')
+    end
     -- (PROGRAM_VARS, CART-1987: every variable the dump names that no function declares — one cell for the whole run;
     -- computed here, once every variable the dump names has been named)
     do

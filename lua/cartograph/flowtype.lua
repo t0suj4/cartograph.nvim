@@ -2151,6 +2151,23 @@ local function build(store, opts)
         if not p then p = new(); named[key] = p end
         return p
     end
+    -- ★ A CHUNK RAISES INTO ITS REQUIRER (CART-1998, flowpath FLOW-0075): what a file's top-level code raises goes to that
+    -- chunk's OWN port `e:chunk:<file>` — and from it to GERR, module-level code's, as before — so a `require` of the file
+    -- can hand it to the requiring code's error port: `pcall(fc)`, fc requiring a module that raises, catches it, as Lua
+    -- does at the first require. (Flow-insensitive: every require of the module, not only the first.) The dump keeps
+    -- GERR as each chunk's error port; the require's route has no core instruction (require is a copy of the module's
+    -- result), so it is listed in `require_raises` for the checker
+    G7.CHERR, G7.REQRAISE = {}, {}
+    function G7.cherr(file)
+        local p = G7.CHERR[file]
+        if not p then
+            p = port('e:chunk:' .. file)
+            G7.CHERR[file] = p
+            if G7.REC then G7.REC.errp[p] = true end
+            edge(p, gerr())
+        end
+        return p
+    end
     if G7.REC then G7.ISELF = port('s:init') end -- (init's `self`, by the walk too: CART-1825)
     G7.CHUNKSELF = {} -- (a file chunk's dump `self`: 'chunk:<file>' -> its walk port)
     -- ★ THE GLOBALS ARE THE FIELDS OF ONE TABLE, _G (CART-1707): a global's port IS field `name` of GOBJ, so `_G.q = b`,
@@ -2843,7 +2860,11 @@ local function build(store, opts)
             return nm == 'error'
         end
         -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
-        local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
+        local function curerr()
+            local f = fnstack[#fnstack]
+            if f then return f.err end
+            return G7.HOSTWALK and gerr() or G7.cherr(file) -- (a tree chunk's own port, CART-1998)
+        end
         WALKERR = curerr -- (a load this walk makes knows where the errors of an __index function it runs go)
         local MULTI = 4 -- (the values a `return f()` forwards)
         local function funtype(path, n)
@@ -3134,9 +3155,18 @@ local function build(store, opts)
             if (fname == 'require' or isbuiltin('require')) and argn[1] then
                 local l, cc = argn[1]:start()
                 local m = req_at[file .. ':' .. l .. ':' .. cc]
-                if m then return port('mod:' .. m) end
+                -- (what the module's chunk raises reaches this require's code, CART-1998)
+                local function chunkraise(mf)
+                    if not mf then return end
+                    edge(G7.cherr(mf), curerr())
+                    if G7.REC and G7.W then
+                        local nl, nc = n:start()
+                        G7.REQRAISE[#G7.REQRAISE + 1] = { G7.cur(), mf, nl + 1, nc }
+                    end
+                end
+                if m then chunkraise(m); return port('mod:' .. m) end
                 local mp = modport(argn[1])
-                if mp then return mp end
+                if mp then chunkraise(G7.MODFILE[txt(argn[1]:field('content')[1])]); return mp end
                 local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
                 -- (THROUGH AN ALIAS, CART-1993: only a module the tree or the library holds takes this path — req_at knows
                 -- only calls spelled `require`, so a root-level module is the by-value call below, a lost call: partial,
@@ -6837,7 +6867,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
