@@ -3147,6 +3147,23 @@ local function build(store, opts)
             -- (CART-1993: every builtin the walk recognises by spelling takes this route — load / loadstring / loadfile /
             -- dofile, require, getfenv / setfenv, newproxy, coroutine.*, debug.sethook, hooksecurefunc. A builtin with a
             -- by-value model — pcall, setmetatable, error's raise … — is modelled through an alias by bindcall already)
+            -- ★ THE IDENTITY TWIN (CART-1716, flowpath FLOW-0083 / CORE.md D34): a branch below that SPELLS a builtin into
+            -- its own instructions (`pcall`, `setmeta`, `cocreate`, `loadRaw` …) also records, in the dump only, the call
+            -- AS WRITTEN — `call <its result variables> <the callee expression's value> <the arguments in Lua order>`,
+            -- tagged native:twin — so every call expression has a `.call`, and a checker reading builtins by IDENTITY (the
+            -- dump's `natives`: a native site -> its builtin) steps it as the builtin its callee holds. Nothing is bound:
+            -- the solve is the spelled branch's; flowlabels skips a twin (its labels are the spelled instruction's)
+            local function twin(rl, al)
+                if not (G7.REC and G7.W) or not f then return end
+                local fv = expr(f)
+                local r = {}
+                for i, x in ipairs(type(rl) == 'table' and rl or { rl }) do r[i] = x end
+                if type(rl) == 'table' then r.rest = rl.rest end
+                local a = {}
+                for i, x in ipairs(al) do a[i] = x end
+                a.spread = al.spread
+                G7.REC.ins(G7.cur(), { 'call', r, fv, a }, 'native:twin')
+            end
             local function modport(a)
                 local s = a and a:type() == 'string' and a:field('content')[1]
                 local mf = s and modfile[txt(s)]
@@ -3156,6 +3173,7 @@ local function build(store, opts)
                 local l, cc = argn[1]:start()
                 local m = req_at[file .. ':' .. l .. ':' .. cc]
                 -- (what the module's chunk raises reaches this require's code, CART-1998)
+                local function rtwin(mp_) twin({ mp_ }, { expr(argn[1]) }) end
                 local function chunkraise(mf)
                     if not mf then return end
                     edge(G7.cherr(mf), curerr())
@@ -3164,9 +3182,9 @@ local function build(store, opts)
                         G7.REQRAISE[#G7.REQRAISE + 1] = { G7.cur(), mf, nl + 1, nc }
                     end
                 end
-                if m then chunkraise(m); return port('mod:' .. m) end
+                if m then chunkraise(m); rtwin(port('mod:' .. m)); return port('mod:' .. m) end
                 local mp = modport(argn[1])
-                if mp then chunkraise(G7.MODFILE[txt(argn[1]:field('content')[1])]); return mp end
+                if mp then chunkraise(G7.MODFILE[txt(argn[1]:field('content')[1])]); rtwin(mp); return mp end
                 local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
                 -- (THROUGH AN ALIAS, CART-1993: only a module the tree or the library holds takes this path — req_at knows
                 -- only calls spelled `require`, so a root-level module is the by-value call below, a lost call: partial,
@@ -3181,12 +3199,13 @@ local function build(store, opts)
                 for _, a in ipairs(argn) do expr(a) end
                 -- (`require "io"` IS the io library — package.loaded holds it, CART-1797: the result had been an empty
                 -- port, and `require("io").zz = a` stored into nothing, flowpath's l02 / l36-l39 / l42, CART-1811)
-                if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
+                if s0 and G7.libname(txt(s0)) then rtwin(G7.gport(txt(s0))); return G7.gport(txt(s0)) end
                 local xp = new()
                 if not (s0 and G7.profmod(txt(s0))) then
                     local c = s0 and G7.CON.at(file).mod[txt(s0)] -- (a MODULE contract: its own EXT, CART-1861)
                     G7.eroot(xp, c and G7.extc(c) or EXT, G7.XARR and { 'require', key_of(n) })
                 end
+                rtwin(xp)
                 return xp
             end
             ::notrequire::
@@ -3213,6 +3232,7 @@ local function build(store, opts)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
                     MTSTORES[#MTSTORES + 1] = { tp, mtp } -- (it was never filled: a parked handler port was never released)
                     G7.GCPEND[#G7.GCPEND + 1] = { tp, gerr() } -- (a finalizer runs with the object, CART-1707: deferred)
+                    twin({ tp }, { tp, mtp })
                 end
                 return tp
             end) end
@@ -3303,7 +3323,7 @@ local function build(store, opts)
             -- keys / loadRaw. As a host call it returned the declared type, not t's contents: a whole exact the run
             -- falsifies, CART-1766)
             if fname == 'next' and argn[1] and gbl() then
-                local tp = expr(argn[1]); if argn[2] then expr(argn[2]) end
+                local tp = expr(argn[1]); local k2 = argn[2] and expr(argn[2]) or nil
                 local kp = field(tp, '{k}')
                 G7.RAWLOAD = true
                 local vp = field(tp, '[]')
@@ -3311,8 +3331,10 @@ local function build(store, opts)
                 if want then
                     local out = { kp, vp }
                     for k = 3, want do out[k] = new() end
+                    twin(out, { tp, k2 })
                     return out
                 end
+                twin({ kp }, { tp, k2 })
                 return kp
             end
             if fname == 'rawget' and argn[1] and gbl() then
@@ -3325,6 +3347,7 @@ local function build(store, opts)
                 G7.RAWLOAD = key == '[]' or nil
                 local dst = field(tp, key)
                 G7.RAWLOAD = nil
+                twin({ dst }, { tp, kp })
                 return dst
             end
             if fname == 'rawset' and argn[3] and gbl() then
@@ -3338,6 +3361,7 @@ local function build(store, opts)
                 storec(tp, key, vp)
                 G7.RAWSTORE = nil
                 storec(tp, '{k}', kp)
+                twin({ tp }, { tp, kp, vp })
                 return tp
             end
             -- ★ hooksecurefunc([t,] "name", hook) — WoW's API — REPLACES t[name] by a WRAPPER: a function that calls the
@@ -3414,6 +3438,7 @@ local function build(store, opts)
                     edge(field(mt, '__metatable'), x)
                     G7.ins({ 'getmeta', x, y, '__metatable' })
                     G7.strmt_into(y, x)
+                    twin({ x }, { y })
                     return x
                 end)
             end
@@ -3445,6 +3470,7 @@ local function build(store, opts)
             -- r…. r1 also holds the caught error, where the core's resume puts it: w's error port is a superset)
             if (fname == 'coroutine.wrap' or isbuiltin('coroutine.wrap')) then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
+                local wtwin = fp -- (CART-1716: the twin's argument)
                 local id = 'ts:wrap:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
                 local w = newobj(id)
                 local wp = new()
@@ -3474,6 +3500,7 @@ local function build(store, opts)
                     G7.REC.ins(id, { 'resume', out, tco, ps }, 'divergence:coroutine')
                     G7.REC.ins(id, { 'error', rs[1] })
                 end
+                twin({ wp }, { wtwin })
                 return wp
             end) end
             if (fname == 'coroutine.create' or isbuiltin('coroutine.create')) then return G7.mu(function ()
@@ -3484,6 +3511,7 @@ local function build(store, opts)
                 addobj(tp, th)
                 storec(tp, '\1co', fp)
                 G7.cochan(tp, MULTI)
+                twin({ tp }, { fp })
                 return tp
             end) end
             -- (a yield's / resume's operands from argn[j0]: a LAST `...` spreads, a last call hands every value — its rest
@@ -3521,6 +3549,12 @@ local function build(store, opts)
                 edge(G7.cerrch(), rerr)
                 edge(rerr, fl[1])
                 callc(field(cp, '\1co', true), aps, fl, nil, rerr)
+                do -- (the twin: the coroutine first, then the arguments — a spread one position on)
+                    local ta = { cp }
+                    for _, ap in ipairs(aps) do ta[#ta + 1] = ap end
+                    if aps.spread then ta.spread = aps.spread + 1 end
+                    twin(out, ta)
+                end
                 if want then return out end
                 return out[1]
             end) end
@@ -3531,6 +3565,7 @@ local function build(store, opts)
                 for k = 1, want or 1 do out[k] = new(); edge(gresarg(), out[k]) end
                 if rest then out.rest = #out end -- (forwarded: the dump marks it, CART-1996 — every resume argument is in each)
                 G7.ins({ 'yield', out, ys })
+                twin(out, ys)
                 if want then return out end
                 return out[1]
             end) end
@@ -3606,6 +3641,17 @@ local function build(store, opts)
                     end)
                 end
                 local ptag = hostcallee and 'gap:host-pcall' or nil
+                -- (the twin: pcall(f, …) / xpcall(f, h, …) as written — f the callee EXPRESSION's value, also for
+                -- pcall(error, x), whose spelled instruction protects CART-1995's synthetic function)
+                local hvtwin -- (xpcall's handler value, set by handler() below, for the twin: CART-1716)
+                local function ptwin(rl, fv)
+                    local ta = { herr and expr(cn) or fv }
+                    if fname == 'xpcall' then ta[2] = hvtwin or new() end
+                    local base = #ta
+                    for _, ap in ipairs(aps) do ta[#ta + 1] = ap end
+                    if aps.spread then ta.spread = aps.spread + base end
+                    twin(rl, ta)
+                end
                 -- (xpcall's HANDLER runs with the error result, and its returns join the results after the status — in the
                 -- IR over existing instructions, CART-1772: the pcall, `call [hr] h [r1]`, `copy r1 hr`. r1 also holds the
                 -- error itself, where the core's pcall puts it: a superset. As a statement, `xpcall(f, h, x)` had called
@@ -3613,6 +3659,7 @@ local function build(store, opts)
                 local function handler(r1)
                     if fname ~= 'xpcall' or not argn[2] then return end
                     local hv, hr = expr(argn[2]), new()
+                    hvtwin = hv
                     G7.ins({ 'call', { hr }, hv, { r1 } })
                     G7.callany(hv, { r1 }, hr, nil, curerr())
                     G7.ins({ 'copy', r1, hr })
@@ -3629,6 +3676,7 @@ local function build(store, opts)
                     G7.ins({ 'pcall', out, fv, aps }, ptag)
                     G7.callany(fv, aps, fl, nil, perr)
                     if out[2] then edge(perr, out[2]); handler(out[2]) end
+                    ptwin(out, fv)
                     return out
                 end
                 local res = new()
@@ -3637,6 +3685,7 @@ local function build(store, opts)
                 G7.ins({ 'pcall', r1 and { res, r1 } or { res }, fv, aps }, ptag)
                 G7.callany(fv, aps, res, nil, perr)
                 if r1 then edge(res, r1); edge(perr, r1); handler(r1) end
+                ptwin(r1 and { res, r1 } or { res }, fv)
                 return res
             end) end
             if fname == 'table.insert' and argn[1] then
@@ -4280,6 +4329,16 @@ local function build(store, opts)
                         vp = field(tp, fname == 'ipairs' and '#' or '[]')
                         G7.RAWLOAD = nil
                         if fname == 'pairs' then kp = field(tp, '{k}') end
+                        -- (the identity twin of `pairs(t)` / `ipairs(t)`, at the call's own position — CART-1716)
+                        if G7.REC and G7.W then
+                            local R = G7.REC
+                            local pl, pc = R.pl, R.pc
+                            local l0, c0 = it:start()
+                            R.pl, R.pc = l0 + 1, c0
+                            local fv = expr(it:field('name')[1])
+                            R.ins(G7.cur(), { 'call', { new(), new(), new() }, fv, { tp } }, 'native:twin')
+                            R.pl, R.pc = pl, pc
+                        end
                     else
                         -- ★ ANY OTHER ITERATOR IS A CALL (CART-1643): `for a, b in f, s, c` calls f(s, c) — then f(s, a) —
                         -- and a, b are its values; `for x in n:iter_children()` / `s:gmatch(p)` first evaluate the
@@ -6865,7 +6924,7 @@ local function build(store, opts)
         R.dump = FD.build(G7.REC, {
             N = N, NO = NO, each = each, top = top, tainted = tainted, tfrom = TFROM, obinfo = obinfo, fnports = fnports,
             ofield = ofield, okeys = okeys, TNAME = TNAME, hostkind = G7.hostkind, ANYSETFENV = G7.ANYSETFENV,
-            MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
+            MODE = open and 'open' or 'closed', NATIVE = G7.NATIVE, NATKEYS = G7.NATKEYS, NATOBJ = G7.NATOBJ, LOADCONTRACT = G7.ANYLOAD and not G7.EXP['loaded-globals'] or nil, EROOTC = G7.EROOTC, REACH = G7.REACH, OUTWD = G7.OUTWD, HOSTM = G7.HOSTM, HOSTUSED = G7.HOSTUSED, GOBJ = G7.ENVL[1].GOBJ, GPORT = G7.ENVL[1].GPORT, ENVL = G7.ENVL, EXT = EXT, GERR = GERR,
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,

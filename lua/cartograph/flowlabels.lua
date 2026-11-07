@@ -81,9 +81,12 @@ function M.compute(D)
     local hmodel = {}
     for _, e in ipairs(D.contracts.host_models or {}) do for _, g in ipairs(e[2] or {}) do hmodel[g] = true end end
     local hcall = {} -- (fn -> { [index] = true }: the calls the host makes to a registered handler, CART-1955)
+    local twin = {} -- (fn -> { [index] = true }: a spelled builtin's identity twin, CART-1716 — its labels are the
+    -- spelled instruction's; read as a call it would add the callee's global read (GN) to results it shares)
     for _, f in ipairs(D.functions) do
         for _, t in ipairs(f.tags or {}) do
             if t[2] == 'contract:host-handlers' then hcall[f.id] = hcall[f.id] or {}; hcall[f.id][t[1]] = true end
+            if t[2] == 'native:twin' then twin[f.id] = twin[f.id] or {}; twin[f.id][t[1]] = true end
         end
     end
     local F = {}
@@ -470,7 +473,8 @@ function M.compute(D)
             -- (escaped function: anything escaped reaches its parameters; a coroutine function's, what resume passes in)
             if escfn[g] then for _, p in ipairs(f.params) do setv(p, ESC) end end
             if cofns[g] then for _, p in ipairs(f.params) do setv(p, Lchan.rin) end end
-            for k, ins in ipairs(f.body) do CUR = { g, k - 1 }; RULE[ins[1]](g, ins) end
+            local tw = twin[g]
+            for k, ins in ipairs(f.body) do if not (tw and tw[k - 1]) then CUR = { g, k - 1 }; RULE[ins[1]](g, ins) end end
             CUR = nil
             for _, c in ipairs(callees[g]) do orinto(Lerr, g, Lerr[c] or 0) end
         end

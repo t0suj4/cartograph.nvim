@@ -2627,3 +2627,117 @@ test('flowdump: the producer commit from git, CARTOGRAPH_COMMIT, a commit file, 
         vim.fn.delete(tf, 'rf')
     end
 end)
+
+-- CART-1716 (flowpath FLOW-0083, CORE.md D34): builtins by IDENTITY, cartograph's half. Every call expression has a
+-- `.call` in the dump — a builtin spelled into its own instructions (`pcall`, `setmeta`, `cocreate`, `loadRaw` …) also
+-- records its call AS WRITTEN (tag native:twin: its result variables, the callee expression's value, the arguments in
+-- Lua order) — and `natives` maps each host builtin's site to its name, so a checker steps a `.call` whose callee holds a
+-- native site as that builtin. The twin binds nothing (the solve is the spelled branch's) and flowlabels skips it.
+test('flowdump: every call expression has a .call; spelled builtins add an identity twin; natives names each native site (CART-1716)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local t = {}',
+        'local mt = { __metatable = 1 }',
+        'local ok, e = pcall(function () end)',
+        'local ok2 = xpcall(function () end, function () end)',
+        'setmetatable(t, mt)',
+        'local m = getmetatable(t)',
+        'local v = rawget(t, "k")',
+        'rawset(t, "k", 1)',
+        'local co = coroutine.create(function (x) coroutine.yield(x) end)',
+        'coroutine.resume(co, 1)',
+        'local w = coroutine.wrap(function () end)',
+        'local function g() error(t) end',
+        'assert(t, "m")',
+        'local p = pcall',
+        'p(function () end)',
+        'local n = next(t)',
+        'for k in pairs(t) do end',
+        'local x = require("nothere")',
+        'local ok3, e3 = pcall(error, t)',
+        'return e, m, v, w, n, x, e3' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local F, V, label = {}, {}, {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn end
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    for _, s in ipairs(D.sites) do label[s.id] = s.label end
+    -- the natives table: each entry's site is labelled native:<name>
+    local natname = {}
+    for _, e in ipairs(D.natives) do eq('native:' .. e[2], label[e[1]], 'a native site\'s label names it'); natname[e[1]] = e[2] end
+    for _, nm in ipairs({ 'pcall', 'setmetatable', 'getmetatable', 'rawget', 'rawset', 'coroutine.create', 'coroutine.resume', 'coroutine.yield', 'error' }) do
+        local found = false
+        for _, e in ipairs(D.natives) do if e[2] == nm then found = true end end
+        ok(found, 'natives names ' .. nm)
+    end
+    -- every call expression has a `.call` at its position
+    local callat = {}
+    for _, e in ipairs(D.positions.at) do if F[e[1]].body[e[2] + 1][1] == 'call' then callat[e[4] .. ':' .. e[5]] = true end end
+    local tree_ = vim.treesitter.get_string_parser(SRC, 'lua'):parse()[1]
+    local q = vim.treesitter.query.parse('lua', '(function_call) @c')
+    local miss = {}
+    for _, node in q:iter_captures(tree_:root(), SRC) do
+        local l, c = node:start()
+        if not callat[(l + 1) .. ':' .. c] then miss[#miss + 1] = vim.treesitter.get_node_text(node, SRC) end
+    end
+    eq({}, miss, 'every call expression has a .call')
+    -- the twins: tagged, and the callee of each holds the native its spelling names
+    local twins = {}
+    for _, fn in ipairs(D.functions) do
+        for _, tg in ipairs(fn.tags or {}) do
+            if tg[2] == 'native:twin' then
+                local ins = fn.body[tg[1] + 1]
+                eq('call', ins[1])
+                for _, o in ipairs(V[ins[3]] or {}) do if natname[o] then twins[natname[o]] = (twins[natname[o]] or 0) + 1 end end
+            end
+        end
+    end
+    for _, nm in ipairs({ 'pcall', 'xpcall', 'setmetatable', 'getmetatable', 'rawget', 'rawset', 'coroutine.create', 'coroutine.resume',
+        'coroutine.yield', 'coroutine.wrap', 'next', 'pairs', 'require' }) do
+        ok(twins[nm], 'a twin calls the native ' .. nm .. ': ' .. vim.inspect(twins))
+    end
+    -- pcall(error, t)'s twin passes the native error itself (its spelled pcall protects CART-1995's synthetic function)
+    local errarg = false
+    for _, fn in ipairs(D.functions) do
+        for _, tg in ipairs(fn.tags or {}) do
+            local ins = tg[2] == 'native:twin' and fn.body[tg[1] + 1]
+            if ins and ins[4][1] then
+                local callee, first = {}, {}
+                for _, o in ipairs(V[ins[3]] or {}) do callee[natname[o] or ''] = true end
+                for _, o in ipairs(V[ins[4][1]] or {}) do first[natname[o] or ''] = true end
+                if callee.pcall and first.error then errarg = true end
+            end
+        end
+    end
+    ok(errarg, 'pcall(error, t)\'s twin: the native error as its first argument')
+    -- xpcall(f, h)'s twin: the handler is its second argument
+    local hgot = false
+    for _, fn in ipairs(D.functions) do
+        for _, tg in ipairs(fn.tags or {}) do
+            local ins = tg[2] == 'native:twin' and fn.body[tg[1] + 1]
+            if ins then
+                local callee = {}
+                for _, o in ipairs(V[ins[3]] or {}) do callee[natname[o] or ''] = true end
+                if callee.xpcall and ins[4][2] then
+                    for _, o in ipairs(V[ins[4][2]] or {}) do if tostring(label[o]):find('xpcall#cb', 1, true) or tostring(label[o]):find('m.lua::', 1, true) then hgot = true end end
+                end
+            end
+        end
+    end
+    ok(hgot, 'xpcall(f, h)\'s twin passes the handler')
+    -- flowlabels skips a twin: the pcall's results carry no GN from the twin's global read of `pcall`
+    local gnbit
+    for i, c in ipairs(D.labels.clauses) do if c == 'GN' then gnbit = i - 1 end end
+    local L = {}
+    for _, e in ipairs(D.labels.v) do L[e[1]] = e[2] end
+    local pres
+    for _, fn in ipairs(D.functions) do
+        for _, ins in ipairs(fn.body) do if ins[1] == 'pcall' and not pres then pres = ins[2][1] end end
+    end
+    ok(gnbit and pres, 'the GN clause and a pcall')
+    eq(0, require('bit').band(L[pres] or 0, require('bit').lshift(1, gnbit)), 'the pcall\'s status carries no GN from its twin')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

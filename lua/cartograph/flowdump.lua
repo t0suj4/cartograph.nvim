@@ -62,6 +62,12 @@
 --       set it off (escmore's fields / parameters); deterministic (the drain pops the lowest port),
 --     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
 --       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
+--     natives = [[site, name] ...] — CART-1716 (flowpath FLOW-0083, CORE.md D34): each host builtin's site in the initial
+--       globals and its name (the site label after `native:` — pcall, setmetatable, coroutine.create, table.insert …).
+--       Every call expression has a `.call`: a builtin the translation SPELLS (pcall, setmeta, getmeta, cocreate, resume,
+--       yield, loadRaw, storeRaw, keys …) also records its call as written — tag `native:twin`, its result variables, the
+--       callee expression's value, the arguments in Lua order — so a checker reading builtins by identity steps it as the
+--       builtin its callee holds. A twin binds nothing in the solve; flowlabels skips it
 --     require_raises = [[fn, chunk fn, line, col] ...] — CART-1998: a require of a tree module in fn: what the module's
 --       chunk raises reaches fn's error port (the solve's route — require is a copy of the module's result, no call)
 --     positions = { files = [file ...], at = [[fn, index, file, line, col] ...] } — CART-1994 (flowpath FLOW-0074): the
@@ -1161,6 +1167,18 @@ function M.build(rec, X, sink)
     put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')
     put('"sites":['); putl(sj); put('],')
     put('"functions":['); putl(fjson); put('],')
+    -- (NATIVES, CART-1716 / flowpath FLOW-0083 / CORE.md D34: each host builtin's site in the initial globals and the builtin
+    -- it is — the name its site label carries after `native:` (`pcall`, `coroutine.create`, `table.insert`) — in the
+    -- natives' own order. A checker reading builtins by identity steps a `.call` whose callee holds such a site as that
+    -- builtin; every call expression has one (a spelled builtin's twin is tagged native:twin))
+    do
+        local nj = {}
+        for _, k in ipairs(X.NATKEYS or {}) do
+            local o = X.NATOBJ and X.NATOBJ[k]
+            if o then nj[#nj + 1] = jarr({ o, (k:gsub('#', '.')) }) end
+        end
+        put('"natives":['); putl(nj); put('],')
+    end
     put('"positions":{"files":'); put(jarr(posfiles))
     put(',"at":['); putl(posj); put(']},')
     -- (CART-1998: [fn, chunk fn, line, col] — a require of a tree module, in fn at (line, col): what that module's chunk
