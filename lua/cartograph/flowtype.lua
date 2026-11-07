@@ -4213,16 +4213,41 @@ local function build(store, opts)
         -- (the RECORDER's state is the enclosing walk's when this one is NESTED — a literal load's chunk, CART-1796: it was
         -- left off, and every instruction after `loadstring("…")` in the caller went missing from the dump — the checker
         -- certified a smaller program than the one that runs, CART-1808)
-        local rw0, rf0, rk0, re0, rc0 = G7.W, G7.FNS, G7.CK, expr, callv
-        if G7.REC then
+        local rw0, rf0, rk0, re0, rc0, rs0 = G7.W, G7.FNS, G7.CK, expr, callv, stmt
+        local R = G7.REC
+        if R then
             G7.W, G7.FNS, G7.CK = true, fnstack, 'chunk:' .. file
-            local e0, c0 = expr, callv -- (an argument evaluated inside a hand-translated builtin is the program's)
-            expr = function (x) local m = G7.M; G7.M = 0; local a, b = e0(x); G7.M = m; return a, b end
-            callv = function (x, w) local m = G7.M; G7.M = 0; local a, b = c0(x, w); G7.M = m; return a, b end
+            local e0, c0, s0 = expr, callv, stmt -- (an argument evaluated inside a hand-translated builtin is the program's)
+            -- (and each sets the SOURCE POSITION its instructions record, restored on return — CART-1994: an expression's
+            -- start; a statement's for what it emits itself, a store's target among them. Each restores what it found, so
+            -- after the walk — what the solve emits, init — there is no position)
+            expr = function (x)
+                local m, pl, pc, pf = G7.M, R.pl, R.pc, R.pf
+                local l, c = x:start()
+                G7.M, R.pl, R.pc, R.pf = 0, l + 1, c, file
+                local a, b = e0(x)
+                G7.M, R.pl, R.pc, R.pf = m, pl, pc, pf
+                return a, b
+            end
+            callv = function (x, w)
+                local m, pl, pc, pf = G7.M, R.pl, R.pc, R.pf
+                local l, c = x:start()
+                G7.M, R.pl, R.pc, R.pf = 0, l + 1, c, file
+                local a, b = c0(x, w)
+                G7.M, R.pl, R.pc, R.pf = m, pl, pc, pf
+                return a, b
+            end
+            stmt = function (x)
+                local pl, pc, pf = R.pl, R.pc, R.pf
+                local l, c = x:start()
+                R.pl, R.pc, R.pf = l + 1, c, file
+                s0(x)
+                R.pl, R.pc, R.pf = pl, pc, pf
+            end
         end
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
-        if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv = rw0, rf0, rk0, re0, rc0 end
+        if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv, stmt = rw0, rf0, rk0, re0, rc0, rs0 end
         G7.WALKFILE = wf0
         G7.CHUNK = saved
     end

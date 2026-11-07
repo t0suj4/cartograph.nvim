@@ -54,6 +54,12 @@
 --       set it off (escmore's fields / parameters); deterministic (the drain pops the lowest port),
 --     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
 --       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
+--     positions = { files = [file ...], at = [[fn, index, file, line, col] ...] } — CART-1994 (flowpath FLOW-0074): the
+--       SOURCE POSITION of every dumped instruction that may run code (load / loadDyn / store / storeDyn / copyKeyed /
+--       call / pcall / op / resume): index 0-based in fn's body, file an index into `files` (a literal load's chunk is
+--       its `load:<file>:<line>:<col>` label, its lines the loaded text's), line 1-based, col 0-based — an expression's
+--       start; a store's, its statement's; an operator's handlers share the expression. init's synthetic instructions
+--       and what the solve emits after the walk have none
 --     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,
 --       ins = [fn, index] | null — the CALL instruction the answer is about: index is 0-based in that function's dumped
 --       body; null when the walk emitted none (CART-1725, flowpath C.4); a partial one's ptport (the tainted node it read)
@@ -192,10 +198,21 @@ function M.recorder()
         if not l then l = {}; R.fns[key] = l; R.forder[#R.forder + 1] = key end
         return l
     end
+    -- (SOURCE POSITIONS, CART-1994: the walk keeps R.pl / R.pc / R.pf — the 1-based line, 0-based column and file of
+    -- the expression (or statement) it is lowering — and an instruction that may RUN CODE records it: flat triples
+    -- { recorder index, line * 2^20 + col, file } per function)
+    R.pos = {}
+    local CODEFUL = { load = true, store = true, call = true, pcall = true, op = true, copyKeyed = true, resume = true }
     function R.ins(key, ins, tag)
         local l = R.list(key)
         l[#l + 1] = ins
         if tag then local t = R.tags[key]; if not t then t = {}; R.tags[key] = t end; t[#t + 1] = { #l - 1, tag } end
+        if R.pl and CODEFUL[ins[1]] then
+            local ps = R.pos[key]
+            if not ps then ps = {}; R.pos[key] = ps end
+            local n = #ps
+            ps[n + 1], ps[n + 2], ps[n + 3] = #l - 1, R.pl * 1048576 + R.pc, R.pf
+        end
     end
     function R.gap(key, kind, vars, at) R.gaps[#R.gaps + 1] = { fn = key, kind = kind, vars = vars or {}, at = at } end
     return R
@@ -524,6 +541,15 @@ function M.build(rec, X, sink)
     for name in pairs(byname) do if not rec.fns[name] then keys[#keys + 1] = name end end
     table.sort(keys)
     local maps = {} -- (a function's recorder index -> its DUMPED body index: what an answer's `ins` names, CART-1725)
+    -- (CART-1994: [fn, index, file, line, col] per dumped instruction that may run code (the recorder chose them), in the
+    -- order emitted — not in LD: the labels do not read positions)
+    local posj, posfiles, posfi = {}, {}, {}
+    local function fileidx(f)
+        f = tostring(f)
+        local i = posfi[f]
+        if not i then posfiles[#posfiles + 1] = f; i = #posfiles - 1; posfi[f] = i end
+        return i
+    end
     for _, name in ipairs(keys) do
         local body, tags, map = {}, {}, {}
         CUR = {}
@@ -533,6 +559,17 @@ function M.build(rec, X, sink)
             if e then body[#body + 1] = e; map[i - 1] = #body - 1 end
         end
         for _, t in ipairs(rec.tags[name] or {}) do if map[t[1]] then tags[#tags + 1] = { map[t[1]], t[2] } end end
+        do
+            local ps = rec.pos and rec.pos[name]
+            for k = 1, ps and #ps or 0, 3 do
+                local di = map[ps[k]]
+                if di then
+                    local pk = ps[k + 1]
+                    local col = pk % 1048576
+                    posj[#posj + 1] = jarr({ FN(name), di, fileidx(ps[k + 2]), (pk - col) / 1048576, col })
+                end
+            end
+        end
         -- (a store / setmeta through a SATURATED base: the solve follows it into no object, and the escape rule covers
         -- every object such a base may hold but _G, which never escapes — the contract, named so the checker can say
         -- so: AceLibrary's crawlReplace `setmetatable(t, getmetatable(t))` over every reachable table, CART-1736)
@@ -1060,6 +1097,8 @@ function M.build(rec, X, sink)
     put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')
     put('"sites":['); putl(sj); put('],')
     put('"functions":['); putl(fjson); put('],')
+    put('"positions":{"files":'); put(jarr(posfiles))
+    put(',"at":['); putl(posj); put(']},')
     -- (PROGRAM_VARS, CART-1987: every variable the dump names that no function declares — one cell for the whole run;
     -- computed here, once every variable the dump names has been named)
     do

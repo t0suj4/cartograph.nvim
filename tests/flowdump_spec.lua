@@ -2346,3 +2346,50 @@ test('flowdump: a spelling-recognised builtin through a local alias translates a
     local ra = rv(A_, 'x.lua')
     ok(type(ra) == 'table' and ra[2] == true, 'a module the walk cannot name through an alias: partial, never unknown: ' .. vim.inspect(ra))
 end)
+
+-- CART-1994 (flowpath FLOW-0074, the hidden-calls map): an instruction that may RUN CODE — load / loadDyn / store /
+-- storeDyn / copyKeyed / call / pcall / op / resume — carries the source position of what it lowers, so an answer about
+-- it (which handlers a load may start) can be placed at the access, not only in its function. A side table
+-- `positions = { files, at = [[fn, index, file, line, col]] }`: line 1-based, col 0-based (an answer's `call` too);
+-- an expression's start, a store's statement's. init's synthetic instructions have none.
+test('flowdump: per-instruction source positions for every instruction that may run code (CART-1994)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local t = setmetatable({}, { __index = function (s, k) return k end })',
+        'local v = t.x',
+        't.y = v',
+        'local function f(a) return a + 1 end',
+        'print(f(v))',
+        'local k = "z"; local w = t[k]',
+        'local w2 = f(1)' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    eq({ 'm.lua' }, D.positions.files)
+    local F, NAME = {}, {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn; NAME[fn.id] = D.names.functions[fn.id + 1] end
+    local CODE = { load = true, loadDyn = true, store = true, storeDyn = true, copyKeyed = true, call = true, pcall = true, op = true, resume = true }
+    local at, seen = {}, {}
+    for _, e in ipairs(D.positions.at) do
+        local ins = F[e[1]].body[e[2] + 1]
+        ok(CODE[ins[1]], 'only an instruction that may run code: ' .. vim.inspect(ins))
+        ok(not seen[e[1] .. ':' .. e[2]], 'one position per instruction'); seen[e[1] .. ':' .. e[2]] = true
+        local k = ins[1] .. '@' .. e[4] .. ':' .. e[5]
+        at[k] = (at[k] or 0) + 1
+    end
+    -- every such instruction outside init is placed
+    for _, fn in ipairs(D.functions) do
+        for k, ins in ipairs(fn.body) do
+            if CODE[ins[1]] and NAME[fn.id] ~= 'init' then ok(seen[fn.id .. ':' .. (k - 1)], 'placed: ' .. NAME[fn.id] .. ' ' .. vim.inspect(ins)) end
+        end
+    end
+    ok(at['load@2:10'], 't.x: the load at its expression: ' .. vim.inspect(at))
+    ok(at['store@3:0'], 't.y = v: the store at its statement')
+    ok(at['call@5:6'], 'f(v): the call at its expression')
+    eq(2, at['op@4:27'], 'a + 1: both operands\' __add at the expression')
+    ok(at['loadDyn@6:25'], 't[k]: the dynamic load')
+    ok(at['call@7:11'], 'f(1) in a declaration\'s value list: the call at its expression, not the statement')
+    for _, e in ipairs(D.positions.at) do ok(NAME[e[1]] ~= 'init', 'init (synthetic, after the walk) has no position') end
+end)
