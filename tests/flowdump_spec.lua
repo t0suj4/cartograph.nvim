@@ -2271,3 +2271,78 @@ test('flowdump: a WoW hooksecurefunc target is CALLED by the host — the wrappe
     eq(0, R3.stats.hostcalls_hooks, 'undeclared: no host call')
     ok(not D3.contracts.clauses['host-handlers'], 'and no clause')
 end)
+
+-- CART-1993: every builtin the walk recognises by SPELLING is recognised through a local alias too — `local cc =
+-- coroutine.create`, `local ls = loadstring`, `local err = error` … (GALIAS: a local declared from a global, or from a
+-- member of a global table, never assigned in its file). Before, such a call was the builtin reached by VALUE: a lost
+-- call (sound, tainted) or, with no native, an ordinary call. Each aliased form must translate EXACTLY as the direct one
+-- — the same builtin instructions, synthetic functions, host tags, gaps and the same verdict at p:m().
+test('flowdump: a spelling-recognised builtin through a local alias translates as the direct call (CART-1993)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local callrec = require 'cartograph.callrec'
+    local function sig(src)
+        local D, R = dump(src)
+        local ops, gaps, synth, tags = {}, {}, 0, {}
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if ({ cocreate = 1, resume = 1, yield = 1, setmeta = 1 })[i[1]] then ops[i[1]] = (ops[i[1]] or 0) + 1 end
+            end
+            for _, t in ipairs(F.tags or {}) do if t[2]:find('^host:') then tags[t[2]] = (tags[t[2]] or 0) + 1 end end
+        end
+        for _, g in ipairs(D.gaps) do gaps[g.kind] = (gaps[g.kind] or 0) + 1 end
+        for _, n in ipairs(D.names.functions) do if tostring(n):find('^load:') or tostring(n):find('^ts:') then synth = synth + 1 end end
+        local v
+        for _, c in ipairs(store.data.calls) do
+            if callrec.full(c) == 'p:m' then
+                local x = R.verdict(c)
+                v = x and { x.kind, x.partial or false, #(x.targets or {}) } or 'none'
+            end
+        end
+        return { ops = ops, gaps = gaps, synth = synth, tags = tags, v = v }
+    end
+    local CASES = {
+        { 'coroutine.create/resume', 'local co = coroutine.create(function (x) use(x) end)\ncoroutine.resume(co, b)\n',
+            'local cc, cr = coroutine.create, coroutine.resume\nlocal co = cc(function (x) use(x) end)\ncr(co, b)\n' },
+        { 'coroutine.wrap/yield', 'local w = coroutine.wrap(function () coroutine.yield(b) end)\nprint(use(w()))\n',
+            'local wrap, yield = coroutine.wrap, coroutine.yield\nlocal w = wrap(function () yield(b) end)\nprint(use(w()))\n' },
+        { 'loadstring', 'local f = loadstring("return ...")\nprint(use(f(b)))\n',
+            'local ls = loadstring\nlocal f = ls("return ...")\nprint(use(f(b)))\n' },
+        { 'newproxy', 'local u = newproxy(true)\ngetmetatable(u).__index = function () return b end\nprint(use(u.x))\n',
+            'local np = newproxy\nlocal u = np(true)\ngetmetatable(u).__index = function () return b end\nprint(use(u.x))\n' },
+        { 'getfenv', 'local env = getfenv(1)\nenv.q = b\nprint(use(q))\n', 'local gf = getfenv\nlocal env = gf(1)\nenv.q = b\nprint(use(q))\n' },
+        { 'debug.sethook', 'debug.sethook(function (ev) print(ev) end, "c")\n',
+            'local sh = debug.sethook\nsh(function (ev) print(ev) end, "c")\n' },
+        { 'error ends its block', 'local function g() error("x"); use(b) end\npcall(g)\n',
+            'local err = error\nlocal function g() err("x"); use(b) end\npcall(g)\n' },
+    }
+    local bad = {}
+    for _, c in ipairs(CASES) do
+        local d, a = sig(c[2]), sig(c[3])
+        if not vim.deep_equal(d, a) then bad[#bad + 1] = c[1] .. ': direct ' .. vim.inspect(d) .. ' alias ' .. vim.inspect(a) end
+    end
+    eq({}, bad, 'each aliased form translates as the direct one')
+    -- a dotted alias whose BASE the file assigns is not the builtin: the named gap
+    local r = sig('local cc = coroutine.create\nif b then coroutine = {} end\nlocal co = cc(function (x) use(x) end)\n')
+    eq(nil, r.ops.cocreate, 'no cocreate through a reassigned base'); eq(1, r.gaps['builtin-alias-reassigned'])
+    -- one gap per call, though two branches ask about loadstring (the literal-source walk and the unknown-code load)
+    local l = sig('local ls = loadstring\nif b then ls = print end\nls("return 1")\n')
+    eq(1, l.gaps['builtin-alias-reassigned'], 'the gap once per call'); eq(0, l.synth, 'and no literal chunk walked')
+    -- require through an alias resolves the tree's module (a lua/ layout: the module path names it), as the direct
+    -- call does; a module only the static resolver finds (root level) stays the by-value call — partial, not unknown
+    local function rv(main, modpath)
+        local root = tree({ ['m.lua'] = CLASSES .. 'use(b)\n' .. main,
+            [modpath] = 'local X = {}\nfunction X.m(self) return "X" end\nreturn { v = setmetatable({}, { __index = X }) }\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false })
+        vim.fn.delete(root, 'rf')
+        for _, c in ipairs(store.data.calls) do
+            if callrec.full(c) == 'p:m' then local x = R.verdict(c); return x and { x.kind, x.partial or false, #(x.targets or {}) } or 'none' end
+        end
+    end
+    local D_, A_ = 'print(use(require("x").v))\n', 'local req = require\nprint(use(req("x").v))\n'
+    local rd = rv(D_, 'lua/x.lua')
+    eq({ 'narrowed', false, 3 }, rd, 'the direct require reaches X.m')
+    eq(rd, rv(A_, 'lua/x.lua'), 'require through an alias: the same verdict')
+    local ra = rv(A_, 'x.lua')
+    ok(type(ra) == 'table' and ra[2] == true, 'a module the walk cannot name through an alias: partial, never unknown: ' .. vim.inspect(ra))
+end)

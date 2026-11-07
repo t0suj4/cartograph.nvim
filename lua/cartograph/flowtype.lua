@@ -2783,9 +2783,15 @@ local function build(store, opts)
         local function raises(x)
             if x:type() ~= 'function_call' then return false end
             local f = x:field('name')[1]
-            if not (f and f:type() == 'identifier' and txt(f) == 'error') then return false end
-            for i = #scopes, 1, -1 do if scopes[i]['error'] then return false end end
-            return true
+            if not (f and f:type() == 'identifier') then return false end
+            local nm = txt(f)
+            -- (the innermost local of that name: none and the name is `error` — the global; or a local declared from
+            -- the global `error` and never assigned in the file — an alias, CART-1993)
+            for i = #scopes, 1, -1 do
+                local p = scopes[i][nm]
+                if p then return G7.GALIAS[p] == 'error' and not reasg()[nm] end
+            end
+            return nm == 'error'
         end
         -- (where an error raised HERE goes: the enclosing function's error port; module-level code's, the chunk set)
         local function curerr() local f = fnstack[#fnstack]; return f and f.err or gerr() end
@@ -3051,30 +3057,45 @@ local function build(store, opts)
             -- the builtin's own path. Assigned anywhere in the file, it may be something else: no translation, and the
             -- dump says so (gap `builtin-alias-reassigned`) instead of a silent ordinary call.
             -- -> true when the callee is the GLOBAL `name` (by spelling, or through such an alias)
+            local gapped -- (the reassigned-alias gap once per call: several branches may ask about one name)
             local function isbuiltin(name)
                 if fname == name and gbl() then return true end
                 if not f or f:type() ~= 'identifier' then return false end
                 local lp, g = lookup(fname)
                 if g or G7.GALIAS[lp] ~= name then return false end
-                if reasg()[fname] then G7.gap('builtin-alias-reassigned', { lp }); return false end
+                local base = name:match('^([%a_][%w_]*)%.')
+                if reasg()[fname] or (base and reasg()[base]) then
+                    if not gapped then gapped = true; G7.gap('builtin-alias-reassigned', { lp }) end
+                    return false
+                end
                 return true
             end
+            -- (CART-1993: every builtin the walk recognises by spelling takes this route — load / loadstring / loadfile /
+            -- dofile, require, getfenv / setfenv, newproxy, coroutine.*, debug.sethook, hooksecurefunc. A builtin with a
+            -- by-value model — pcall, setmetatable, error's raise … — is modelled through an alias by bindcall already)
             local function modport(a)
                 local s = a and a:type() == 'string' and a:field('content')[1]
                 local mf = s and modfile[txt(s)]
                 return mf and port('mod:' .. mf)
             end
-            if fname == 'require' and argn[1] then
+            if (fname == 'require' or isbuiltin('require')) and argn[1] then
                 local l, cc = argn[1]:start()
                 local m = req_at[file .. ':' .. l .. ':' .. cc]
                 if m then return port('mod:' .. m) end
                 local mp = modport(argn[1])
                 if mp then return mp end
+                local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
+                -- (THROUGH AN ALIAS, CART-1993: only a module the tree or the library holds takes this path — req_at knows
+                -- only calls spelled `require`, so a root-level module is the by-value call below, a lost call: partial,
+                -- never the unknown-code EXT this branch gives a module it cannot find)
+                if fname ~= 'require' then
+                    if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
+                    goto notrequire
+                end
                 -- (a module the tree does not hold: what it returns is unknown, CART-1707 — unless the environment PROFILE
                 -- declares it (a signature under its path: vim.treesitter, lpeg): a HOST module, whose members are what
                 -- the profile says; unknown code there wiped every declared type behind it, CART-1715)
                 for _, a in ipairs(argn) do expr(a) end
-                local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
                 -- (`require "io"` IS the io library — package.loaded holds it, CART-1797: the result had been an empty
                 -- port, and `require("io").zz = a` stored into nothing, flowpath's l02 / l36-l39 / l42, CART-1811)
                 if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
@@ -3085,6 +3106,7 @@ local function build(store, opts)
                 end
                 return xp
             end
+            ::notrequire::
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
                 local mp = modport(argn[2])
                 do -- (pcall(require, "io"): the library too, CART-1811 — l03)
@@ -3121,7 +3143,7 @@ local function build(store, opts)
             -- NAME, in the caller's environment — as unknown code it was unmodelled, a certified wrong whole answer. A
             -- literal source (no escape sequence to decode) is parsed and walked as the body of the function load
             -- returns, a chunk of its own; the dump holds it, so the certificate checks it
-            if (fname == 'load' or fname == 'loadstring') and gbl() and argn[1] and argn[1]:type() == 'string' then
+            if (isbuiltin('load') or isbuiltin('loadstring')) and argn[1] and argn[1]:type() == 'string' then
                 local cn = argn[1]:field('content')[1]
                 local body = cn and txt(cn) or ''
                 if not body:find('\\', 1, true) then
@@ -3143,17 +3165,19 @@ local function build(store, opts)
                     return mp
                 end
             end
-            if (fname == 'load' or fname == 'loadstring' or fname == 'loadfile' or fname == 'dofile') and gbl() then
+            local lname = (isbuiltin('load') and 'load') or (isbuiltin('loadstring') and 'loadstring')
+                or (isbuiltin('loadfile') and 'loadfile') or (isbuiltin('dofile') and 'dofile')
+            if lname then
                 G7.ANYLOAD = true -- (code from a source the tree does not hold: it may touch every global, CART-1796)
                 local c = G7.sitecon(key_of(n)) -- (a SITE contract on the load, CART-1861)
                 if c then G7.cmet(c, key_of(n)) end
                 for _, a in ipairs(argn) do
                     local ap = expr(a)
                     if c then G7.handout('contract:' .. c.rec.id, key_of(n), ap); if not c.nocb then filter(ap, G7.cbsink(), G7.isfn) end
-                    else G7.handout(fname, key_of(n), ap); edge(ap, G7.EXTCALL) end
+                    else G7.handout(lname, key_of(n), ap); edge(ap, G7.EXTCALL) end
                 end
                 local out = {}
-                for k = 1, want or 1 do out[k] = new(); G7.eroot(out[k], EXT, G7.XARR and { fname, key_of(n) }) end
+                for k = 1, want or 1 do out[k] = new(); G7.eroot(out[k], EXT, G7.XARR and { lname, key_of(n) }) end
                 if want then return out end
                 return out[1]
             end
@@ -3163,12 +3187,12 @@ local function build(store, opts)
             -- _G. getfenv returns _G and every environment set. rawget / rawset are a load and a store)
             -- (CART-1838, off under experiment no-getfenv0: a literal level 0 is the thread's environment — no gap at the walk; the dump
             -- decides from the solution whether the clause thread-env holds, or gives each site its getfenv gap)
-            if fname == 'getfenv' and gbl() and not G7.EXP['no-getfenv0'] and argn[1] and not argn[2] and argn[1]:type() == 'number' and txt(argn[1]) == '0' then
+            if isbuiltin('getfenv') and not G7.EXP['no-getfenv0'] and argn[1] and not argn[2] and argn[1]:type() == 'number' and txt(argn[1]) == '0' then
                 if G7.REC and G7.W then G7.G0SITES[#G7.G0SITES + 1] = G7.cur() end
                 return G7.g0p()
             end
-            if fname == 'getfenv' and gbl() then for _, a in ipairs(argn) do expr(a) end; G7.gap('getfenv', {}); return G7.FENVP end
-            if fname == 'setfenv' and argn[2] and gbl() then
+            if isbuiltin('getfenv') then for _, a in ipairs(argn) do expr(a) end; G7.gap('getfenv', {}); return G7.FENVP end
+            if argn[2] and isbuiltin('setfenv') then
                 -- (no gap here: the DUMP decides from the solution whether this call can set a TREE function's
                 -- environment — a function argument holding only loaded code does not, CART-1813)
                 local fa, env = argn[1], expr(argn[2])
@@ -3310,7 +3334,7 @@ local function build(store, opts)
                     return x
                 end)
             end
-            if fname == 'newproxy' and gbl() then
+            if isbuiltin('newproxy') then
                 local up = new()
                 local u = newobj('proxy:' .. key_of(n))
                 addobj(up, u)
@@ -3336,7 +3360,7 @@ local function build(store, opts)
             -- (in the IR over existing instructions, CART-1772: wrap creates a COROUTINE of f — `cocreate co th f` here —
             -- and w is a function whose body is `resume [ok, r…] co params; error r1` — a failed resume re-raises — returning
             -- r…. r1 also holds the caught error, where the core's resume puts it: w's error port is a superset)
-            if fname == 'coroutine.wrap' then return G7.mu(function ()
+            if (fname == 'coroutine.wrap' or isbuiltin('coroutine.wrap')) then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
                 local id = 'ts:wrap:' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
                 local w = newobj(id)
@@ -3369,7 +3393,7 @@ local function build(store, opts)
                 end
                 return wp
             end) end
-            if fname == 'coroutine.create' then return G7.mu(function ()
+            if (fname == 'coroutine.create' or isbuiltin('coroutine.create')) then return G7.mu(function ()
                 local fp = argn[1] and expr(argn[1]) or new()
                 local tp = new()
                 local th = newobj('thread:' .. key_of(n))
@@ -3379,7 +3403,7 @@ local function build(store, opts)
                 G7.cochan(tp, MULTI)
                 return tp
             end) end
-            if fname == 'coroutine.resume' and argn[1] then return G7.mu(function ()
+            if argn[1] and (fname == 'coroutine.resume' or isbuiltin('coroutine.resume')) then return G7.mu(function ()
                 local cp = expr(argn[1])
                 local aps = {}
                 for j = 2, #argn do aps[#aps + 1] = expr(argn[j]); edge(aps[#aps], gresarg()) end
@@ -3396,7 +3420,7 @@ local function build(store, opts)
                 if want then return out end
                 return out[1]
             end) end
-            if fname == 'coroutine.yield' then return G7.mu(function ()
+            if (fname == 'coroutine.yield' or isbuiltin('coroutine.yield')) then return G7.mu(function ()
                 local ys = {}
                 for j = 1, #argn do ys[j] = expr(argn[j]); edge(ys[j], gyield()) end
                 local out = {}
@@ -3555,9 +3579,9 @@ local function build(store, opts)
             -- `:<mask>` for a literal mask) for flowpath; it raises into this function, as the core's call does. The hook
             -- is the argument before the first string-literal mask; with no literal mask both candidates are called (a
             -- thread or a non-function among them runs nothing)
-            if fname == 'debug.sethook' and argn[1] then
+            if argn[1] and (fname == 'debug.sethook' or isbuiltin('debug.sethook')) then
                 local _, gd = lookup('debug')
-                if gd then
+                if gd or fname ~= 'debug.sethook' then
                     local function lit(x) return x and x:type() == 'string' end
                     local hs = lit(argn[2]) and { 1 } or lit(argn[3]) and { 2 } or { 1, 2 }
                     local mn = argn[hs[1] + 1]
@@ -3967,6 +3991,13 @@ local function build(store, opts)
                     local gnames = {}
                     for k, en in tsutil.inamed, el or EMPTY_NODE, -1 do
                         if en:type() == 'identifier' then local _, g = lookup(txt(en)); if g then gnames[k + 1] = txt(en) end end -- (k from 0)
+                        -- (and a member of a GLOBAL table by name: `local yield = coroutine.yield`, CART-1993)
+                        if en:type() == 'dot_index_expression' then
+                            local tb, fd = en:field('table')[1], en:field('field')[1]
+                            if tb and fd and tb:type() == 'identifier' then
+                                local _, g = lookup(txt(tb)); if g then gnames[k + 1] = txt(tb) .. '.' .. txt(fd) end
+                            end
+                        end
                     end
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do

@@ -2625,7 +2625,9 @@ test('flowtype: a builtin reached by value is a native object — its call is lo
         ok(v and v.kind == 'narrowed' and #v.targets == 2 and not v.partial, 'the model: whole {A.m, B.m}: ' .. vim.inspect(v) .. '\n' .. src)
     end
     -- (no model yet: a LOST call — partial, never runs nothing)
-    local lv = v_of('local w = coroutine.wrap\nlocal g = w(function () return a end)\nuse(g())')
+    -- (BY VALUE: through a call, which the walk does not see through — `local w = coroutine.wrap` is an ALIAS, the
+    -- builtin's own path since CART-1993)
+    local lv = v_of('local w = (function (x) return x end)(coroutine.wrap)\nlocal g = w(function () return a end)\nuse(g())')
     ok(lv and lv.partial, 'coroutine.wrap by value, no model: partial: ' .. vim.inspect(lv))
     -- (CART-1793: the models run what the call by NAME runs — __lt for a comparator-less sort, __tostring for tostring
     -- and string.format, setmetatable's table, getmetatable's __metatable, ipairs' elements)
@@ -3140,7 +3142,7 @@ test('flowtype: refl-scope — a region value handed to a lost builtin or a host
     if not parser_available('lua') then skip 'no lua parser' end
     local function run(call, exp, profile)
         local SRC = table.concat({ 'local A, B = {}, {}', 'function A.m(self) return "A" end', 'function B.m(self) return "B" end',
-            'require("ma").k = setmetatable({}, { __index = B })', 'local w = coroutine.wrap',
+            'require("ma").k = setmetatable({}, { __index = B })', 'local w = (function (x) return x end)(coroutine.wrap)', -- (by value through a call: an alias is the builtin since CART-1993)
             'for _, mod in pairs(package.loaded) do ' .. call .. ' end',
             'local s = require("ma").k', 'print(s:m())' }, '\n') .. '\n'
         local root = tree({ ['m.lua'] = SRC, ['lua/ma.lua'] = 'local M = {}\nreturn M\n',
@@ -3203,7 +3205,7 @@ test('flowtype: R.handouts names the site and kind of every value handed over (C
         'local g = load(io.read())',
         'g(u)',
         'load(io.read(), "x", "t", v)',
-        'local cw = coroutine.wrap',
+        'local cw = (function (x) return x end)(coroutine.wrap)', -- (by value through a call: an alias is the builtin since CART-1993)
         'cw(w)',
         'print(vim.fn.get(x, 1))',
         'local function own(p) return p end',
@@ -3365,7 +3367,7 @@ test('flowtype: R.entry_of names the hand-out a partial answer first traces to (
         'local r1 = t.k:m()',
         'local function cb(p) return p:m() end',
         'cb(setmetatable({}, { __index = A }))',
-        'local cw = coroutine.wrap',
+        'local cw = (function (x) return x end)(coroutine.wrap)', -- (by value through a call: an alias is the builtin since CART-1993)
         'cw(cb)',
         'local w = { k = setmetatable({}, { __index = A }) }',
         'cw(w)',
