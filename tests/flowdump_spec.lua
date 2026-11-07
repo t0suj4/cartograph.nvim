@@ -2178,3 +2178,25 @@ test('flowdump: each function lists the variables it CAPTURES (upvalues), always
     eq(sorted, two.upvalues, 'in ascending order')
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- CART-1991: hooksecurefunc through a LOCAL ALIAS (AceHook-3.0:39 `local hooksecurefunc = hooksecurefunc`) is the
+-- builtin — its wrapper is stored raw — and an alias the file ASSIGNS is not: no wrapper, a named gap instead of a silent
+-- ordinary call. A plain alias of another builtin never raises the gap (the gap is the hooksecurefunc path's own).
+test('flowdump: hooksecurefunc through a local alias stores the wrapper; a reassigned alias leaves builtin-alias-reassigned', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function census(D)
+        local sraw, gap = 0, 0
+        for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'storeRaw' then sraw = sraw + 1 end end end
+        for _, g in ipairs(D.gaps) do if g.kind == 'builtin-alias-reassigned' then gap = gap + 1 end end
+        return sraw, gap
+    end
+    local HOOK = 'local T = { f = function (x) return x end }\nhooksecurefunc(T, "f", function (x) return use(x) end)\nT.f(b)\n'
+    local s0 = census((dump(HOOK)))
+    ok(s0 > 0, 'the global form stores its wrapper raw (the baseline)')
+    local s1, g1 = census((dump('local hooksecurefunc = hooksecurefunc\n' .. HOOK)))
+    eq(s0, s1, 'the aliased form translates exactly as the global form'); eq(0, g1)
+    local s2, g2 = census((dump('local hooksecurefunc = hooksecurefunc\nif b then hooksecurefunc = print end\n' .. HOOK)))
+    eq(s0 - 1, s2, 'a reassigned alias stores no wrapper'); eq(1, g2, 'and the dump names it')
+    local _, g3 = census((dump('local pairs = pairs\nif b then pairs = next end\nfor k in pairs(A) do print(k) end\n')))
+    eq(0, g3, 'another builtin alias, reassigned, raises no hooksecurefunc gap')
+end)

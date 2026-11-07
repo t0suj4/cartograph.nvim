@@ -99,6 +99,9 @@
 --   like the tree's. A SUPPLIED premise: the clause `host-model` is stated when one ran.
 --   `hkeys` [site, [sites]]: flowtype's KEY SET of a table (what `pairs` yields as keys) — no core field; a load of it
 --   is a gap (`table-keys`).
+-- * A builtin the walk recognises by name is also recognised through a LOCAL ALIAS declared from the global and never
+--   assigned in its file (`local hooksecurefunc = hooksecurefunc`, AceHook-3.0); an alias the file assigns is the gap
+--   `builtin-alias-reassigned` (its var: the local) instead of a silent ordinary call. Today: hooksecurefunc. CART-1991.
 -- * Errors are PER FUNCTION (Core/Errors.lean, FLOW C.E): err.fn [fn, [sites]] is `E.port fn` (err.top: a port past
 --   CAP — any site; err.taint: a port the taint reached); a file chunk's port is
 --   module-level code's (one, shared by every chunk); err.cerr the coroutine channel. `error(y)` is emitted where code

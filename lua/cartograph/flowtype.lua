@@ -2307,6 +2307,7 @@ local function build(store, opts)
     -- (opts.litkeys, CART-1729: a constant local's port -> its string, a key through it is that name; the names each
     -- file assigns; value-keyed instances)
     G7.LITKEYS, G7.CONSTK, G7.REASGF, G7.VINST, G7.VINSTN = opts.litkeys or nil, {}, {}, {}, 0
+    G7.GALIAS = {} -- (a local's port -> the GLOBAL name it was declared from, `local h = hooksecurefunc`: CART-1991)
     G7.MAPNAMEF, G7.MAPSITE = {}, {} -- (experiment `strict-records`: file -> map names; object -> a map site)
     -- (GE's metatable slot, CART-1837 — off under experiment no-ge-meta: the setmetatable target ports, and whether one holds
     -- anything but the globals table)
@@ -2638,7 +2639,10 @@ local function build(store, opts)
         -- (the names this file ASSIGNS anywhere, `k = …` outside a declaration: a local of that name may change, so it
         -- is no constant key below. By name over the whole file — any binding — which only refuses more. Once per file:
         -- an instance walks its file again)
-        if G7.LITKEYS and not G7.REASGF[file] then
+        -- (the names this file ASSIGNS, any scope: computed once per file, on first demand — under litkeys at once; else
+        -- only when an alias of a builtin is called, CART-1991)
+        local function reasg()
+            if G7.REASGF[file] then return G7.REASGF[file] end
             local ra = {}
             G7.REASGF[file] = ra
             local function scan(n)
@@ -2652,7 +2656,9 @@ local function build(store, opts)
                 end
             end
             scan(tree)
+            return ra
         end
+        if G7.LITKEYS then reasg() end
         G7.REASG = G7.REASGF[file] or NOTHING
         -- (experiment `strict-records`: the names this file indexes by a COMPUTED key in a store — `b.by_id[id] = …` gives
         -- by_id — the last name of the store's base; a constructor bound to one is a MAP site)
@@ -3027,6 +3033,19 @@ local function build(store, opts)
                 local _, g = lookup(fname)
                 return g
             end
+            -- ★ A BUILTIN THROUGH A LOCAL ALIAS (CART-1991): `local hooksecurefunc = hooksecurefunc` (AceHook-3.0:39,
+            -- every Ace3 SecureHook) — a local DECLARED from the global and never assigned in the file IS the global:
+            -- the builtin's own path. Assigned anywhere in the file, it may be something else: no translation, and the
+            -- dump says so (gap `builtin-alias-reassigned`) instead of a silent ordinary call.
+            -- -> true when the callee is the GLOBAL `name` (by spelling, or through such an alias)
+            local function isbuiltin(name)
+                if fname == name and gbl() then return true end
+                if not f or f:type() ~= 'identifier' then return false end
+                local lp, g = lookup(fname)
+                if g or G7.GALIAS[lp] ~= name then return false end
+                if reasg()[fname] then G7.gap('builtin-alias-reassigned', { lp }); return false end
+                return true
+            end
             local function modport(a)
                 local s = a and a:type() == 'string' and a:field('content')[1]
                 local mf = s and modfile[txt(s)]
@@ -3206,7 +3225,7 @@ local function build(store, opts)
             -- (CART-1772: in the IR, a synthetic function `call [r…] orig args; call [] h args; ret r…`, stored raw).
             -- A call that reaches the wrapper runs the hook with ITS arguments (CART-1748); a reference to the original
             -- saved earlier does not, as in WoW. It replaced the hook binding on the original's calls (CART-1707)
-            if fname == 'hooksecurefunc' and argn[2] and gbl() then
+            if argn[2] and isbuiltin('hooksecurefunc') then
                 local tp = argn[3] and expr(argn[1]) or G7.GPORT
                 local kn = argn[3] and argn[2] or argn[1]
                 local h = expr(argn[3] or argn[2])
@@ -3908,9 +3927,16 @@ local function build(store, opts)
                 if a and a:type() == 'assignment_statement' then
                     local vl, el = a:named_child(0), a:named_child(1)
                     local vals = exprs(el, vl:named_child_count())
+                    -- (each value that is a GLOBAL by name, resolved before any of these locals exists: `local h = h`)
+                    local gnames = {}
+                    for k, en in tsutil.inamed, el or EMPTY_NODE, -1 do
+                        if en:type() == 'identifier' then local _, g = lookup(txt(en)); if g then gnames[k + 1] = txt(en) end end -- (k from 0)
+                    end
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
+                        -- (declared from a GLOBAL by name: an alias, for a builtin called through it — CART-1991)
+                        if gnames[i] then G7.GALIAS[p] = gnames[i] end
                         if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADNAME[p] = G7.LOADERP[vals[i]] end
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
