@@ -5979,6 +5979,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = lexscopes and MF_SCOPED or 0
     local active = {} -- name -> stack of visibility rows (false = scope-wide)
+    -- (and, parallel to it, each binding's scope KIND and its declaration's byte span — CART-1010: a mention bound by an
+    -- INNER scope names that local, not the module variable of the same name)
+    local akind, aspan = {}, {}
     local ctxs, nctx = {}, 0 -- open df contexts (dfrec only), innermost last
     local fnstack, fdepth = {}, 0 -- enclosing fn NODES, for pw attribution
     -- (tracked always — decoupled from the df-record build ctxs above)
@@ -6014,8 +6017,11 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             pushed = {}
             for name, b in pairs(t) do
                 local a = active[name]
-                if not a then a = {} active[name] = a end
+                if not a then a = {} active[name] = a; akind[name] = {}; aspan[name] = {} end
                 a[#a + 1] = b.row or false
+                local ak, asp = akind[name], aspan[name]
+                ak[#ak + 1] = entry.kind or false
+                asp[#asp + 1] = b.ab and { b.ab, b.abe } or false
                 pushed[#pushed + 1] = name
             end
         end
@@ -6209,6 +6215,34 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                         local r = a[j]
                         if r == false or r <= sr then bound = true break end
                     end
+                    -- ★ A LOCAL THAT SHADOWS A MODULE BINDING (CART-1010): the innermost binding VISIBLE here — a
+                    -- declaration's own value is not yet in its scope (`local level = level` reads the OUTER level; the
+                    -- name in the variable list IS the inner binder) — is a block / function / loop local or a parameter,
+                    -- over a module-scope binding of the name: the mention names that local, never the module variable.
+                    -- Bare ordinals, as buf.rdw
+                    local ak, asp = akind[name], aspan[name]
+                    local mb = select(3, c:start())
+                    for j = #a, 1, -1 do
+                        local r = a[j]
+                        if r == false or r <= sr then
+                            local sp = asp[j]
+                            if not (sp and mb >= sp[1] and mb < sp[2] and nt ~= 'variable_list') then
+                                -- (only a SHADOW: a local / parameter over a MODULE binding of the name further out —
+                                -- a java field's own scope, or php, whose scope model holds no module bindings, keep
+                                -- their linking)
+                                local outer = false
+                                if ak[j] == 'local' or ak[j] == 'param' then
+                                    for k = j - 1, 1, -1 do if ak[k] == 'module' then outer = true; break end end
+                                end
+                                if outer then
+                                    local l = buf.inb
+                                    if not l then l = {}; buf.inb = l end
+                                    l[#l + 1] = nm + 1 -- (this mention's ordinal: nm is bumped below)
+                                end
+                                break
+                            end
+                        end
+                    end
                 end
                 local flags = scoped + (nok[idx] and MF_ELIGIBLE or 0)
                     + (callee and MF_CALLEE or 0) + (bound and MF_BOUND or 0)
@@ -6334,8 +6368,11 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
         end
         if pushed then
             for k = #pushed, 1, -1 do
-                local a = active[pushed[k]]
+                local nm_ = pushed[k]
+                local a = active[nm_]
                 a[#a] = nil
+                local ak, asp = akind[nm_], aspan[nm_]
+                ak[#ak] = nil; asp[#asp] = nil
             end
         end
     end
@@ -6565,6 +6602,11 @@ local function reduce_mentions(file, buf, L)
         fldmap = {}
         for i = 1, #buf.fld, 2 do fldmap[buf.fld[i]] = buf.fld[i + 1] end
     end
+    local inbset -- the occurrences bound by an INNER scope's local (CART-1010)
+    if buf.inb then
+        inbset = {}
+        for _, o in ipairs(buf.inb) do inbset[o] = true end
+    end
     local rdwset -- the occurrences that write AND read (a memo call, CART-1585)
     if buf.rdw then
         rdwset = {}
@@ -6728,6 +6770,9 @@ local function reduce_mentions(file, buf, L)
                 if not (scoped and bound) then var = xc[1] end
             end
             if qvar then var = qvar end -- (the import binding decided it, across the package boundary)
+            -- (a mention an INNER scope's local binds is that local: no module variable's use — `local level = level;
+            -- level = level - 1` had charged a whole-reference write to the module's `level`, CART-1010)
+            if inbset and inbset[ord] and not qvar then var = nil end
             -- A MENTION ON *ANY* SAME-FILE HOMONYM'S DEF LINE IS NOT A USE.
             -- The skip used to name only the RESOLVED candidate's line, which
             -- was enough while a file-scope mention was dropped anyway. It is

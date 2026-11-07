@@ -227,3 +227,47 @@ test('band: a pure-topology fold (no idx) yields empty identity axes', function 
     eq({}, bare:var_used_by_detail('f.lua::foo:1'))
     eq({}, bare:registrants_detail('f.lua::foo:1'))
 end)
+
+-- CART-1010: a LOCAL that shadows a module variable is that local, not the variable. `local level = level; level =
+-- level - 1` had charged a whole-reference WRITE (`flds{=W}`) to the module's `level`, the strongest write, from the
+-- idiom that exists to prevent it — a name collision, as the renamed control proves. The mention linker now asks the
+-- scope stack which binding is visible: an inner (block / function / loop / parameter) local names itself; a
+-- declaration's own value is not yet in its scope (`local level = level` READS the module's).
+test('band: a local shadowing a module variable is not charged to it; the localize idiom reads it once (CART-1010)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local level = 5',
+        'local function localizes()', '  local level = level', '  level = level - 1', '  return level', 'end',
+        'local function renamed_copy()', '  local lv = level', '  lv = lv - 1', '  return lv', 'end',
+        'local function writes()', '  level = level + 1', 'end',
+        'local function param(level) level = 2; return level end',
+        'local function inblock() do local level = 1; level = 2 end end',
+        'local function loopvar() for level = 1, 3 do level = level + 1 end end',
+        'return { localizes, renamed_copy, writes, param, inblock, loopvar }' }, '\n') .. '\n')
+    fd:close()
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    vim.fn.delete(root, 'rf')
+    local function use_of(fname)
+        for _, n in ipairs(store.data.nodes) do
+            if n.kind == 'function' and n.name == fname then
+                for _, u in ipairs(store.topo():var_uses_detail(n.id)) do
+                    if tostring(u.to):find('var:level', 1, true) then return u end
+                end
+                return false
+            end
+        end
+    end
+    local l = use_of('localizes')
+    ok(l, 'the idiom still READS the module variable (its value)')
+    eq({ 1, { [''] = 1 }, 1 }, { l.rw, l.flds, #l.at }, 'one read occurrence: the copy\'s source — no write, the binder no use')
+    local c = use_of('renamed_copy')
+    eq({ 1, { [''] = 1 } }, { c.rw, c.flds }, 'the control, unchanged')
+    local w = use_of('writes')
+    eq(3, w and w.rw, 'a real write to the module variable still counts')
+    eq(false, use_of('param'), 'a parameter named so is not the module variable')
+    eq(false, use_of('inblock'), 'nor a block local')
+    eq(false, use_of('loopvar'), 'nor a loop variable')
+end)
