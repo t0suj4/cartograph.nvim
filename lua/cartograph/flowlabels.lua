@@ -14,7 +14,8 @@
 --   pcall whose callee is cut or escaped      outside-raises-strings
 --   the ESCAPED region (a cut variable, a cell of an escaped site, a parameter of an escaped function)   C1, C3
 -- and, past contracts_of: a load from a library site (libraries-never-escape), a call into a host model (host-model),
--- a call the host makes to a registered handler — the instruction tagged contract:host-handlers (host-handlers).
+-- a call the host makes to a registered handler or a hooked function's wrapper — the instruction tagged
+-- contract:host-handlers (host-handlers; CART-1955, CART-1990).
 -- A dest's labels ⊇ its sources' ∪ its instruction's seeds: what flowpath checks like a certificate.
 -- An op without a rule here is an ERROR, never silence: a missing label claims an answer rests on nothing.
 local M = {}

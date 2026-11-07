@@ -72,12 +72,15 @@ return {
         -- hooksecurefunc("GlobalFn", fn) patches a GLOBAL rather than a member,
         -- so it carries no member argument and is declared separately rather than
         -- squeezed into the same shape.
+        -- host_calls (CART-1990): the CLIENT calls the hooked function too — the targets are Blizzard functions and
+        -- frame methods (SendChatMessage, DropDownList1:Show) — so the hook runs at host calls no tree code makes;
+        -- flowtype emits the host's call of the wrapper at the hooksecurefunc (contract:host-handlers)
         { call = 'hooksecurefunc', table_arg = 1, member_arg = 2, arity = 3,
-            kind = 'post-hook',
+            kind = 'post-hook', host_calls = true,
             notes = { why = 'appends to the existing function; the original still runs,'
                 .. ' so this is ADDITIVE and cannot silently replace behaviour' } },
         { call = 'hooksecurefunc', member_arg = 1, arity = 2,
-            kind = 'post-hook-global',
+            kind = 'post-hook-global', host_calls = true,
             notes = { why = 'patches a global function by name, not a table member' } },
     },
 

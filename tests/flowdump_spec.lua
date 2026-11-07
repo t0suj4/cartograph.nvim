@@ -2200,3 +2200,74 @@ test('flowdump: hooksecurefunc through a local alias stores the wrapper; a reass
     local _, g3 = census((dump('local pairs = pairs\nif b then pairs = next end\nfor k in pairs(A) do print(k) end\n')))
     eq(0, g3, 'another builtin alias, reassigned, raises no hooksecurefunc gap')
 end)
+
+-- CART-1990 (flowpath FLOW-0050): the CLIENT calls a hooksecurefunc target — every w1 target is a Blizzard function or
+-- frame method — so the hook runs at calls no dump holds. Where the file's ecosystem declares the hook form host_calls
+-- (spec/ecosystem/lua-wow.lua `hooks`), the dump carries the host's call of the WRAPPER at the hooksecurefunc, tagged
+-- contract:host-handlers: the global form once, all arguments unknown; the member form twice, `t:name(…)` (t first) and
+-- `t.name(…)`. A target with no tree definition and no in-tree caller ("BlzUpdate") is no longer a dead hook.
+test('flowdump: a WoW hooksecurefunc target is CALLED by the host — the wrapper, tainted arguments, only where declared (CART-1990)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local a = { cur = 1 }',
+        'local F = { tag = 1 }',
+        'function F:Show() return 1 end',
+        'hooksecurefunc("BlzUpdate", function (x) a.seen = x; x.hooked = true end)',
+        'hooksecurefunc(F, "Show", function (self) a.shown = self end)',
+        'function A_get() return a.seen, a.shown end' }, '\n') .. '\n'
+    local function solve(files)
+        local root = tree(files)
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        return vim.json.decode(R.dump), R
+    end
+    local D, R = solve({ ['A/A.toc'] = '## Interface: 110000\n## Title: A\nh.lua\n', ['A/h.lua'] = SRC })
+    local site, fnid = {}, {}
+    for _, s in ipairs(D.sites) do
+        site[s.label] = s.id
+        if s.kind == 'function' then fnid[s.label] = s.fn end
+    end
+    local wg, wm, ftab = site['ts:hook:A/h.lua:3:0'], site['ts:hook:A/h.lua:4:0'], site['tbl:A/h.lua:1:10']
+    ok(wg and wm and ftab, 'the fixture\'s sites: ' .. vim.inspect(vim.tbl_keys(site)))
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local F = {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn end
+    -- the tagged calls: the global form's wrapper once, the member form's twice
+    local calls = {}
+    for _, fn in ipairs(D.functions) do
+        for _, t in ipairs(fn.tags or {}) do
+            if t[2] == 'contract:host-handlers' then
+                local ins = fn.body[t[1] + 1]
+                eq('call', ins[1])
+                for _, o in ipairs(V[ins[3]] or {}) do calls[o] = (calls[o] or 0) + 1 end
+            end
+        end
+    end
+    eq(1, calls[wg], 'the global form\'s wrapper: one host call'); eq(2, calls[wm], 'the member form\'s: two')
+    eq(2, R.stats.hostcalls_hooks); eq(0, R.stats.handlers)
+    -- the hooks' parameters: unknown host values (never empty); the member hook's self also holds its table
+    local hg, hm = F[fnid['A/h.lua::hooksecurefunc#cb@3']], F[fnid['A/h.lua::hooksecurefunc#cb@4']]
+    ok(vim.tbl_contains(D.solution.taint.ports, hg.params[1]), 'BlzUpdate\'s hook: x is tainted, not empty')
+    ok(vim.tbl_contains(D.solution.taint.ports, hm.params[1]), 'the member hook: self tainted (t.name(…))')
+    ok(vim.tbl_contains(V[hm.params[1]] or {}, ftab), 'and self holds F (t:name(…)): ' .. vim.inspect(V[hm.params[1]]))
+    ok(D.contracts.clauses['host-handlers'], 'the clause is stated')
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+    -- outside a WoW package no ecosystem declares host_calls: the same file makes no host call
+    local D2, R2 = solve({ ['h.lua'] = SRC })
+    eq(0, R2.stats.hostcalls_hooks)
+    for _, fn in ipairs(D2.functions) do
+        for _, t in ipairs(fn.tags or {}) do ok(t[2] ~= 'contract:host-handlers', 'no host call outside WoW') end
+    end
+    ok(not D2.contracts.clauses['host-handlers'], 'and no clause')
+    -- a WoW package whose hook forms do NOT declare host_calls: no host call — the declaration decides, not the name
+    local E = assert(require('cartograph.spec.ecosystem').load('lua-wow'))
+    local saved = {}
+    for k, h in ipairs(E.hooks) do saved[k] = h.host_calls; h.host_calls = nil end
+    local okd, D3, R3 = pcall(solve, { ['A/A.toc'] = '## Interface: 110000\n## Title: A\nh.lua\n', ['A/h.lua'] = SRC })
+    for k, h in ipairs(E.hooks) do h.host_calls = saved[k] end
+    ok(okd, tostring(D3))
+    eq(0, R3.stats.hostcalls_hooks, 'undeclared: no host call')
+    ok(not D3.contracts.clauses['host-handlers'], 'and no clause')
+end)

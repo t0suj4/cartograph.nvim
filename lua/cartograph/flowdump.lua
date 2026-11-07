@@ -112,7 +112,8 @@
 --   `divergence:coroutine` (flowtype binds a resume's arguments to that coroutine's function only; the core's `rin` is
 --   one channel), `contract:host-handlers` (a call the HOST makes to a handler a declared registrar was handed —
 --   spec/ecosystem `handlers`, WoW's frame:SetScript / HookScript: emitted at the registration, the receiver first and
---   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955),
+--   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955; and the host's
+--   call of a hooksecurefunc WRAPPER where the ecosystem's hook form declares host_calls, at the hooksecurefunc, CART-1990),
 --   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
 --   claim: no call is synthesized.)
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — getfenv / setfenv, hooksecurefunc,
@@ -173,7 +174,7 @@ M.CONTRACTS = {
     ['function-no-metatable'] = 'a function has no metatable of its own (setmetatable raises): a setmeta on a closure site writes nothing (the core\'s setmeta writes any reference)',
     ['host-model'] = 'a host function with a Lua model (contracts.host_models: [key, [function ids]]) behaves as its model\'s body — a SUPPLIED premise (CART-1785; stated only when a call used one)',
     ['loader-args'] = 'a file whose package\'s ecosystem declares its loader (spec/ecosystem chunk_args: WoW\'s addon name and private table) is run once, as a chunk called with exactly those values: init creates them, one private table per package shared by its files, and every other file\'s `...` is tainted (stated only when a file has a declared loader, CART-1822)',
-    ['host-handlers'] = 'a function handed to a method its file\'s ecosystem declares a HANDLER registrar (spec/ecosystem `handlers`: WoW\'s frame:SetScript / frame:HookScript) is called by the host with the receiver, then unknown host values (one tainted spread port); the call is emitted at the registration, tagged contract:host-handlers, and raises into the registering function (stated only when such a call exists, CART-1955)',
+    ['host-handlers'] = 'a function handed to a method its file\'s ecosystem declares a HANDLER registrar (spec/ecosystem `handlers`: WoW\'s frame:SetScript / frame:HookScript) is called by the host with the receiver, then unknown host values (one tainted spread port); the call is emitted at the registration, tagged contract:host-handlers, and raises into the registering function (stated only when such a call exists, CART-1955). Likewise a HOOKED function whose hook form the ecosystem declares host_calls (spec/ecosystem `hooks`: WoW\'s hooksecurefunc): the host calls the hook\'s wrapper with unknown host values — a member hook both with the table first and with all arguments unknown — emitted at the hooksecurefunc (CART-1990)',
     ['loaded-code'] = 'code loaded at run time from a source the tree does not hold — load / loadstring with a non-literal source, loadfile, dofile — does not read or write the tree\'s globals by name (stated only when the tree has such a call; a literal source is walked as tree code; the sound reading is experiment loaded-globals — CART-1796, the user\'s decision 2026-10-22)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }

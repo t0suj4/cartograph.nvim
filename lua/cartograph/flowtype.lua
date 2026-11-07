@@ -2592,6 +2592,19 @@ local function build(store, opts)
     -- frame:SetScript / frame:HookScript) hands a function to the host, which calls it at events — the receiver first,
     -- then values the host makes. The declared form by method name, or nil
     G7.HANDLERF, G7.HANDLERVA, G7.HANDLERCALLS = {}, {}, 0
+    -- (and a HOOKED function the host calls — CART-1990: the file's ecosystem `hooks` form for this arity, when it declares
+    -- host_calls; WoW's hooksecurefunc targets are Blizzard functions and frame methods the client calls)
+    G7.HOOKF, G7.HOOKCALLS = {}, 0
+    function G7.hookform(file, call, arity)
+        local m = G7.HOOKF[file]
+        if m == nil then
+            local E = G7.ecoof(file)
+            m = false
+            for _, h in ipairs(E and E.hooks or NOTHING) do m = m or {}; m[h.call .. '/' .. tostring(h.arity)] = h end
+            G7.HOOKF[file] = m
+        end
+        return m and m[call .. '/' .. tostring(arity)] or nil
+    end
     function G7.handlerform(file, method)
         local m = G7.HANDLERF[file]
         if m == nil then
@@ -3252,6 +3265,29 @@ local function build(store, opts)
                     G7.ins({ 'storeRaw', tp, key, wp })
                     G7.RAWSTORE = nil
                     storec(tp, key, wp)
+                    -- ★ THE HOST CALLS THE HOOKED FUNCTION (CART-1990, flowpath FLOW-0050): every w1 target is a Blizzard
+                    -- function or frame method (SendChatMessage, DropDownList1:Show) that the CLIENT calls — those calls
+                    -- are in no dump, so the hook ran only at in-tree calls, and a target with none (Dewdrop's
+                    -- DropDownList1 "Show") had a dead hook. Where the file's ecosystem declares the form host_calls,
+                    -- the host's call is a call HERE, as a handler's is (CART-1955, contract:host-handlers): the
+                    -- wrapper, with unknown host values (one spread port, tainted). The member form is called both ways
+                    -- — `t:name(…)` (t first) and `t.name(…)` (all unknown) — the client does either. Errors raise into
+                    -- this function, as the core's call does
+                    local hk = G7.hookform(file, 'hooksecurefunc', argn[3] and 3 or 2)
+                    if hk and hk.host_calls then
+                        G7.HOOKCALLS = G7.HOOKCALLS + 1
+                        local va = new()
+                        G7.HANDLERVA[#G7.HANDLERVA + 1] = va
+                        local forms = argn[3] and { { tp, va, spread = 2 }, { va, spread = 1 } } or { { va, spread = 1 } }
+                        for _, ha in ipairs(forms) do
+                            local hr = new()
+                            local ia = {}
+                            for k, x in ipairs(ha) do ia[k] = x end
+                            ia.spread = ha.spread
+                            G7.ins({ 'call', { hr }, wp, ia }, 'contract:host-handlers')
+                            callc(wp, ha, hr, nil, curerr())
+                        end
+                    end
                     if G7.REC and G7.W then
                         G7.REC.ins(id, { 'call', rs, orig, args })
                         G7.REC.ins(id, { 'call', { hres }, h, args })
@@ -5642,7 +5678,7 @@ local function build(store, opts)
     local partial_hit -- (set by targets: a field port it read was tainted)
     -- ── the verdicts ────────────────────────────────────────────────────────────────────────────────
     local verdicts = {}
-    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil, handlers = G7.HANDLERCALLS,
+    local stats = { probes = #probes, exact = 0, narrowed = 0, string = 0, typed = 0, unknown = 0, none = 0, same = 0, loadvisits = LOADV, instances = INSTN, fuel_cut = OUT and #UNFIN or nil, handlers = G7.HANDLERCALLS, hostcalls_hooks = G7.HOOKCALLS,
         files = #files, ports = N, objects = NO, fedk_skips = G7.FEDKN }
     stats.vinstances = G7.VINSTN
     stats.unknown_code = G7.XESCN -- (objects handed to unknown code, with their fields and prototypes: CART-1707 / 1850)
@@ -6596,7 +6632,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
