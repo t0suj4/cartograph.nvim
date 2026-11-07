@@ -1275,6 +1275,7 @@ local function build(store, opts)
         -- (a MULTI-value result — Go's `v, err := f()` — is a list of ports: the i-th return to the i-th)
         if type(res) == 'table' then
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
+            G7.restbind(fp, res)
         else edge(fp.ret, res) end
     end
     -- (bindcall over a POOLED argument list - an ordinary Lua function reads the pool, in bindcall's edge order;
@@ -1299,7 +1300,21 @@ local function build(store, opts)
         end
         if type(res) == 'table' then
             for i, r in ipairs(res) do local fr = fp.rets and fp.rets[i] or (i == 1 and fp.ret); if fr then edge(fr, r) end end
+            G7.restbind(fp, res)
         else edge(fp.ret, res) end
+    end
+    -- ★ RESULTS PAST THE FOURTH (CART-1948, flowpath FLOW-0047 / FLOW-0143): a call whose values are all forwarded — the
+    -- last argument of a call, `return f()`, a yield's / resume's last operand — asks for MULTI results with `res.rest`:
+    -- its last port also collects every return past it (`v(five())` had dropped the fifth). And a function whose last
+    -- return SPREADS (`return ...`, `return f()`: fp.retspread) hands its last return port to every result past its own
+    -- ports. (Final when bound: a function's OBJECT exists only once func() has walked its whole body, every return
+    -- among them — a recursive call inside it binds in the solve, measured by the route fixture spread_recursive)
+    function G7.restbind(fp, res)
+        local rets = fp.rets
+        if not rets then return end
+        local k = res.rest
+        if k then for j = k + 1, #rets do edge(rets[j], res[k]) end end
+        if fp.retspread and #rets > 0 then for j = #rets + 1, #res do edge(rets[#rets], res[j]) end end
     end
     -- (one yield set and one resume-argument set for the whole program, CART-1700: any yield's values reach any resume,
     -- any resume's arguments any yield. GERR: what MODULE-LEVEL code raises — a function's own errors go to its port
@@ -3056,7 +3071,11 @@ local function build(store, opts)
             return p
         end
         local function callv(n, want)
+            -- (G7.WANTREST: the caller forwards ALL of this call's values — read before anything nested, CART-1948)
+            local rest = G7.WANTREST
+            G7.WANTREST = nil
             if want and want < 2 then want = nil end
+            if rest and not want then want = 1 end -- (a list even of one: its port is the REST port)
             local f = n:field('name')[1]
             local args = n:field('arguments')[1]
             local argn = {}
@@ -3430,10 +3449,28 @@ local function build(store, opts)
                 G7.cochan(tp, MULTI)
                 return tp
             end) end
+            -- (a yield's / resume's operands from argn[j0]: a LAST `...` spreads, a last call hands every value — its rest
+            -- port spreads; the dump marks both, CART-1948: they had passed the vararg port positionally, one value)
+            local function operands(j0)
+                local l = {}
+                for j = j0, #argn do
+                    local a = argn[j]
+                    if j == #argn and a:type() == 'vararg_expression' then l[#l + 1] = expr(a); l.spread = #l
+                    elseif j == #argn and a:type() == 'function_call' then
+                        G7.WANTREST = true
+                        local r = callv(a, MULTI)
+                        if type(r) == 'table' then
+                            for _, x in ipairs(r) do l[#l + 1] = x end
+                            if r.rest then l.spread = #l end
+                        else l[#l + 1] = r end
+                    else l[#l + 1] = expr(a) end
+                end
+                return l
+            end
             if argn[1] and (fname == 'coroutine.resume' or isbuiltin('coroutine.resume')) then return G7.mu(function ()
                 local cp = expr(argn[1])
-                local aps = {}
-                for j = 2, #argn do aps[#aps + 1] = expr(argn[j]); edge(aps[#aps], gresarg()) end
+                local aps = operands(2)
+                for _, ap in ipairs(aps) do edge(ap, gresarg()) end
                 local fl, out = {}, { new() }
                 for k = 1, math.max((want or 1) - 1, 1) do fl[k] = new(); out[k + 1] = fl[k]; edge(gyield(), fl[k]) end
                 -- (resume CATCHES what the coroutine raises: `false, err`)
@@ -3448,8 +3485,8 @@ local function build(store, opts)
                 return out[1]
             end) end
             if (fname == 'coroutine.yield' or isbuiltin('coroutine.yield')) then return G7.mu(function ()
-                local ys = {}
-                for j = 1, #argn do ys[j] = expr(argn[j]); edge(ys[j], gyield()) end
+                local ys = operands(1)
+                for _, y in ipairs(ys) do edge(y, gyield()) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); edge(gresarg(), out[k]) end
                 G7.ins({ 'yield', out, ys })
@@ -3539,12 +3576,15 @@ local function build(store, opts)
             local aps = {}
             if recvp then aps[1] = recvp end
             -- (a LAST argument that is `...` SPREADS into every parameter from there and the callee's vararg; a last
-            -- call passes its first MULTI values positionally, CART-1707)
+            -- call passes its first MULTI values positionally, CART-1707 — and the last of them collects every further
+            -- value and SPREADS like `...`, CART-1948: `v(five())` had dropped the fifth)
             for j, a in ipairs(argn) do
                 if j == #argn and a:type() == 'vararg_expression' then aps[#aps + 1] = expr(a); aps.spread = #aps
                 elseif j == #argn and a:type() == 'function_call' then
+                    G7.WANTREST = true
                     local l = callv(a, MULTI)
                     if type(l) == 'table' then for _, r in ipairs(l) do aps[#aps + 1] = r end else aps[#aps + 1] = l end
+                    if type(l) == 'table' and l.rest then aps.spread = #aps end
                 else aps[#aps + 1] = expr(a) end
             end
             -- (what error() / assert's message raises reaches every pcall's second result, CART-1705)
@@ -3571,6 +3611,7 @@ local function build(store, opts)
             local resl = { res }
             local hsite -- (a host model's call-site instance, CART-1785)
             for k = 2, want or 1 do resl[k] = new() end
+            if rest then resl.rest = want end
             if recvp then
                 for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end
                 mcalls[#mcalls + 1] = { recvp, txt(f:field('method')[1]), resl }
@@ -3804,13 +3845,16 @@ local function build(store, opts)
         end
         -- an expression LIST's values: a call LAST in it supplies all the values still wanted (Lua truncates a call
         -- anywhere else to one)
-        local function exprs(el, want)
+        local function exprs(el, want, rest)
+            local restlast -- (-> vals, true when the last value is a call's REST port: it holds every further value)
             local xs = {}
             for _, x in tsutil.inamed, el or EMPTY_NODE, -1 do xs[#xs + 1] = x end
             local vals = {}
             for i, x in ipairs(xs) do
-                if i == #xs and want > #xs and x:type() == 'function_call' then
-                    local l = callv(x, want - #xs + 1)
+                if i == #xs and (want > #xs or rest) and x:type() == 'function_call' then
+                    G7.WANTREST = rest -- (`return f()`: every value forwarded, CART-1948)
+                    local l = callv(x, math.max(want - #xs + 1, 1))
+                    if rest and type(l) == 'table' and l.rest then restlast = true end
                     if type(l) == 'table' then for _, r in ipairs(l) do vals[#vals + 1] = r end else vals[#vals + 1] = l end
                 elseif i == #xs and want > #xs and x:type() == 'vararg_expression' then
                     local v, pos = expr(x) -- (`local a, b = ...`: every value still wanted is a vararg)
@@ -3823,7 +3867,7 @@ local function build(store, opts)
                     vals[#vals + 1] = pos[1] or new()
                 else vals[#vals + 1] = expr(x) end
             end
-            return vals
+            return vals, restlast
         end
         expr = function (n)
             local t = n:type()
@@ -4090,15 +4134,16 @@ local function build(store, opts)
                 local fp = fnstack[#fnstack]
                 -- (each value to its position: `return i, c` — tsutil.inext's — the second is the node. A call last
                 -- forwards its values: up to MULTI of them)
-                local vals = exprs(el, fp and MULTI or 1)
-                -- (a LAST value `...` spreads into every result from its position: the dump says so, CART-1924)
+                local vals, restlast = exprs(el, fp and MULTI or 1, fp and true or nil)
+                -- (a LAST value `...` spreads into every result from its position: the dump says so, CART-1924 — and a
+                -- last CALL forwards all its values, CART-1948: its last result port spreads from its own position)
                 if fp and el then
                     local list_ = el:type() == 'expression_list'
                     local nlast = list_ and el:named_child_count() or 1
                     local last = list_ and nlast > 0 and el:named_child(nlast - 1) or (not list_ and el)
-                    if last and last:type() == 'vararg_expression' and (not fp.retspread or nlast < fp.retspread) then
-                        fp.retspread = nlast
-                    end
+                    local at = last and last:type() == 'vararg_expression' and nlast
+                        or (restlast and #vals) or nil
+                    if at and (not fp.retspread or at < fp.retspread) then fp.retspread = at end
                 end
                 for i, v in ipairs(vals) do
                     if fp and PTAG and not fp.inst then puse(v, 'ret', i) end
@@ -4411,7 +4456,10 @@ local function build(store, opts)
                 else
                     -- (the argument list keeps `spread`: a last argument that spreads, for the dump's spread marker, CART-1924)
                     local al = list(args); al.spread = args.spread
-                    G7.ins({ 'call', type(res) == 'table' and list(res) or { res }, callee, al })
+                    -- (and the result list keeps `rest`: its last port collects every further return, CART-1948)
+                    local rl = type(res) == 'table' and list(res) or { res }
+                    if type(res) == 'table' then rl.rest = res.rest end
+                    G7.ins({ 'call', rl, callee, al })
                     local k = G7.NEXTC and G7.W and G7.cur()
                     local l = k and G7.REC.fns[k]
                     if l then G7.INSAT[G7.NEXTC] = { k, #l - 1 } end
@@ -6715,7 +6763,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)

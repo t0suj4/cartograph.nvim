@@ -1668,7 +1668,8 @@ test('flowdump: labels from the dump\'s Lua values equal labels from its JSON pa
             for i, f in ipairs(D.functions) do proj.functions[i] = { id = f.id, params = f.params, self = f.self, body = f.body, tags = f.tags,
                 upvalues = f.upvalues, -- (what it captures, CART-1958)
                 declares = f.declares, -- (what it declares, CART-1987)
-                vararg = f.vararg, spread = f.spread, argtable = f.argtable } end -- (the vararg markers, CART-1924)
+                vararg = f.vararg, spread = f.spread, argtable = f.argtable, -- (the vararg markers, CART-1924)
+                rest = f.rest } end -- (a call's rest result, CART-1948)
             for i, x in ipairs(D.sites) do proj.sites[i] = { id = x.id, kind = x.kind, label = x.label, fn = x.fn, host = x.host } end
             same = vim.deep_equal(vim.json.decode(vim.json.encode(LD)), vim.json.decode(vim.json.encode(proj)))
         end
@@ -2392,4 +2393,63 @@ test('flowdump: per-instruction source positions for every instruction that may 
     ok(at['loadDyn@6:25'], 't[k]: the dynamic load')
     ok(at['call@7:11'], 'f(1) in a declaration\'s value list: the call at its expression, not the statement')
     for _, e in ipairs(D.positions.at) do ok(NAME[e[1]] ~= 'init', 'init (synthetic, after the walk) has no position') end
+end)
+
+-- CART-1948 (flowpath FLOW-0047 / FLOW-0143): the vararg routes the dump still dropped, each now marked. (1) a yield's
+-- values and a resume's arguments spread from a last `...` or call; (2) a call whose values are all forwarded — `v(f())`,
+-- `return f()` — has a REST result: its last result variable collects every value past it (`rest` [[index, position]],
+-- tag vararg:rest), and the consumer's operand spreads from there; (3) a file chunk's own `...` is the chunk's vararg.
+test('flowdump: yield / resume spreads, a forwarded call\'s rest result, the chunk\'s own ... (CART-1948)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local name = ...',
+        'local function five() return 1, 2, 3, 4, 5 end',
+        'local function v(...) return ... end',
+        'print(v(five()))',
+        'local function g() return five() end',
+        'local co = coroutine.create(function (...) coroutine.yield(...); coroutine.yield(five()) end)',
+        'local function r(...) return coroutine.resume(co, ...) end',
+        'r(g())' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local F, BY = {}, {}
+    for _, fn in ipairs(D.functions) do F[fn.id] = fn; BY[D.names.functions[fn.id + 1]] = fn end
+    local function marks(fn, key, op)
+        local out = {}
+        for _, s in ipairs(fn[key] or {}) do
+            local ins = fn.body[s[1] + 1]
+            if ins[1] == op then out[#out + 1] = s[2] end
+        end
+        return out
+    end
+    local chunk = BY['chunk:m.lua']
+    ok(chunk, 'the chunk: ' .. vim.inspect(vim.tbl_keys(BY)))
+    -- (3) the chunk's `...` is its vararg, the last of its params
+    ok(chunk.vararg and chunk.params[#chunk.params] == chunk.vararg, 'the chunk declares its `...`: ' .. vim.inspect(chunk.params))
+    -- (2) v(five()): five's call has a rest result at 4, v's call spreads from 4
+    ok(vim.tbl_contains(marks(chunk, 'rest', 'call'), 4), 'five() forwarded into v: rest at 4: ' .. vim.inspect(chunk.rest))
+    ok(vim.tbl_contains(marks(chunk, 'spread', 'call'), 4), 'v(five()): the 4th operand spreads: ' .. vim.inspect(chunk.spread))
+    local g = BY['m.lua::g@4']
+    ok(g and vim.tbl_contains(marks(g, 'rest', 'call'), 4) and vim.tbl_contains(marks(g, 'spread', 'ret'), 4),
+        'return five(): the call\'s rest, the ret spreads from 4: ' .. vim.inspect(g and { g.rest, g.spread }))
+    -- (1) yield(...) spreads from 1; resume(co, ...) from its first argument after co
+    local yieldfn, rfn
+    for nm, fn in pairs(BY) do
+        if #marks(fn, 'spread', 'yield') > 0 then yieldfn = fn end
+        if nm == 'm.lua::r@6' then rfn = fn end
+    end
+    ok(yieldfn and vim.tbl_contains(marks(yieldfn, 'spread', 'yield'), 1), 'yield(...) spreads')
+    ok(yieldfn and vim.tbl_contains(marks(yieldfn, 'spread', 'yield'), 4), 'yield(five()): its rest value spreads from 4')
+    ok(rfn and vim.tbl_contains(marks(rfn, 'spread', 'resume'), 1), 'resume(co, ...) spreads its arguments: ' .. vim.inspect(rfn and rfn.spread))
+    -- every marker is tagged
+    for _, fn in ipairs(D.functions) do
+        local tg = {}
+        for _, t in ipairs(fn.tags or {}) do tg[t[1] .. t[2]] = true end
+        for _, s in ipairs(fn.spread or {}) do ok(tg[s[1] .. 'vararg:spread'], 'spread tagged') end
+        for _, s in ipairs(fn.rest or {}) do ok(tg[s[1] .. 'vararg:rest'], 'rest tagged') end
+    end
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)

@@ -19,7 +19,8 @@
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ],
---       upvalues = [var...], declares = [var...], vararg = var?, spread = [ [index, position] ... ]?, argtable = true? } ... ],
+--       upvalues = [var...], declares = [var...], vararg = var?, spread = [ [index, position] ... ]?,
+--       rest = [ [index, position] ... ]?, argtable = true? } ... ],
 --     program_vars = [var...],
 --       (DECLARES, CART-1987 / flowpath FLOW-0148: the variables the function DECLARES — one cell per ACTIVATION of it,
 --       whoever captures them. Its params, self and vararg; every local it declares (G7.LOCALS: `local n` with no
@@ -44,7 +45,11 @@
 --       (VARARGS, CART-1924: `vararg` names the slot — still params' last; `spread` each call / pcall / ret whose last
 --       operand spreads from that 1-based position into every parameter / result from there and the callee's vararg,
 --       tagged `vararg:spread`; `argtable` under ver 51 a vararg function that never names `...` — PUC 5.1's `arg`
---       table, whose reads are the gap `vararg-arg`)
+--       table, whose reads are the gap `vararg-arg`. CART-1948: a resume's arguments and a yield's values spread too
+--       (a last `...` or call); `rest` each call whose values are all forwarded (`v(f())`, `return f()`, a yield's /
+--       resume's last call) — its result variable at that 1-based position collects EVERY value from there on, tagged
+--       `vararg:rest`, and the consumer's operand spreads from it; a file chunk's own `...` with no declared loader is
+--       the chunk's `vararg`, tainted in the solution — what require / the script passes)
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
 --                  ctx = nil, live = nil,
 --                  taint = { ports, seeds, from } },
@@ -452,6 +457,8 @@ function M.build(rec, X, sink)
     local inittags = { { #init - 1, 'gap:unknown-code' } }
     -- instruction operands to JSON, naming every variable they use
     local function vars(l) for _, p in ipairs(l) do V(p) end; return l end
+    -- (a list's POSITIONAL part: a recorded list may carry `spread` / `rest`, which the dump states apart — CART-1924, 1948)
+    local function pvars(l) local o = {}; for i, p in ipairs(l) do o[i] = p end; return vars(o) end
     local function enc(ins)
         local op = ins[1]
         if op == 'new' then return { 'new', V(ins[2]), ins[3] }
@@ -467,7 +474,7 @@ function M.build(rec, X, sink)
             -- table here made LD an object where the JSON has an array, CART-1924)
             local as = {}
             for i, a in ipairs(ins[4]) do as[i] = a end
-            return { op, vars(ins[2]), V(ins[3]), vars(as) }
+            return { op, pvars(ins[2]), V(ins[3]), vars(as) }
         elseif op == 'keys' then return { 'keys', V(ins[2]), V(ins[3]) }
         -- (RAW accesses, FLOW-0090: a constructor's field, pairs' / next's value)
         elseif op == 'storeRaw' then
@@ -483,8 +490,8 @@ function M.build(rec, X, sink)
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
         elseif op == 'cocreate' then return { 'cocreate', V(ins[2]), ins[3], V(ins[4]) }
-        elseif op == 'resume' then return { 'resume', vars(ins[2]), V(ins[3]), vars(ins[4]) }
-        elseif op == 'yield' then return { 'yield', vars(ins[2]), vars(ins[3]) }
+        elseif op == 'resume' then return { 'resume', pvars(ins[2]), V(ins[3]), pvars(ins[4]) }
+        elseif op == 'yield' then return { 'yield', pvars(ins[2]), pvars(ins[3]) }
         end
         return nil
     end
@@ -530,11 +537,13 @@ function M.build(rec, X, sink)
         CUR = nil
         local extra = ',"upvalues":' .. jarr(ups) .. ',"declares":' .. jarr(decl) .. (va.vararg and (',"vararg":%d'):format(V(va.vararg)) or '')
             .. (va.spread and #va.spread > 0 and (',"spread":' .. jarr(va.spread)) or '')
+            .. (va.rest and #va.rest > 0 and (',"rest":' .. jarr(va.rest)) or '')
             .. (va.argtable and ',"argtable":true' or '')
         fjson[#fjson + 1] = ('{"id":%d,"params":%s,"self":%d,"body":%s,"tags":%s%s}'):format(FN(name), jarr(vars(params)),
             V(self), jarr(body), jarr(tags), extra)
         if LD then LD.functions[#LD.functions + 1] = { id = FN(name), params = params, self = self, body = body, tags = tags,
-            upvalues = ups, declares = decl, vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil, argtable = va.argtable } end
+            upvalues = ups, declares = decl, vararg = va.vararg, spread = va.spread and #va.spread > 0 and va.spread or nil,
+            rest = va.rest and #va.rest > 0 and va.rest or nil, argtable = va.argtable } end
     end
     local keys = {}
     for _, k in ipairs(rec.forder) do keys[#keys + 1] = k end
@@ -612,15 +621,30 @@ function M.build(rec, X, sink)
         end
         local fp = byname[name]
         local params = {}
-        -- (a call / pcall whose last argument spreads: its dumped index and the position, tagged, CART-1924)
-        local spreads = {}
+        -- (a call / pcall whose last argument spreads: its dumped index and the position, tagged, CART-1924; a resume's
+        -- arguments and a yield's values too, CART-1948)
+        -- (REST, CART-1948: a call whose values are all forwarded — `v(f())`, `return f()`, a yield's last call — asks
+        -- for up to four results and its LAST result variable collects every value past it: [index, position], tagged
+        -- vararg:rest)
+        local spreads, rests = {}, {}
         for i, ins in ipairs(rec.fns[name] or {}) do
-            if (ins[1] == 'call' or ins[1] == 'pcall') and type(ins[4]) == 'table' and ins[4].spread and map[i - 1] then
-                spreads[#spreads + 1] = { map[i - 1], ins[4].spread }
+            local ops = (ins[1] == 'call' or ins[1] == 'pcall' or ins[1] == 'resume') and ins[4] or (ins[1] == 'yield' and ins[3]) or nil
+            if type(ops) == 'table' and ops.spread and map[i - 1] then
+                spreads[#spreads + 1] = { map[i - 1], ops.spread }
                 tags[#tags + 1] = { map[i - 1], 'vararg:spread' }
             end
+            if ins[1] == 'call' and type(ins[2]) == 'table' and ins[2].rest and map[i - 1] then
+                rests[#rests + 1] = { map[i - 1], ins[2].rest }
+                tags[#tags + 1] = { map[i - 1], 'vararg:rest' }
+            end
         end
-        local va = { spread = spreads, upvalues = {} }
+        local va = { spread = spreads, rest = rests, upvalues = {} }
+        -- (a file CHUNK's own `...` — `local name = ...` — with no declared loader: the slot the walk reads, tainted by the
+        -- solve (what require / the script passes), now the chunk's marked vararg — it had been a variable nothing
+        -- defines, CART-1948. A declared loader's chunk (CART-1822) keeps its loader-args positions)
+        local cf = not fp and name:match('^chunk:(.+)$')
+        local cva = cf and X.CHUNKVA and X.CHUNKVA[cf]
+        if cva then params[1] = cva; va.vararg = cva end
         if fp then
             for i, p in ipairs(fp.params) do params[i] = p end
             for up in pairs(fp.ups or {}) do va.upvalues[#va.upvalues + 1] = up end -- (CART-1958: what it CAPTURES)
