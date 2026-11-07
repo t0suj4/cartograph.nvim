@@ -158,6 +158,8 @@
 --   `debug-upvalue`: a debug.setupvalue / getupvalue / upvaluejoin call by name whose function argument is past CAP —
 --   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
 --   lists (CART-1803, CART-1813).
+--   (CART-1957: a number / boolean target is no gap — `type_metatables` = [[type, type site, holder site]] names the type's
+--   metatable index; the gap stays for a function target, nothing held — nil — and a target past CAP)
 --   `debug-typemeta`: a debug.setmetatable call by name whose target is no table or string — a function (the solve links
 --   every function to the metatable's __index: no IR op says "every value of a type"), a number / boolean / nil (no
 --   object: the solve reads nothing through it), or past CAP (CART-1957).
@@ -399,8 +401,8 @@ function M.build(rec, X, sink)
     -- ★ A TYPE'S METATABLE (CART-1957): debug.setmetatable(v, mt) on a value that is no table sets the metatable of its
     -- whole TYPE. On a string the solve applies it to the string library; on a function to every function (prototype
     -- links the IR's one `setmeta` does not carry); a number / boolean / nil holds no object, and nothing reads through
-    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds a number / boolean type object
-    -- (CART-1901) or nothing (nil
+    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds nothing (nil — a number /
+    -- boolean target is its type's metatable since CART-1957, `type_metatables`, no gap
     -- literal) or holds a function — the IR cannot say "every value of this type"
     for _, u in ipairs(X.TYPEMTCALLS or {}) do
         local t = u.args[1]
@@ -409,9 +411,9 @@ function M.build(rec, X, sink)
             local any = false
             for o in X.each(t) do
                 any = true
-                -- (a number / boolean holds its type object since CART-1901: a scalar target, as nothing held was)
-                local tn = X.TNAME and X.TNAME[o]
-                if X.fnports[o] or tn == 'number' or tn == 'integer' or tn == 'boolean' then gap = true; break end
+                -- (a number / boolean target is the TYPE's metatable, modelled since CART-1957: `type_metatables` names it —
+                -- no gap. A function's, or nothing held — nil, absence — stays the gap)
+                if X.fnports[o] then gap = true; break end
             end
             if not any then gap = true end
         end
@@ -1188,6 +1190,18 @@ function M.build(rec, X, sink)
             if o then nj[#nj + 1] = jarr({ o, (k:gsub('#', '.')) }) end
         end
         put('"natives":['); putl(nj); put('],')
+    end
+    -- (TYPE METATABLES, CART-1957 / flowpath FLOW-0049: [type, type site, holder site] — debug.setmetatable on a number /
+    -- boolean set its TYPE's metatable; a load on the type's site reads through the holder, whose prototype is the
+    -- metatable's __index, as the string library is a string's)
+    do
+        local tj = {}
+        for _, e in ipairs(X.TYPEMTS or {}) do
+            local to
+            for o, tn in pairs(X.TNAME or {}) do if tn == e[1] then to = o end end
+            tj[#tj + 1] = jarr({ e[1], to or vim.NIL, e[2] })
+        end
+        put('"type_metatables":['); putl(tj); put('],')
     end
     put('"positions":{"files":'); put(jarr(posfiles))
     put(',"at":['); putl(posj); put(']},')

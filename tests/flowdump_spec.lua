@@ -2020,7 +2020,7 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
         if form:find('^debug') then eq(1, gaps(D), 'by name: the call is a named gap') end
     end
     local D = solve('debug.setmetatable(0, { __index = {} })\nlocal y = (5).foo\nreturn y\n')
-    eq(1, gaps(D), 'a number target: the gap')
+    eq(0, gaps(D), 'a number target: its type\'s metatable, no gap (CART-1957)')
     ok(D.contracts.clauses['function-no-metatable'], 'no function target: the clause stands')
     D = solve('local t = {}\ndebug.setmetatable(t, { __index = {} })\nreturn t\n')
     eq(0, gaps(D), 'a table target: no gap')
@@ -2742,4 +2742,45 @@ test('flowdump: every call expression has a .call; spelled builtins add an ident
     ok(gnbit and pres, 'the GN clause and a pcall')
     eq(0, require('bit').band(L[pres] or 0, require('bit').lshift(1, gnbit)), 'the pcall\'s status carries no GN from its twin')
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)
+
+-- CART-1957 (flowpath FLOW-0049; the user's approval 2026-11-07): debug.setmetatable on a NUMBER or a BOOLEAN sets its
+-- TYPE's metatable — `(5).foo` reads mt.__index.foo. The type's object (CART-1901) indexes through a holder whose
+-- prototype is the __index; the dump names it in `type_metatables` and keeps no gap. nil stays the named gap
+-- debug-typemeta; a number's metatable is not a string's.
+test('flowdump: debug.setmetatable on a number / boolean is its type\'s metatable; nil stays the gap (CART-1957)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(src)
+        local root = tree({ ['m.lua'] = 'local function g() return 1 end\nlocal mt = { __index = { foo = g } }\n' .. src })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, explain = true })
+        local Rd = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        local D = vim.json.decode(Rd.dump)
+        local p = R.port('g:Y')
+        local y = p and R.objs_of(p) or {}
+        local gap = 0
+        for _, g in ipairs(D.gaps) do if g.kind == 'debug-typemeta' then gap = gap + 1 end end
+        return y, gap, D
+    end
+    local function holds_g(y) return #y == 1 and tostring(y[1]):find('::g@0', 1, true) ~= nil end
+    local y, gap, D = run('debug.setmetatable(0, mt)\nY = (5).foo\n')
+    ok(holds_g(y), 'a number: (5).foo is g: ' .. vim.inspect(y)); eq(0, gap, 'no gap')
+    eq(1, #D.type_metatables, 'type_metatables names the number type'); eq('number', D.type_metatables[1][1])
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+    y, gap = run('debug.setmetatable(true, mt)\nY = (false).foo\n')
+    ok(holds_g(y), 'a boolean: (false).foo is g: ' .. vim.inspect(y)); eq(0, gap)
+    y = run('debug.setmetatable(1 > 2, mt)\nlocal n = 3\nY = (n == 3).foo\n')
+    ok(holds_g(y), 'a comparison result is a boolean: ' .. vim.inspect(y))
+    y = run('local dsm = debug.setmetatable\ndsm(0, mt)\nY = (7).foo\n')
+    ok(holds_g(y), 'by value, through an alias: ' .. vim.inspect(y))
+    y, gap = run('debug.setmetatable(nil, mt)\nlocal z\nY = z\n')
+    eq({}, y); eq(1, gap, 'nil: the named gap')
+    y = run('debug.setmetatable(0, mt)\nY = ("s").foo\n')
+    eq({}, y, 'a number\'s metatable is not a string\'s')
+    y = run('Y = (5).foo\n')
+    eq({}, y, 'no debug.setmetatable: a number indexes nothing')
+    -- a load on a number reached only AFTER the type took its metatable — a function found through it, called with 7
+    y = run('mt.__index.bar = g\nmt.__index.foo2 = function (n) Y = n.bar end\ndebug.setmetatable(0, mt)\nlocal f = (5).foo2\nf(7)\n')
+    ok(holds_g(y), 'a load first seen after the holder exists reads through it: ' .. vim.inspect(y))
 end)

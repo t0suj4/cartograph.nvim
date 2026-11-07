@@ -972,6 +972,17 @@ local function build(store, opts)
             -- `string.pick = …` among them; `s[k]` had read nothing, an unexplained loadDyn in the dump, CART-1730)
             local sl = G7.MULTI and G7.LENV[dst] and G7.LENV[dst].STRLIB or G7.STRLIB
             if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict, o) end
+            -- (a number / boolean whose TYPE took a metatable — debug.setmetatable(0, mt): its __index, through the type's
+            -- holder, CART-1957)
+            local tkey = tn == 'integer' and 'number' or tn
+            local tph = G7.TYPEPROTO[tkey]
+            if tph and f ~= '#' then load_obj(tph, f, dst, seen, strict, o)
+            elseif (tkey == 'number' or tkey == 'boolean') and f ~= '#' then
+                -- (a host type registers no reader: kept, once per load, for a holder made after it)
+                local m = G7.SCALARLD[o]; if not m then m = {}; G7.SCALARLD[o] = m end
+                local k = f .. '\0' .. dst
+                if not m[k] then m[k] = { f, dst, strict } end
+            end
             local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             -- (a host RECORD's declared field, CART-1827: `debug.getinfo(1, 'S').source` is a string — the profile's
@@ -1686,6 +1697,7 @@ local function build(store, opts)
             M0['setmetatable'](a, rl)
             if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
             if a[1] and a[2] then G7.FNMTPEND[#G7.FNMTPEND + 1] = { a[1], a[2] } end -- (on a FUNCTION: every function's, CART-1957)
+            if a[1] and a[2] then G7.TYPEMTPEND[#G7.TYPEMTPEND + 1] = { a[1], a[2] } end -- (a NUMBER / BOOLEAN: its type's, CART-1957)
         end
         M0['debug#getmetatable'] = function (a, rl)
             if not a[1] then return end
@@ -2258,6 +2270,9 @@ local function build(store, opts)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.FNMTPEND = {} -- (debug.setmetatable targets and their metatables: the function TYPE's metatable, CART-1957)
     G7.TYPEMTCALLS = {} -- (debug.setmetatable calls by name, for the dump's debug-typemeta gap: CART-1957)
+    -- (number / boolean: the TYPE's metatable index, a holder object made only when a debug.setmetatable target may hold
+    -- that type — CART-1957; G7.TYPEMTS lists { type, holder } for the dump)
+    G7.TYPEMTPEND, G7.TYPEPROTO, G7.TYPEMTS, G7.SCALARLD = {}, {}, {}, {}
     G7.LOCALS, G7.DBGCTX = {}, {} -- (function -> its local ports; a debug.setlocal / getlocal call by name -> its frame)
     G7.ANYFRAME = {} -- ({ port, true: a setlocal value into every local | false: a getlocal result out of it }, CART-1956)
     G7.LIBSITES, G7.PKGL = {}, {}
@@ -4916,6 +4931,44 @@ local function build(store, opts)
         G7.FNMTPEND = {}
         if G7.FNMT then solve() end
     end
+    -- ★ A NUMBER'S / BOOLEAN'S METATABLE IS ITS TYPE'S (CART-1957, flowpath FLOW-0049; the user's approval 2026-11-07).
+    -- debug.setmetatable(v, mt) on a number or a boolean sets the metatable of every value of that type: `(5).foo` then
+    -- reads mt.__index.foo. Since CART-1901 such a value holds its type object (type:number / type:boolean), so the type
+    -- has an object to index through: a HOLDER `typemt:<type>` — made only here, where a target may hold the type, so no
+    -- other solve's numbering moves — whose prototype is mt's __index, as the string library's is (STRPEND). A load on the
+    -- type's object reads through the holder; the readers registered before it existed are registered on it now. nil
+    -- stays the dump's gap debug-typemeta (absence holds no object); a target past CAP is not followed (the gap names it)
+    if #G7.TYPEMTPEND > 0 then
+        local grew = false
+        for _, q in ipairs(G7.TYPEMTPEND) do
+            local y = q[1]
+            if not top[y] then
+                local done = {}
+                for o in each(y) do
+                    local tn = TNAME[o]
+                    tn = tn == 'integer' and 'number' or tn
+                    if (tn == 'number' or tn == 'boolean') and not done[tn] then
+                        done[tn] = true
+                        local H = G7.TYPEPROTO[tn]
+                        if not H then
+                            H = newobj('typemt:' .. tn)
+                            G7.NOESC[H] = true -- (a type's metatable index, as a library: unknown code does not patch it — C2)
+                            G7.TYPEPROTO[tn] = H
+                            G7.TYPEMTS[#G7.TYPEMTS + 1] = { tn, H }
+                            for _, tk in ipairs(tn == 'number' and { 'number', 'integer' } or { tn }) do
+                                local to = TYPEOBJ[tk]
+                                for _, e in pairs(to and G7.SCALARLD[to] or NOTHING) do load_obj(H, e[1], e[2], nil, e[3], to) end
+                            end
+                        end
+                        local sp = new(); addobj(sp, H); proto(sp, field(q[2], '__index'), true)
+                        grew = true
+                    end
+                end
+            end
+        end
+        G7.TYPEMTPEND = {}
+        if grew then solve() end
+    end
     -- ★ FINALIZERS, DEFERRED (CART-1707): each setmetatable's `\1mt.__gc` load was 29 M of w2's 39 M load visits
     -- (solve 41 -> 76 s) for a handler no WoW addon defines. A finalizer exists only where a metatable — read after the
     -- solve, when every write has landed — holds `__gc` or a field a dynamic key wrote, or its port saturated; otherwise
@@ -7023,7 +7076,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
