@@ -2480,3 +2480,55 @@ test('flowdump: a forwarded pcall / resume / yield marks its rest result, the co
     ok((spreads.call or 0) >= 3, 'each consumer v(…) spreads: ' .. vim.inspect(spreads))
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- CART-1995 (flowpath FLOW-0075): a pcall whose callee is a HOST builtin starts no activation in the core. error / assert
+-- are protected as a SYNTHETIC function the dump holds (`error p1`; assert `error p2`, a string, its arguments returned),
+-- so the caught value flows by core steps; any other host builtin's pcall is tagged gap:host-pcall (outside-raises-strings
+-- not claimed: what it runs may raise an object)
+test('flowdump: pcall(error / assert, …) protects a synthetic function; another host builtin is tagged gap:host-pcall (CART-1995)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local t = {}',
+        'local ok, e = pcall(error, t)',
+        'local ok2, e2 = pcall(assert, false, t)',
+        'local err = error',
+        'local ok3, e3 = pcall(err, t)',
+        'local ok4 = pcall(table.sort, { 2, 1 }, function (x, y) error(t) end)',
+        'return e, e2, e3, ok4' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local V = {}
+    for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+    local site, label = {}, {}
+    for _, s in ipairs(D.sites) do site[s.label] = s.id; label[s.id] = s.label end
+    local tsite = site['tbl:m.lua:0:10']
+    ok(tsite, 't has a site')
+    local pcalls, tagged = {}, 0
+    for _, fn in ipairs(D.functions) do
+        for k, ins in ipairs(fn.body) do
+            if ins[1] == 'pcall' then
+                local cl = {}
+                for _, o in ipairs(V[ins[3]] or {}) do cl[#cl + 1] = label[o] end
+                pcalls[#pcalls + 1] = { callee = table.concat(cl, ','), e = ins[2][2] }
+            end
+        end
+        for _, tg in ipairs(fn.tags or {}) do if tg[2] == 'gap:host-pcall' then tagged = tagged + 1 end end
+    end
+    local syn = 0
+    for _, p in ipairs(pcalls) do
+        if p.callee:find('^ts:error:') or p.callee:find('^ts:assert:') then
+            syn = syn + 1
+            ok(p.e and vim.tbl_contains(V[p.e] or {}, tsite), 'the caught value is t, by the call: ' .. p.callee)
+        end
+    end
+    eq(3, syn, 'error, assert and an alias of error protect a synthetic function: ' .. vim.inspect(pcalls))
+    eq(1, tagged, 'table.sort\'s pcall is tagged gap:host-pcall')
+    for _, fn in ipairs(D.functions) do
+        local nm = D.names.functions[fn.id + 1]
+        if nm:find('^ts:error:') then eq('error', fn.body[1][1], 'the synthetic body raises its first parameter') end
+    end
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

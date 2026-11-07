@@ -129,7 +129,12 @@
 --   spec/ecosystem `handlers`, WoW's frame:SetScript / HookScript: emitted at the registration, the receiver first and
 --   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955; and the host's
 --   call of a hooksecurefunc WRAPPER where the ecosystem's hook form declares host_calls, at the hooksecurefunc, CART-1990),
---   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
+--   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949),
+--   `gap:host-pcall` (a pcall / xpcall whose callee names a host builtin other than error / assert — require, table.sort,
+--   string.gsub …: what it runs may raise any value, so outside-raises-strings is not claimed there; the solve routes it
+--   into the pcall's error, CART-1995. `pcall(error, x)` / `pcall(assert, c, x)` protect a SYNTHETIC function instead —
+--   `ts:error:<site>` (`error p1`) / `ts:assert:<site>` (`error p2`, a string error, its arguments returned) — so the
+--   caught value flows by core steps). (Since CART-1689 / 1715 a call's callee is the callee expression's flow, never the name join's
 --   claim: no call is synthesized.)
 -- * GAPS: constructs with no core opcode, or modelled outside the IR — getfenv / setfenv, hooksecurefunc,
 --   getmetatable, newproxy, a hidden field's load / store, a keyed copy, unknown code (load ... : the `ext` sites and

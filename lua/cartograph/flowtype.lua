@@ -3516,13 +3516,66 @@ local function build(store, opts)
                 -- clause this rests on. xpcall hands it to its handler, whose result is the second value)
                 local perr = new()
                 addobj(perr, STR)
-                -- (`pcall(error, x)` raises x ITSELF: the builtin error has no site, so the protected call ran nothing and
-                -- the error value was only outside-raises-strings' string. A whole exact the run falsifies, CART-1765)
-                if argn[1]:type() == 'identifier' and txt(argn[1]) == 'error' and aps[1] then
-                    local loc = false
-                    for i = #scopes, 1, -1 do if scopes[i]['error'] then loc = true; break end end
-                    if not loc then edge(aps[1], perr) end
+                -- ★ THE PROTECTED FUNCTION IS A HOST BUILTIN (CART-1995, flowpath FLOW-0075). The core's pcall of a host
+                -- value starts no activation, so it raises nothing there — while Lua's does:
+                --   error / assert (the global, or a local alias of it, CART-1993): `pcall(error, x)` raises x ITSELF
+                --     (CART-1765 had put x into e by a rule no core step makes). Now the callee is a SYNTHETIC function —
+                --     `error p1` (assert: `error p2`, a string error, and its arguments returned) — protected like any
+                --     other: its error port is the pcall's, by the call's own binding, and the dump holds its body
+                --   any other builtin of the host (require runs a chunk, table.sort a comparator, string.gsub a function —
+                --     each may raise an object): the pcall is tagged `gap:host-pcall` — outside-raises-strings is not
+                --     claimed there; the solve routes what the builtin runs into e (CART-1708)
+                local cn = argn[1]
+                local function bname(x) -- (the global builtin a callee expression names, alias or spelling | nil)
+                    if x:type() == 'identifier' then
+                        local nm = txt(x)
+                        local lp, g = lookup(nm)
+                        if g then return nm end
+                        local an = G7.GALIAS[lp]
+                        local base = an and an:match('^([%a_][%w_]*)%.')
+                        if an and not reasg()[nm] and not (base and reasg()[base]) then return an end
+                    elseif x:type() == 'dot_index_expression' then
+                        local tb, fd = x:field('table')[1], x:field('field')[1]
+                        if tb and fd and tb:type() == 'identifier' then
+                            local _, g = lookup(txt(tb))
+                            if g then return txt(tb) .. '.' .. txt(fd) end
+                        end
+                    end
                 end
+                local bn = bname(cn)
+                local herr = (bn == 'error' or bn == 'assert') and bn or nil
+                local hostcallee = bn and not herr and G7.NATOBJ[(bn:gsub('%.', '#'))] and true or nil
+                local function callee()
+                    if not herr then return expr(cn) end
+                    return G7.mu(function ()
+                        local id = 'ts:' .. herr .. ':' .. key_of(n) -- (no graph node: a verdict naming it is no claim)
+                        local w, wp = newobj(id), new()
+                        G7.ins({ 'new', wp, w })
+                        addobj(wp, w)
+                        local ps, rs = {}, {}
+                        for k = 1, MULTI do ps[k] = new(); rs[k] = new() end
+                        local wfp = { params = ps, vararg = new(), ret = rs[1], rets = rs, id = id, err = new() }
+                        if G7.REC then wfp.dself = port('s:' .. id) end
+                        fnports[w] = wfp
+                        local raised = herr == 'error' and ps[1] or ps[2]
+                        edge(raised, wfp.err)
+                        if G7.REC and G7.W then G7.REC.ins(id, { 'error', raised }) end
+                        if herr == 'assert' then
+                            -- (no message: "assertion failed!"; and assert returns what it was given)
+                            local sp = new()
+                            addobj(sp, STR)
+                            edge(sp, wfp.err)
+                            for k = 1, MULTI do edge(ps[k], rs[k]) end
+                            if G7.REC and G7.W then
+                                G7.REC.ins(id, { 'new', sp, STR })
+                                G7.REC.ins(id, { 'error', sp })
+                                for k = 1, MULTI do G7.REC.ins(id, { 'copy', rs[k], ps[k] }) end
+                            end
+                        end
+                        return wp
+                    end)
+                end
+                local ptag = hostcallee and 'gap:host-pcall' or nil
                 -- (xpcall's HANDLER runs with the error result, and its returns join the results after the status — in the
                 -- IR over existing instructions, CART-1772: the pcall, `call [hr] h [r1]`, `copy r1 hr`. r1 also holds the
                 -- error itself, where the core's pcall puts it: a superset. As a statement, `xpcall(f, h, x)` had called
@@ -3542,16 +3595,16 @@ local function build(store, opts)
                     local w = (rest and want < 2) and 2 or want
                     for k = 1, w - 1 do fl[k] = new(); out[k + 1] = fl[k] end
                     if rest then fl.rest, out.rest = #fl, #out end
-                    local fv = expr(argn[1])
-                    G7.ins({ 'pcall', out, fv, aps })
+                    local fv = callee()
+                    G7.ins({ 'pcall', out, fv, aps }, ptag)
                     G7.callany(fv, aps, fl, nil, perr)
                     if out[2] then edge(perr, out[2]); handler(out[2]) end
                     return out
                 end
                 local res = new()
-                local fv = expr(argn[1])
+                local fv = callee()
                 local r1 = fname == 'xpcall' and argn[2] and new() or nil
-                G7.ins({ 'pcall', r1 and { res, r1 } or { res }, fv, aps })
+                G7.ins({ 'pcall', r1 and { res, r1 } or { res }, fv, aps }, ptag)
                 G7.callany(fv, aps, res, nil, perr)
                 if r1 then edge(res, r1); edge(perr, r1); handler(r1) end
                 return res
