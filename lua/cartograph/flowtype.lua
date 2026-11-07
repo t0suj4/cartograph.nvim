@@ -3473,6 +3473,9 @@ local function build(store, opts)
                 for _, ap in ipairs(aps) do edge(ap, gresarg()) end
                 local fl, out = {}, { new() }
                 for k = 1, math.max((want or 1) - 1, 1) do fl[k] = new(); out[k + 1] = fl[k]; edge(gyield(), fl[k]) end
+                -- (FORWARDED, CART-1996: `v(coroutine.resume(co))` — the last result collects every value past it: every
+                -- yield's are in each already; the coroutine body's returns, through `rest` on its results)
+                if rest then fl.rest, out.rest = #fl, #out end
                 -- (resume CATCHES what the coroutine raises: `false, err`)
                 local rerr = new()
                 if G7.REC then G7.REC.rerr[#G7.REC.rerr + 1] = rerr end
@@ -3489,6 +3492,7 @@ local function build(store, opts)
                 for _, y in ipairs(ys) do edge(y, gyield()) end
                 local out = {}
                 for k = 1, want or 1 do out[k] = new(); edge(gresarg(), out[k]) end
+                if rest then out.rest = #out end -- (forwarded: the dump marks it, CART-1996 — every resume argument is in each)
                 G7.ins({ 'yield', out, ys })
                 if want then return out end
                 return out[1]
@@ -3526,7 +3530,11 @@ local function build(store, opts)
                 end
                 if want then
                     local fl, out = {}, { new() }
-                    for k = 1, want - 1 do fl[k] = new(); out[k + 1] = fl[k] end
+                    -- (FORWARDED, CART-1996: `v(pcall(f))` — at least one value after the status, and the last collects
+                    -- every value of f's past it: `rest` on f's results and on the pcall's own)
+                    local w = (rest and want < 2) and 2 or want
+                    for k = 1, w - 1 do fl[k] = new(); out[k + 1] = fl[k] end
+                    if rest then fl.rest, out.rest = #fl, #out end
                     local fv = expr(argn[1])
                     G7.ins({ 'pcall', out, fv, aps })
                     G7.callany(fv, aps, fl, nil, perr)

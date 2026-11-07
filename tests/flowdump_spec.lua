@@ -2453,3 +2453,29 @@ test('flowdump: yield / resume spreads, a forwarded call\'s rest result, the chu
     end
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
 end)
+
+-- CART-1996: pcall's, coroutine.resume's and coroutine.yield's OWN result lists, forwarded (`v(pcall(f))`), carry
+-- `rest` too: the last result collects every value past it (the solve: route fixtures pcall_five / resume_five /
+-- resume_yield_five); the consumer's operand spreads from there
+test('flowdump: a forwarded pcall / resume / yield marks its rest result, the consumer spreads (CART-1996)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local SRC = table.concat({
+        'local function five() return 1, 2, 3, 4, 5 end',
+        'local function v(...) return ... end',
+        'print(v(pcall(five)))',
+        'local co = coroutine.create(function () print(v(coroutine.yield(1))) end)',
+        'print(v(coroutine.resume(co)))' }, '\n') .. '\n'
+    local root = tree({ ['m.lua'] = SRC })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, dump = true })
+    vim.fn.delete(root, 'rf')
+    local D = vim.json.decode(R.dump)
+    local rests, spreads = {}, {}
+    for _, fn in ipairs(D.functions) do
+        for _, s in ipairs(fn.rest or {}) do local op = fn.body[s[1] + 1][1]; rests[op] = (rests[op] or 0) + 1 end
+        for _, s in ipairs(fn.spread or {}) do local op = fn.body[s[1] + 1][1]; spreads[op] = (spreads[op] or 0) + 1 end
+    end
+    ok(rests.pcall and rests.resume and rests.yield, 'pcall / resume / yield results marked rest: ' .. vim.inspect(rests))
+    ok((spreads.call or 0) >= 3, 'each consumer v(…) spreads: ' .. vim.inspect(spreads))
+    eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)

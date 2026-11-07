@@ -46,8 +46,9 @@
 --       operand spreads from that 1-based position into every parameter / result from there and the callee's vararg,
 --       tagged `vararg:spread`; `argtable` under ver 51 a vararg function that never names `...` — PUC 5.1's `arg`
 --       table, whose reads are the gap `vararg-arg`. CART-1948: a resume's arguments and a yield's values spread too
---       (a last `...` or call); `rest` each call whose values are all forwarded (`v(f())`, `return f()`, a yield's /
---       resume's last call) — its result variable at that 1-based position collects EVERY value from there on, tagged
+--       (a last `...` or call); `rest` each call / pcall / resume / yield whose values are all forwarded (`v(f())`,
+--       `return f()`, `v(pcall(f))`, a yield's / resume's last call; CART-1996 for pcall / resume / yield) — its result
+--       variable at that 1-based position collects EVERY value from there on, tagged
 --       `vararg:rest`, and the consumer's operand spreads from it; a file chunk's own `...` with no declared loader is
 --       the chunk's `vararg`, tainted in the solution — what require / the script passes)
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
@@ -625,7 +626,7 @@ function M.build(rec, X, sink)
         -- arguments and a yield's values too, CART-1948)
         -- (REST, CART-1948: a call whose values are all forwarded — `v(f())`, `return f()`, a yield's last call — asks
         -- for up to four results and its LAST result variable collects every value past it: [index, position], tagged
-        -- vararg:rest)
+        -- vararg:rest; a pcall's, resume's and yield's results too, CART-1996)
         local spreads, rests = {}, {}
         for i, ins in ipairs(rec.fns[name] or {}) do
             local ops = (ins[1] == 'call' or ins[1] == 'pcall' or ins[1] == 'resume') and ins[4] or (ins[1] == 'yield' and ins[3]) or nil
@@ -633,7 +634,8 @@ function M.build(rec, X, sink)
                 spreads[#spreads + 1] = { map[i - 1], ops.spread }
                 tags[#tags + 1] = { map[i - 1], 'vararg:spread' }
             end
-            if ins[1] == 'call' and type(ins[2]) == 'table' and ins[2].rest and map[i - 1] then
+            local op1 = ins[1]
+            if (op1 == 'call' or op1 == 'pcall' or op1 == 'resume' or op1 == 'yield') and type(ins[2]) == 'table' and ins[2].rest and map[i - 1] then
                 rests[#rests + 1] = { map[i - 1], ins[2].rest }
                 tags[#tags + 1] = { map[i - 1], 'vararg:rest' }
             end
