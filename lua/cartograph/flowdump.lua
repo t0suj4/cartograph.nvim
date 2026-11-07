@@ -13,9 +13,11 @@
 -- layer is FLOW C.3. The answers in the dump are that run's.
 --
 -- FORMAT 1 (CORE.md §5, with these decisions — revisable with the reader):
---   { format = 1, lang = 'lua', ver = 51 (the profile's lua_version: 52 for Factorio's 5.2), cartograph = <sha|nil>, corpus = { root, sha }, mode = 'closed', instances = false,
---   (cartograph: the PRODUCER's commit — the repo flowtype.lua is in; corpus.sha: the analysed tree's own commit, null
---   when its root is not a repository's top level)
+--   { format = 1, lang = 'lua', ver = 51 (the profile's lua_version: 52 for Factorio's 5.2), cartograph = <sha|nil>,
+--     cartograph_via = 'git' | 'env' | 'file' | nil, corpus = { root, sha }, mode = 'closed', instances = false,
+--   (cartograph: the PRODUCER's commit — the repo flowtype.lua is in, or, from a .git-less snapshot, CARTOGRAPH_COMMIT /
+--   <root>/.cartograph-commit / lua/cartograph/COMMIT as git archive fills it (M.producer, CART-1997); cartograph_via says
+--   which; corpus.sha: the analysed tree's own commit, null when its root is not a repository's top level)
 --     names = { fields = [...], functions = [...] },
 --     sites = [ { id, kind, label, fn } ... ],
 --     functions = [ { id, params = [var...], self = var, body = [ins...], tags = [ [index, tag] ... ],
@@ -241,6 +243,35 @@ function M.head(dir, own)
     end
     local sha = vim.fn.systemlist({ 'git', '-C', dir, 'rev-parse', 'HEAD' })[1]
     return vim.v.shell_error == 0 and sha or nil
+end
+
+--- ★ THE PRODUCER'S COMMIT, ALSO FROM A SNAPSHOT (CART-1997). M.head(root, true) is the truth where cartograph's root is a
+--- repository's top level; a snapshot without .git (flowpath runs `snap/cart-<sha>/` copies) had no commit at all — the
+--- dump's `cartograph` was null, so a checker could not refuse a dump older than a marker commit. In order:
+---   git    the root is its own repository's top level (CART-1724: never an ENCLOSING repository's HEAD)
+---   env    CARTOGRAPH_COMMIT — the caller states it
+---   file   <root>/.cartograph-commit — whoever makes the snapshot writes it (first line); or lua/cartograph/COMMIT,
+---          which `git archive` fills by export-subst (.gitattributes) — a plain copy leaves `$Format:%H$`, refused
+--- A value must be 7..40 hex digits. -> sha, via ('git' | 'env' | 'file') | nil
+function M.producer(root)
+    if type(root) ~= 'string' or root == '' then return nil end
+    local sha = M.head(root, true)
+    if sha then return sha, 'git' end
+    local function hex(s)
+        s = s and vim.trim(s)
+        return s and #s >= 7 and #s <= 40 and s:match('^%x+$') and s:lower() or nil
+    end
+    local e = hex(os.getenv('CARTOGRAPH_COMMIT'))
+    if e then return e, 'env' end
+    for _, f in ipairs({ root .. '/.cartograph-commit', root .. '/lua/cartograph/COMMIT' }) do
+        local fd = io.open(f)
+        if fd then
+            local l = fd:read('*l'); fd:close()
+            local h = hex(l)
+            if h then return h, 'file' end
+        end
+    end
+    return nil
 end
 
 -- ── the writer: JSON by hand (the dump of a large tree is tens of MB; vim.json.encode of one table doubles it) ──
@@ -1123,9 +1154,9 @@ function M.build(rec, X, sink)
     -- (the solve's real mode — open or closed: it had been written "closed" whatever the solve was, CART-1777)
     -- (`ver`: the analysed code's Lua version, its profile's lua_version — 51 when it declares none; flowpath's
     -- core keys comparison semantics on it, and certifies 51 only, CART-1810)
-    put(('{"format":1,"lang":"lua","ver":%d,"cartograph":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
+    put(('{"format":1,"lang":"lua","ver":%d,"cartograph":%s,"cartograph_via":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
         X.LUAVER or 51,
-        X.sha and jstr(X.sha) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
+        X.sha and jstr(X.sha) or 'null', X.sha_via and jstr(X.sha_via) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
         jstr(X.MODE or 'closed')))
     put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')
     put('"sites":['); putl(sj); put('],')

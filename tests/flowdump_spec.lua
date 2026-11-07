@@ -107,6 +107,7 @@ test('flowdump: the format — the Lua instance\'s field ids, host sites, per-fu
     eq(1, D.format)
     -- (the PRODUCER's commit is cartograph's, wherever the caller stands; a corpus that is no repository has none — CART-1721)
     eq(vim.fn.systemlist({ 'git', '-C', vim.fn.fnamemodify(debug.getinfo(require('cartograph.flowtype').solve, 'S').source:sub(2), ':h'), 'rev-parse', 'HEAD' })[1], D.cartograph)
+    eq('git', D.cartograph_via, 'and it says where the commit came from (CART-1997)')
     eq(vim.NIL, D.corpus.sha, 'a temp tree is no repository')
     eq('<meta>', D.names.fields[101], 'the metatable slot is field 100')
     eq('__index', D.names.fields[102], '__index is field 101')
@@ -2581,4 +2582,48 @@ test('flowdump: a module chunk\'s raise reaches the pcall around its require; re
     for _, o in ipairs(V[pc[2][2][2]] or {}) do caught[#caught + 1] = label[o] end
     for _, l in ipairs(caught) do ok(not l:find('lua/x.lua', 1, true), 'quiet\'s pcall catches nothing of x: ' .. vim.inspect(caught)) end
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
+end)
+
+-- CART-1997: the producer's commit from a .git-less snapshot. git first (the root its own repository's top level), then
+-- CARTOGRAPH_COMMIT, then <root>/.cartograph-commit or lua/cartograph/COMMIT (git archive fills it by export-subst; a
+-- plain copy's `$Format:%H$` is refused). The dump says which: cartograph_via.
+test('flowdump: the producer commit from git, CARTOGRAPH_COMMIT, a commit file, or git archive\'s COMMIT (CART-1997)', function ()
+    local FD = require 'cartograph.flowdump'
+    local env0 = vim.env.CARTOGRAPH_COMMIT
+    vim.env.CARTOGRAPH_COMMIT = nil
+    local snap = vim.fn.tempname()
+    vim.fn.mkdir(snap .. '/lua/cartograph', 'p')
+    eq(nil, FD.producer(snap), 'no repository, no statement: none')
+    -- a plain copy's placeholder is refused
+    local fd = assert(io.open(snap .. '/lua/cartograph/COMMIT', 'w')); fd:write('$Format:%H$\n'); fd:close()
+    eq(nil, FD.producer(snap), 'an unfilled placeholder is no commit')
+    -- what git archive writes
+    local sha = 'd6a58af8a1b2c3d4e5f60718293a4b5c6d7e8f90'
+    fd = assert(io.open(snap .. '/lua/cartograph/COMMIT', 'w')); fd:write(sha .. '\n'); fd:close()
+    eq({ sha, 'file' }, { FD.producer(snap) })
+    -- the snapshot maker's file wins over the archive's
+    fd = assert(io.open(snap .. '/.cartograph-commit', 'w')); fd:write('  ABCDEF1\n'); fd:close()
+    eq({ 'abcdef1', 'file' }, { FD.producer(snap) })
+    -- the environment wins over both
+    vim.env.CARTOGRAPH_COMMIT = '0123456789abcdef'
+    eq({ '0123456789abcdef', 'env' }, { FD.producer(snap) })
+    vim.env.CARTOGRAPH_COMMIT = 'not a sha'
+    eq({ 'abcdef1', 'file' }, { FD.producer(snap) }, 'a malformed statement is ignored')
+    vim.env.CARTOGRAPH_COMMIT = env0
+    vim.fn.delete(snap, 'rf')
+    -- and the real checkout: git, its HEAD
+    local here = vim.fn.fnamemodify(debug.getinfo(require('cartograph.flowtype').solve, 'S').source:sub(2), ':h:h:h')
+    local head = vim.fn.systemlist({ 'git', '-C', here, 'rev-parse', 'HEAD' })[1]
+    eq({ head, 'git' }, { FD.producer(here) })
+    -- git archive fills COMMIT (the export-subst attribute is the repository's)
+    local out = vim.fn.system({ 'git', '-C', here, 'archive', 'HEAD', 'lua/cartograph/COMMIT', '.gitattributes' })
+    if vim.v.shell_error == 0 and out:find('export-subst', 1, true) then
+        local tf = vim.fn.tempname()
+        vim.fn.mkdir(tf, 'p')
+        vim.fn.system('git -C ' .. vim.fn.shellescape(here) .. ' archive HEAD lua/cartograph/COMMIT | tar -x -C ' .. vim.fn.shellescape(tf))
+        local cf = io.open(tf .. '/lua/cartograph/COMMIT')
+        local filled = cf and cf:read('*l'); if cf then cf:close() end
+        eq(head, filled, 'git archive wrote the commit')
+        vim.fn.delete(tf, 'rf')
+    end
 end)

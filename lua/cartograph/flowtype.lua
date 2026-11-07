@@ -6858,6 +6858,8 @@ local function build(store, opts)
         end
         local FD = require 'cartograph.flowdump'
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
+        local psha, pvia -- (the producer's commit and where it came from, CART-1997)
+        if here then psha, pvia = FD.producer((here:gsub('/lua/cartograph$', ''))) end
         -- (a dump to a FILE streams there — R.dump stays nil; dump = true returns the text, CART-1664)
         local dfd = type(opts.dump) == 'string' and assert(io.open(opts.dump, 'w')) or nil
         R.dump = FD.build(G7.REC, {
@@ -6875,7 +6877,9 @@ local function build(store, opts)
             calls = store.data.calls or {}, callrec = callrec, at = require 'cartograph.at', insat = G7.INSAT,
             -- (the producer: cartograph's OWN commit — its root must be a repository's top level, or none: a snapshot
             -- without .git inside another repository reported THAT repository's HEAD, CART-1724)
-            sha = here and FD.head((here:gsub('/lua/cartograph$', '')), true), corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) },
+            -- (CART-1997: from a .git-less snapshot too — CARTOGRAPH_COMMIT, .cartograph-commit, git archive's COMMIT)
+            sha = psha, sha_via = pvia,
+            corpus = store.data.root, corpus_sha = FD.head(store.data.root, true) },
             dfd and function (s) dfd:write(s) end)
         if dfd then dfd:close() end
     end

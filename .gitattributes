@@ -1,0 +1,2 @@
+# CART-1997: `git archive` writes the commit into lua/cartograph/COMMIT, so a .git-less snapshot can name its producer
+lua/cartograph/COMMIT export-subst
