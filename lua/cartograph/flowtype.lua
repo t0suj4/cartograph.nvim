@@ -212,25 +212,36 @@ function M.contracts(store, opts)
     table.sort(all, function (a, b) return a.rec.id < b.rec.id end)
     local memo = {}
     local root = store and store.data and store.data.root
+    -- ★ GROUPED ONCE (CART-1873): the tree's module contracts in one list, its site contracts by their FILE — at(file)
+    -- had matched every record's site against every file: WoW w3, 2,036 files x 368,784 contracts, 631 s. In the
+    -- records' own order, so a later record of one key still wins, as before; the scoped ones still come after
+    local tmods, tsites = {}, {}
+    for _, o in ipairs(tree) do
+        if o.rec.module then tmods[#tmods + 1] = o
+        else
+            local f = o.rec.site:match('^(.+):%d+:%d+$')
+            local l = tsites[f]; if not l then l = {}; tsites[f] = l end
+            l[#l + 1] = o
+        end
+    end
     local function at(file)
         local m = memo[file or false]
         if m then return m end
         m = { mod = {}, site = {} }
-        local l = {}
-        for _, o in ipairs(tree) do l[#l + 1] = o end
+        local function take(o)
+            if drop[o.rec.id] then return end
+            if o.rec.module then m.mod[o.rec.module] = o
+            elseif o.rec.site:match('^(.+):%d+:%d+$') == file then m.site[o.rec.site] = o end
+        end
+        for _, o in ipairs(tmods) do take(o) end
+        for _, o in ipairs(file and tsites[file] or {}) do take(o) end
         if scoped and file then
             local p = (root and file:sub(1, 1) ~= '/') and (root .. '/' .. file) or file
             local v, prov = cfg.at(p, 'entry_contracts')
             if prov and prov.source == 'ambiguous' then
                 error(('flowtype: scopes disagree on entry_contracts for %s: %s'):format(file, (vim.inspect(prov.entries):gsub('%s+', ' '))), 0)
             end
-            for _, c in ipairs(v or {}) do l[#l + 1] = byid[c.id] end
-        end
-        for _, o in ipairs(l) do
-            if not drop[o.rec.id] then
-                if o.rec.module then m.mod[o.rec.module] = o
-                elseif o.rec.site:match('^(.+):%d+:%d+$') == file then m.site[o.rec.site] = o end
-            end
+            for _, c in ipairs(v or {}) do take(byid[c.id]) end
         end
         memo[file or false] = m
         return m
@@ -238,7 +249,15 @@ function M.contracts(store, opts)
     local key = ''
     if #all > 0 then
         local ids, dl = {}, {}
-        for _, o in ipairs(all) do ids[#ids + 1] = (vim.inspect(o.rec):gsub('%s+', ' ')) end
+        -- (each record's FIELDS joined — a full, ordered encoding; vim.inspect per record was 10.9 s on w3, CART-1873)
+        local function enc(r)
+            local cl = {}
+            for i, k in ipairs(r.clauses) do cl[i] = tostring(k) end
+            local says = r.says
+            if type(says) ~= 'string' and says ~= nil then says = (vim.inspect(says):gsub('%s+', ' ')) end
+            return table.concat({ r.id, r.module or '', r.site or '', table.concat(cl, ','), r.src, says or '' }, '\1')
+        end
+        for _, o in ipairs(all) do ids[#ids + 1] = enc(o.rec) end
         for k in pairs(drop) do dl[#dl + 1] = k end
         table.sort(dl)
         key = '+ec:' .. table.concat(ids, ';') .. (scoped and ('@' .. (vim.inspect(cfg.scoped):gsub('%s+', ' '))) or '') .. '-' .. table.concat(dl, ',')

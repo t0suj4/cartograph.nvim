@@ -4524,3 +4524,69 @@ test('flowtype: a scalar handed to unknown code puts no type object in the unkno
     ok(ei, 'and what it holds: ' .. di)
     for k in pairs(R.xclosure()) do ok(not k:find('type:', 1, true), 'no type object counted as a hand-out root: ' .. k) end
 end)
+
+-- CART-1873: M.contracts' at(file) reads only that file's site contracts, grouped once — it had matched every record
+-- against every file (WoW w3, 2,036 files x 368,784 contracts: 631 s). The SAME maps as the per-record scan (a later
+-- record of one site still wins, a dropped id is out, every module contract in every file), and the cache key still
+-- tells two record sets apart.
+test('flowtype: entry contracts grouped by file — at() equals the full scan, in time independent of other files (CART-1873)', function ()
+    local recs = {}
+    for f = 1, 400 do
+        for i = 1, 100 do recs[#recs + 1] = { id = ('c%d_%d'):format(f, i), site = ('f%d.lua:%d:0'):format(f, i), clauses = { 'no-write' }, src = 't' } end
+    end
+    recs[#recs + 1] = { id = 'late', site = 'f7.lua:3:0', clauses = { 'no-write', 'no-callback' }, src = 't' } -- (a later record of one site)
+    for _, m in ipairs({ 'lpeg', 'ffi', 'bit' }) do recs[#recs + 1] = { id = 'mod-' .. m, module = m, clauses = { 'no-write' }, src = 't' } end
+    local drop = { c9_5 = true, ['mod-ffi'] = true }
+    local C = flowtype.contracts(nil, { contracts = recs, drop_contracts = drop })
+    -- the reference: the full scan, in the records' order
+    local function ref(file)
+        local m = { mod = {}, site = {} }
+        for _, c in ipairs(recs) do
+            if not drop[c.id] then
+                if c.module then m.mod[c.module] = c.id
+                elseif c.site:match('^(.+):%d+:%d+$') == file then m.site[c.site] = c.id end
+            end
+        end
+        return m
+    end
+    local t0 = vim.uv.hrtime()
+    local got = {}
+    for f = 1, 400 do got[f] = C.at(('f%d.lua'):format(f)) end
+    local secs = (vim.uv.hrtime() - t0) / 1e9
+    for _, f in ipairs({ 1, 7, 9, 400 }) do
+        local m = got[f]
+        local ids = { mod = {}, site = {} }
+        for k, o in pairs(m.mod) do ids.mod[k] = o.rec.id end
+        for k, o in pairs(m.site) do ids.site[k] = o.rec.id end
+        eq(ref(('f%d.lua'):format(f)), ids, 'f' .. f .. ': the same map as the full scan')
+    end
+    eq('late', got[7].site['f7.lua:3:0'].rec.id, 'a later record of one site wins')
+    eq(nil, got[9].site['f9.lua:5:0'], 'a dropped id is out')
+    eq(nil, C.at('nofile.lua').site['f1.lua:1:0'], 'a file with no site contract has none')
+    ok(secs < 0.5, ('at() over 400 files: %.2f s (the full scan took ~3.8 s)'):format(secs))
+    -- the key: a record differing in any field is another key; the same records, the same key
+    local C2 = flowtype.contracts(nil, { contracts = recs, drop_contracts = drop })
+    eq(C.key, C2.key, 'the same records, the same key')
+    local recs3 = vim.deepcopy(recs)
+    recs3[#recs3].src = 'another source'
+    ok(flowtype.contracts(nil, { contracts = recs3, drop_contracts = drop }).key ~= C.key, 'a changed src is another key')
+    recs3 = vim.deepcopy(recs); recs3[1].clauses = { 'no-write', 'no-callback' }
+    ok(flowtype.contracts(nil, { contracts = recs3, drop_contracts = drop }).key ~= C.key, 'changed clauses are another key')
+    -- a SCOPED site contract holds at its own file only, though the scope lists it for every file under it
+    local cfg = require 'cartograph.config'
+    local saved = cfg.scoped
+    local sroot = vim.fn.tempname()
+    vim.fn.mkdir(sroot .. '/sub', 'p')
+    for _, f in ipairs({ 'a', 'b' }) do local w = assert(io.open(sroot .. '/sub/' .. f .. '.lua', 'w')); w:write('return 1\n'); w:close() end
+    cfg.scoped = { [sroot .. '/sub'] = { entry_contracts = { { id = 's1', site = 'sub/a.lua:1:0', clauses = { 'no-write' }, src = 't' } } } }
+    -- (at() reads the scoped config when it is called: both reads before the config is restored)
+    local okc, sa, sb = pcall(function ()
+        local Cs = flowtype.contracts({ data = { root = sroot } }, {})
+        return Cs.at('sub/a.lua').site, Cs.at('sub/b.lua').site
+    end)
+    cfg.scoped = saved
+    vim.fn.delete(sroot, 'rf')
+    assert(okc, sa)
+    eq('s1', (sa['sub/a.lua:1:0'] or { rec = {} }).rec.id, 'the scoped site contract at its file')
+    eq(nil, sb['sub/a.lua:1:0'], 'and not at another file of the scope')
+end)
