@@ -16,7 +16,8 @@ chmod +x .githooks/* 2>/dev/null || true
 echo "hooks active: core.hooksPath -> .githooks"
 echo "  pre-commit:  index == tested tree, then docaudit + navaudit + langaudit + dogfood seam fence + spec suite"
 echo "               (bypass: git commit --no-verify)"
-echo "  commit-msg:  no stale (HEAD's) message; every ticket ID / hash named is real (tools/refcheck.py)"
+echo "  commit-msg:  no stale (HEAD's) message; every ticket ID / hash named is real (tools/refcheck.py);"
+echo "               warns when a milestone is named and MILESTONES.md is not staged (tools/milestonecheck.py)"
 echo "  post-commit: the provenance ledger note (tools/provledger.lua write HEAD)"
 
 # ── the ledger travels with a plain `git push` / `git fetch` ─────────────────

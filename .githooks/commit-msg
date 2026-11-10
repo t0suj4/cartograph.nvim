@@ -8,6 +8,9 @@
 #      written before `tk new` / `git commit` returned the reference named one that did not exist.
 #   3. every ticket ID the staged diff ADDS must be a filed ticket (IDs only: code is full of hex).
 #
+# And one WARNING that never blocks: a message naming a milestone ticket, or a ticket under one, while
+# MILESTONES.md is not staged (tools/milestonecheck.py) — the public record of the gates has no other reminder.
+#
 # A deliberate reference the checks cannot see (a hash in a repo not checked out here): `refs-ok: <ref>`
 # in the message. Without tk on PATH the ID checks are skipped. Bypass: git commit --no-verify.
 set -uo pipefail
@@ -29,6 +32,8 @@ if ! out="$(printf '%s\n' "$added" | python3 tools/refcheck.py --no-hashes)"; th
     printf '%s\n' "$out" | sed 's/^refcheck: /refcheck (staged diff): /'
     fail=1
 fi
+
+printf '%s\n' "$body" | python3 tools/milestonecheck.py || true
 
 if [ "$fail" -ne 0 ]; then
     echo "[commit-msg] blocked — fix the message (or 'git commit --no-verify' to bypass)"

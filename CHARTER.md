@@ -6,7 +6,9 @@ it is *for*.
 
 Nothing here carries a status. Statuses rot in prose, and the whole reason this
 file exists is that its content previously lived nowhere anyone could read it.
-Progress lives in the tracker, and the milestones below name the tickets.
+Which gates are met is recorded in [MILESTONES.md](MILESTONES.md). The work
+itself is tracked privately; the ticket IDs in this file are handles into that
+tracker and resolve to nothing from outside.
 
 ---
 
@@ -245,8 +247,8 @@ them.
 ## Milestones
 
 Nine, each with a gate that can fail. Referred to by NAME, not by number —
-the list will reorder and numbers rot when it does. Status lives in the
-tracker, not here.
+the list will reorder and numbers rot when it does. Status lives in
+[MILESTONES.md](MILESTONES.md), not here.
 
 The first two are the goal itself; the rest serve it.
 
