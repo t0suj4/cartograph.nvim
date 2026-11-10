@@ -94,12 +94,13 @@ is what gives the writer something to act on in the first place — the same rec
 that reports a gap is what proposes its fix, and re-running the report is what
 proves the fix landed.
 
-## The sub-goal: superseding per-language language servers
+## The eventual goal: superseding per-language language servers
 
-This follows from holding the whole graph honestly; it is not what the project
-is for. It matters because it is the sharpest available *test* of whether the
-graph is good enough, and because the cross-language question is one we can ask
-and a per-language server structurally cannot.
+This is where the project is headed, eventually. It follows from holding the
+whole graph honestly, and it arrives domain by domain, paced by the bar below,
+not on a schedule. Until then it is also the sharpest available *test* of
+whether the graph is good enough, and the cross-language question is one we can
+ask and a per-language server structurally cannot.
 
 > "I want to supersede language servers — built around a common core, we can
 > support polyglot projects."
@@ -250,7 +251,8 @@ Nine, each with a gate that can fail. Referred to by NAME, not by number —
 the list will reorder and numbers rot when it does. Status lives in
 [MILESTONES.md](MILESTONES.md), not here.
 
-The first two are the goal itself; the rest serve it.
+The first two are the goal itself; SERVE is where the eventual goal is
+measured; the rest serve them.
 
 | Milestone | The gate |
 |---|---|
@@ -260,7 +262,7 @@ The first two are the goal itself; the rest serve it.
 | **RESOLUTION** — raise the ceiling (`CART-0598`) | Resolution rises **and** the fabricated fraction of the inferred tier falls, both from one run |
 | **AGENT** — a machine drives the whole loop (`CART-0600`) | A headless plan → preview → apply → verify lands a multi-file refactor on a real repo with no human step, undo byte-exact. **A verification harness first**: if a feature cannot be driven headlessly, we cannot prove it works |
 | **OBJECTIVE** — express what we want to achieve (`CART-0601`) | Von-Neumann runs on Factorio 2.0, driven by a declared objective rather than by hand |
-| **SERVE** — the graph over a wire (`CART-0597`) | A week of real editing served over the wire with no fallback for definition / references / documentSymbol. Where the sub-goal above is measured |
+| **SERVE** — the graph over a wire (`CART-0597`) | A week of real editing served over the wire with no fallback for definition / references / documentSymbol. Where the eventual goal above is measured |
 | **SCALE** — unlock the locked corpora (`CART-0599`) | gitlab extracts inside a 15 GB box and its census pins |
 | **TRANSLITERATE** — emit host-compilable code (`CART-0611`) | A selected region of our own source compiles as another language and the round-trip oracle holds, with the templates that replace the runtime supplied as declared data |
 
