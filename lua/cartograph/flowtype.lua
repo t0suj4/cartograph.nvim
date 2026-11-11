@@ -2337,6 +2337,7 @@ local function build(store, opts)
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
+    G7.GETINFOS = {} -- (debug.getinfo calls whose `func` may be any function: { fn, arg?, func, any? }, CART-2016)
     G7.FNMTPEND = {} -- (debug.setmetatable targets and their metatables: the function TYPE's metatable, CART-1957)
     G7.TYPEMTCALLS = {} -- (debug.setmetatable calls by name, for the dump's debug-typemeta gap: CART-1957)
     -- (number / boolean: the TYPE's metatable index, a holder object made only when a debug.setmetatable target may hold
@@ -3135,6 +3136,7 @@ local function build(store, opts)
             if G7.TR or G7.PFN then G7.CURFN = id end
             addobj(p, o)
             local fp = { params = {}, ret = inst and new() or port('r:' .. id), id = id, inst = inst or nil }
+            fp.obj = o -- (the closure itself: debug.getinfo(1, 'f').func inside it, CART-2016)
             fp.rets = { fp.ret }
             fp.err = inst and new() or port('e:' .. id) -- (what it raises, CART-1705)
             -- (the dump's `self` variable, numbered by the WALK: allocated after the solve it shifted with every port a
@@ -4083,6 +4085,33 @@ local function build(store, opts)
             -- `xpcall(f, debug.traceback)`, and the signature's `string` is the string case only. The message is the
             -- 1st argument, or the 2nd after a thread; a level is a number, never passed. By its text with `debug` the
             -- global, or a local alias of it. CART-2005)
+            -- ★ debug.getinfo(...) IS A FRESH TABLE (CART-2016, flowpath FLOW-0049): its `func` is the function the call
+            -- names — a literal level 1: the CALLING function, its own closure (the dump's `self`); a function argument:
+            -- itself; any other level, or an argument that may be one: any function (the dump's gap debug-getinfo, decided
+            -- after the solve) — and `activelines` a table. The signature's type:debuginfo stays beside it for the scalar
+            -- fields (source, currentline …). `func` had held nothing: g() == g's own getinfo read empty
+            if (fname == 'debug.getinfo' and select(2, lookup('debug'))) or isbuiltin('debug.getinfo') then
+                local tp = new()
+                local to = newobj('getinfo:' .. key_of(n))
+                addobj(tp, to)
+                edge(tp, resl[1])
+                local al = new(); addobj(al, newobj('getinfo-lines:' .. key_of(n))); edge(al, ofp(to, 'activelines'))
+                local a1, top0 = argn[1], fnstack[#fnstack]
+                local lvl = a1 and a1:type() == 'number' and tonumber(txt(a1)) or nil
+                local fport = ofp(to, 'func')
+                if lvl == 1 and top0 and top0.obj then
+                    local sp = top0.dself
+                    if not sp then sp = new() end
+                    -- (the closure in its own `self` — the dump exports self as its closure sites: no instruction for it)
+                    if G7.M then G7.M = G7.M + 1; addobj(sp, top0.obj); G7.M = G7.M - 1 else addobj(sp, top0.obj) end
+                    edge(sp, fport)
+                elseif lvl == nil and aps[1] then
+                    edge(aps[1], fport)
+                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, arg = aps[1], func = fport }
+                else
+                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, any = true }
+                end
+            end
             if (fname == 'debug.traceback' and select(2, lookup('debug'))) or isbuiltin('debug.traceback') then
                 for j = 1, math.min(2, #aps) do filter(aps[j], resl[1], G7.tbpass) end
             end
@@ -5059,6 +5088,33 @@ local function build(store, opts)
         end
         G7.FNMTPEND = {}
         if G7.FNMT then solve() end
+    end
+    -- ★ debug.getinfo's `func` AT ANY LEVEL (CART-2016): a level other than a literal 1 — or an argument that may be a
+    -- level: a number, past CAP, or unknown code's value — names any function that may be on the stack: every closure and builtin.
+    -- Not in the IR (no op says "the frame n up"): the dump's gap debug-getinfo names each such call
+    if #G7.GETINFOS > 0 then
+        local grew = false
+        for _, gi in ipairs(G7.GETINFOS) do
+            local any = gi.any
+            if not any and gi.arg then
+                if top[gi.arg] then any = true
+                else for o in each(gi.arg) do local tn = TNAME[o]; if tn == 'number' or tn == 'integer' or o == EXT or G7.XC[o] then any = true; break end end end
+            end
+            if any and not gi.done then
+                gi.done, gi.gap = true, true
+                if not G7.ANYFNP then
+                    G7.ANYFNP = new()
+                    local l = {}
+                    for o in pairs(fnports) do l[#l + 1] = o end
+                    for o in pairs(G7.NATIVE) do l[#l + 1] = o end
+                    table.sort(l)
+                    for _, o in ipairs(l) do addobj(G7.ANYFNP, o) end
+                end
+                edge(G7.ANYFNP, gi.func)
+                grew = true
+            end
+        end
+        if grew then solve() end
     end
     -- ★ A NUMBER'S / BOOLEAN'S METATABLE IS ITS TYPE'S (CART-1957, flowpath FLOW-0049; the user's approval 2026-11-07).
     -- debug.setmetatable(v, mt) on a number or a boolean sets the metatable of every value of that type: `(5).foo` then
@@ -7208,7 +7264,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)

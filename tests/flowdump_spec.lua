@@ -1313,6 +1313,37 @@ test('flowdump: s:gsub(p, repl) loads a table replacement, os.time(t) loads t, b
     eq(0, flowcheck.check(D3).failed, 'closed')
 end)
 
+-- (CART-2016, flowpath FLOW-0049: debug.getinfo(...) is a fresh table whose `func` is the function the call names — a
+-- literal level 1 the calling closure, through its `self`; a function argument itself — with no gap; any other level,
+-- or an argument that may be a level, is any function and the gap debug-getinfo. `func` had held nothing)
+test('flowdump: debug.getinfo\'s func is the named function; another level is the gap debug-getinfo (CART-2016)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(src)
+        local D = dump(src)
+        local n = 0
+        for _, g in ipairs(D.gaps) do if g.kind == 'debug-getinfo' then n = n + 1 end end
+        local lab, fid, held = {}, nil, {}
+        for _, st in ipairs(D.sites) do lab[st.id] = st.label end
+        for i, nm in ipairs(D.names.fields) do if nm == 'func' then fid = i - 1 end end
+        for _, e in ipairs(D.solution.h) do
+            if e[2] == fid and tostring(lab[e[1]]):match('^getinfo:') then for _, o in ipairs(e[3]) do held[#held + 1] = lab[o] end end
+        end
+        return n, held, D
+    end
+    local n, held, D = run('local function g() return debug.getinfo(1, "f").func end\nprint(use(g()))\n')
+    eq(0, n, 'level 1: no gap')
+    ok(#held == 1 and tostring(held[1]):find('::g@', 1, true), 'level 1: func is g: ' .. vim.inspect(held))
+    eq(0, flowcheck.check(D).failed, 'closed')
+    n, held, D = run('local function g() end\nlocal f = debug.getinfo(g, "f").func\nprint(use(f))\n')
+    eq(0, n, 'a function argument: no gap')
+    ok(#held == 1 and tostring(held[1]):find('::g@', 1, true), 'a function argument: func is it: ' .. vim.inspect(held))
+    eq(0, flowcheck.check(D).failed, 'closed')
+    n = run('local function g() return debug.getinfo(2, "f").func end\nprint(use(g()))\n')
+    eq(1, n, 'level 2: the gap')
+    n = run('local k = 2\nlocal function g() return debug.getinfo(k, "f").func end\nprint(use(g()))\n')
+    eq(1, n, 'an argument that may be a level: the gap')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end

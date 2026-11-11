@@ -173,6 +173,10 @@
 --   whose target is no table or string: a function, a closure or a C function (the solve links every function, the
 --   builtins' natives included, to the metatable's __index: no IR op says "every value of a type"), nil (no object),
 --   or past CAP (CART-1957).
+--   `debug-getinfo`: a debug.getinfo call whose result's `func` may be ANY function — a level other than a literal 1,
+--   or an argument that may be a level (a number, past CAP, unknown code's) — no IR op says "the function n frames up".
+--   The result is a fresh table (`getinfo:<site>`); a literal level 1 stores the calling function's `self`, a function
+--   argument itself, both in the IR (CART-2016).
 --   debug.setlocal / getlocal by name are COPIES into (out of) the locals of the frame their level names — a literal 1:
 --   the calling function's; else every function's — as the solve flows them (CART-1804; the gap `debug-local` until
 --   CART-1956).
@@ -429,6 +433,9 @@ function M.build(rec, X, sink)
         end
         if gap then rec.gap(u.fn, 'debug-typemeta', u.args) end
     end
+    -- (debug.getinfo whose `func` may be any function — a level other than a literal 1, or an argument that may be one:
+    -- the IR cannot say "the function n frames up", CART-2016)
+    for _, gi in ipairs(X.GETINFOS or {}) do if gi.gap and gi.fn then rec.gap(gi.fn, 'debug-getinfo', { gi.func }) end end
     -- ★ FRAME CALLS AS COPIES (CART-1956): debug.setlocal / getlocal by name write / read the locals of the frame their
     -- level names — the solve's frame_locals: a literal level 1 and no thread, the calling function's locals; else every
     -- function's. The value (3rd argument, 4th with a thread: both, as the solve) is copied into each, and each into
