@@ -4112,10 +4112,24 @@ local function build(store, opts)
                 addobj(tp, to)
                 edge(tp, resl[1])
                 local al = new(); addobj(al, newobj('getinfo-lines:' .. key_of(n))); edge(al, ofp(to, 'activelines'))
+                -- (the forms: ([thread,] level | f [, what]). A literal `what` without "f" leaves `func` nil — lua5.1, LuaJIT
+                -- and 5.4: getinfo(2, "S").func is nil — no flow and no gap; the THREAD form names a frame of that
+                -- coroutine: any function)
+                local function numlit(x) return x and x:type() == 'number' and tonumber(txt(x)) or nil end
+                local function strlit(x)
+                    if not (x and x:type() == 'string') then return nil end
+                    local c = x:field('content')[1]
+                    return c and txt(c) or ''
+                end
                 local a1, top0 = argn[1], fnstack[#fnstack]
-                local lvl = a1 and a1:type() == 'number' and tonumber(txt(a1)) or nil
+                local thr = a1 and not numlit(a1) and numlit(argn[2]) ~= nil
+                local what = strlit(argn[thr and 3 or 2])
+                local lvl = not thr and numlit(a1) or nil
                 local fport = ofp(to, 'func')
-                if lvl == 1 and top0 and top0.obj then
+                if what and not what:find('f', 1, true) then -- (no `func` field)
+                elseif thr then
+                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, obj = to, any = true }
+                elseif lvl == 1 and top0 and top0.obj then
                     local sp = top0.dself
                     if not sp then sp = new() end
                     -- (the closure in its own `self` — the dump exports self as its closure sites: no instruction for it)
@@ -4123,9 +4137,9 @@ local function build(store, opts)
                     edge(sp, fport)
                 elseif lvl == nil and aps[1] then
                     edge(aps[1], fport)
-                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, arg = aps[1], func = fport }
+                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, arg = aps[1], func = fport, obj = to }
                 else
-                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, any = true }
+                    G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, obj = to, any = true }
                 end
             end
             if (fname == 'debug.traceback' and select(2, lookup('debug'))) or isbuiltin('debug.traceback') then
@@ -5106,7 +5120,7 @@ local function build(store, opts)
         if G7.FNMT then solve() end
     end
     -- ★ debug.getinfo's `func` AT ANY LEVEL (CART-2016): a level other than a literal 1 — or an argument that may be a
-    -- level: a number, past CAP, or unknown code's value — names any function that may be on the stack: every closure and builtin.
+    -- level: a number, a thread (its frames), past CAP, or unknown code's value — names any function that may be on the stack.
     -- Not in the IR (no op says "the frame n up"): the dump's gap debug-getinfo names each such call
     if #G7.GETINFOS > 0 then
         local grew = false
@@ -5114,19 +5128,23 @@ local function build(store, opts)
             local any = gi.any
             if not any and gi.arg then
                 if top[gi.arg] then any = true
-                else for o in each(gi.arg) do local tn = TNAME[o]; if tn == 'number' or tn == 'integer' or o == EXT or G7.XC[o] then any = true; break end end end
-            end
-            if any and not gi.done then
-                gi.done, gi.gap = true, true
-                if not G7.ANYFNP then
-                    G7.ANYFNP = new()
-                    local l = {}
-                    for o in pairs(fnports) do l[#l + 1] = o end
-                    for o in pairs(G7.NATIVE) do l[#l + 1] = o end
-                    table.sort(l)
-                    for _, o in ipairs(l) do addobj(G7.ANYFNP, o) end
+                else
+                    for o in each(gi.arg) do
+                        local tn = TNAME[o]
+                        if tn == 'number' or tn == 'integer' or tn == 'thread' or o == EXT or G7.XC[o] or tostring(obinfo[o] or ''):match('^thread:') then any = true; break end
+                    end
                 end
-                edge(G7.ANYFNP, gi.func)
+            end
+            -- (and only where `func` is READ — by name, by a dynamic key or an iteration: the any-function port saturates
+            -- past CAP, and what reaches a saturated port escapes; a getinfo for its scalars, the common shape, costs nothing)
+            local r = rd[gi.obj]
+            if any and not (r and (r.func or r['[]'])) then any = false end
+            if any and not gi.done then
+                -- (as UNKNOWN CODE, EXT: an answer read through it is unknown, and what it is called with is handed out. Every
+                -- closure and native listed instead saturated the port past CAP, and everything there escaped — one
+                -- `getinfo(2, "f").func` read turned an unrelated whole answer partial)
+                gi.done, gi.gap = true, true
+                addobj(gi.func, EXT)
                 grew = true
             end
         end
@@ -5162,9 +5180,14 @@ local function build(store, opts)
                             end
                         end
                         local sp = new(); addobj(sp, H); proto(sp, field(q[2], '__index'), true)
-                        -- (the metatable is ALSO the type object's own slot: the model's setmetatable store, through its
-                        -- debug.setmetatable port, writes it — storec's exception for G7.DBGMT — so the dump's heap holds the
-                        -- type site's META cell, which a checker reads the chain through, CART-2017)
+                        -- (the metatable is ALSO the type object's own slot — the dump's heap then holds the type site's META
+                        -- cell, which a checker reads the chain through, CART-2017: the model's store writes the target's type
+                        -- object, and this one EVERY object of the type — a number target is type:number or type:integer, and
+                        -- type_metatables names one site for both)
+                        for _, tk in ipairs(tn == 'number' and { 'number', 'integer' } or { tn }) do
+                            local tob = TYPEOBJ[tk]
+                            if tob then local tp = new(); G7.DBGMT[tp] = true; addobj(tp, tob); storec(tp, '\1mt', q[2]) end
+                        end
                         grew = true
                     end
                 end

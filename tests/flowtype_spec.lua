@@ -289,6 +289,31 @@ test('flowtype: gsub passes every capture, a position capture a number, to a fun
     ok(tostring(objs.sinkk):find('type:number', 1, true), 'a table replacement is indexed by a number there: ' .. vim.inspect(objs))
 end)
 
+-- (CART-2016: getinfo's `func` at another level is UNKNOWN CODE, not every function listed — that port saturated past CAP
+-- and everything in it escaped: one `getinfo(2, "f").func` read had turned an unrelated whole answer partial)
+test('flowtype: a getinfo(2, "f").func read leaves an unrelated answer whole (CART-2016)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A, B = {}, {}', 'function A.m(self) return 1 end', 'function B.m(self) return 2 end', -- (p:m ambiguous by name)
+            'local a = setmetatable({}, { __index = A })',
+            'local function use(p) return p:m() end', 'use(a)',
+            'local function g() return debug.getinfo(2, "f").func end', 'print(g())' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local callrec = require 'cartograph.callrec'
+    for _, open in ipairs { false, true } do
+        local R = flowtype.solve(store, { open = open })
+        for _, c in ipairs(store.data.calls) do
+            if callrec.full(c) == 'p:m' then
+                local v = R.verdict(c)
+                ok(v and v.kind == 'exact' and not v.partial, (open and 'open' or 'closed') .. ': p:m stays whole: ' .. vim.inspect(v))
+            end
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

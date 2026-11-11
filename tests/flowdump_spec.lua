@@ -1342,6 +1342,16 @@ test('flowdump: debug.getinfo\'s func is the named function; another level is th
     eq(1, n, 'level 2: the gap')
     n = run('local k = 2\nlocal function g() return debug.getinfo(k, "f").func end\nprint(use(g()))\n')
     eq(1, n, 'an argument that may be a level: the gap')
+    -- (only where `func` exists and is read: a `what` without "f" has no func — lua5.1, LuaJIT, 5.4 — and a getinfo
+    -- read for its scalars, the common shape, is no gap; the THREAD form names a frame of that coroutine: the gap)
+    eq(0, (run('local function g() return debug.getinfo(2, "S").source end\nprint(g())\n')), 'what "S": no func, no gap')
+    eq(0, (run('local function g() return debug.getinfo(2).currentline end\nprint(g())\n')), 'a scalar read: no gap')
+    n, held = run('local co = coroutine.create(function () end)\nlocal f = debug.getinfo(co, 1, "f").func\nprint(f)\n')
+    eq(1, n, 'the thread form: the gap')
+    eq(0, (run('local function g() return debug.getinfo(2, "S").func end\nprint(g())\n')), 'what "S", func read: nil, no gap')
+    eq(1, (run('local co = coroutine.create(function () end)\nlocal k = 1\nlocal f = debug.getinfo(co, k, "f").func\nprint(f)\n')),
+        'a thread with a computed level: the gap')
+    for _, l in ipairs(held) do ok(not tostring(l):match('^thread:'), 'the thread is not func: ' .. vim.inspect(held)) end
 end)
 
 -- (CART-2013, flowpath FLOW-0049: debug.sethook BY IDENTITY — the native's model calls the hook, tagged host:sethook,
@@ -2137,6 +2147,16 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
     D = solve('local t = {}\ndebug.setmetatable(t, { __index = {} })\nreturn t\n')
     eq(0, gaps(D), 'a table target: no gap')
     ok(D.contracts.clauses['function-no-metatable'], 'and the clause stands')
+    -- (CART-2017: OPEN mode, an exported parameter as the target — outside code may pass a function: the gap, and the
+    -- clause withheld)
+    do
+        local root = tree({ ['m.lua'] = 'local M = {}\nfunction M.f(x, mt) debug.setmetatable(x, mt) end\nreturn M\n' })
+        store.ingest(ts.extract(root))
+        local Do = vim.json.decode(flowtype.solve(store, { open = true, dump = true }).dump)
+        vim.fn.delete(root, 'rf')
+        eq(1, gaps(Do), 'open: an exported target is a named gap')
+        ok(not Do.contracts.clauses['function-no-metatable'], 'open: the clause is withheld')
+    end
 end)
 
 -- (CART-1987, flowpath FLOW-0148: the core keeps a captured variable as ONE cell per activation of its DECLARING
@@ -2887,6 +2907,11 @@ test('flowdump: debug.setmetatable on a number / boolean is its type\'s metatabl
     local meta = {}
     for _, e in ipairs(D.solution.h) do if e[1] == D.type_metatables[1][2] and e[2] == 100 then meta = e[3] end end
     ok(#meta == 1 and tostring(lab[meta[1]]):match('^tbl:m%.lua:1:'), 'type:number\'s META cell holds mt: ' .. vim.inspect(meta))
+    -- (an INTEGER target — a profile's declared integer — is the same type: the site type_metatables names holds it)
+    local _, _, D2 = run('debug.setmetatable(math.floor(1.5), mt)\nY = (5).foo\n')
+    local meta2 = {}
+    for _, e in ipairs(D2.solution.h) do if e[1] == D2.type_metatables[1][2] and e[2] == 100 then meta2 = e[3] end end
+    eq(1, #meta2, 'an integer target: the number type site\'s META cell holds mt')
     y, gap = run('debug.setmetatable(true, mt)\nY = (false).foo\n')
     ok(holds_g(y), 'a boolean: (false).foo is g: ' .. vim.inspect(y)); eq(0, gap)
     y = run('debug.setmetatable(1 > 2, mt)\nlocal n = 3\nY = (n == 3).foo\n')

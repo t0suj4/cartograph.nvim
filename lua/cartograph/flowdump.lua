@@ -423,13 +423,16 @@ function M.build(rec, X, sink)
     for _, u in ipairs(X.TYPEMTCALLS or {}) do
         local t = u.args[1]
         local gap = not t or (X.top and X.top[t]) or false
+        if t and X.top and X.top[t] then X.FNMAYBE = true end -- (past CAP: it may be a function)
         if not gap then
             local any = false
             for o in X.each(t) do
                 any = true
                 -- (a number / boolean target is the TYPE's metatable, modelled since CART-1957: `type_metatables` names it —
                 -- no gap. A function's, or nothing held — nil, absence — stays the gap)
-                if X.fnports[o] or (X.NATIVE and X.NATIVE[o]) then gap = true; break end -- (a C function too, CART-2017)
+                -- (a C function, or unknown code's value — an exported parameter in open mode, seeded after the solve linked
+                -- functions: the clause function-no-metatable is withheld for it too, CART-2017)
+                if X.fnports[o] or (X.NATIVE and X.NATIVE[o]) or o == X.EXT or (X.XC and X.XC[o]) then gap = true; X.FNMAYBE = true; break end
             end
             if not any then gap = true end
         end
@@ -1289,7 +1292,7 @@ function M.build(rec, X, sink)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
                     and not (k == 'loader-args' and #(X.CHUNKINIT or {}) == 0)
                     and not (k == 'host-handlers' and (X.HANDLERCALLS or 0) == 0)
-                    and not (k == 'function-no-metatable' and X.FNMT)
+                    and not (k == 'function-no-metatable' and (X.FNMT or X.FNMAYBE))
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end
             end
             table.sort(ks)
