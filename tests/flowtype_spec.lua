@@ -337,6 +337,55 @@ test('flowtype: a debug.sethook hook gets the event and a number line (CART-2019
     eq('type:number', objs.sinkm, 'through a library alias (the model): a number: ' .. vim.inspect(objs))
 end)
 
+-- (CART-2010: rawget, next and pairs' value are RAW — no prototype, no __index handler, also one linked AFTER the load:
+-- rawget(W, "k") had run W's handler, which Lua never does — lua5.1, LuaJIT, 5.4. A plain load still runs both)
+test('flowtype: a raw load runs no __index handler and reads no prototype (CART-2010)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function sinkr(x) return x end', 'local function sinkl(x) return x end', 'local function sinkp(x) return x end',
+        'local function sinkq(x) return x end', 'local function sinkn(x) return x end',
+        'local W = setmetatable({}, { __index = function (t, k) sinkr(t) end })',
+        'local k0 = ("k"):lower()',
+        'local a, b = rawget(W, "k"), rawget(W, k0)',
+        'local rg = rawget', 'local c = rg(W, "k")',
+        -- (a handler and a prototype linked AFTER the raw loads were walked: the replay paths)
+        'local L = {}', 'local d = rawget(L, "k")', 'setmetatable(L, { __index = function (t, k) sinkl(t) end })',
+        'local P = { k = {} }', 'local V = {}', 'sinkq(rawget(V, "k"))', 'setmetatable(V, { __index = P })',
+        'for _, v in pairs(V) do sinkp(v) end',
+        'local N = setmetatable({}, { __index = function (t, k) sinkn(t) end })', 'local e = N.k',
+        -- (a base that reaches the load LATE — through a call's result — whose handler / prototype is linked already:
+        -- the load-time paths)
+        'local function sinkg(x) return x end', 'local function sinkh(x) return x end',
+        'local G = setmetatable({}, { __index = function (t, k) sinkg(t) end })', 'local function getG() return G end',
+        'local f1 = rawget(getG(), "k")',
+        'local Q = { k = {} }', 'local H = setmetatable({}, { __index = Q })', 'local function getH() return H end',
+        -- (a LONG chain of returns: the base arrives after the prototype is linked, in every order)
+        'local function h1() return getH() end', 'local function h2() return h1() end', 'local function h3() return h2() end',
+        'local function h4() return h3() end', 'local function h5() return h4() end', 'local function h6() return h5() end',
+        'local function h7() return h6() end', 'local function h8() return h7() end',
+        'sinkh(rawget(h8(), "k"))',
+        'return a, b, c, d, e, f1' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    -- (every worklist ORDER: whether a handler / prototype is linked before or after a load registers is the schedule's)
+    for _, order in ipairs { 'desc', 'asc', 'lifo', 'fifo' } do
+    local R = flowtype.solve(store, { open = false, argprobes = true, order = order })
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    objs.order = order
+    eq('', objs.sinkr, 'rawget by name, a key literal or not, and through an alias: no handler: ' .. vim.inspect(objs))
+    eq('', objs.sinkl, 'a handler linked after the raw load: not run: ' .. vim.inspect(objs))
+    eq('', objs.sinkq, 'a prototype linked after the raw load: not read: ' .. vim.inspect(objs))
+    eq('', objs.sinkp, 'pairs yields the raw entries, not the prototype\'s: ' .. vim.inspect(objs))
+    ok(objs.sinkn ~= '' and objs.sinkn ~= nil, 'a plain load still runs the handler: ' .. vim.inspect(objs))
+    eq('', objs.sinkg, 'a late base, its handler linked already: not run: ' .. vim.inspect(objs))
+    eq('', objs.sinkh, 'a late base, its prototype linked already: not read: ' .. vim.inspect(objs))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

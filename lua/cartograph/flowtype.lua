@@ -1062,11 +1062,11 @@ local function build(store, opts)
             else pull(dst, ofp(o, f)); pull(dst, ofp(o, '[]')) end
             -- (a load falling through to an __index FUNCTION calls it with (o, key): its result is the load's value)
             local fm = IDXFN[o]
-            if fm then for g in pairs(fm) do idxcall(g, o, f, dst) end end
+            if fm and not G7.RAWDST[dst] then for g in pairs(fm) do idxcall(g, o, f, dst) end end
         end
         local pr = protos[o]
         -- (a HIDDEN field — the metatable `\1mt`, a thread's `\1co` — is the object's own: no __index chain reaches it)
-        if pr and f:byte(1) ~= 1 then
+        if pr and f:byte(1) ~= 1 and not G7.RAWDST[dst] then
             seen = seen or { [o] = true }
             for c in pairs(pr) do load_obj(c, f, dst, seen, strict, o) end
         end
@@ -1077,7 +1077,7 @@ local function build(store, opts)
         local r = rd[o]
         if not r then return end
         for f, l in sorted(r) do
-            if f ~= NS and f:byte(1) ~= 1 then G7.allreaders(l, function (dst, strict) load_obj(c, f, dst, nil, strict, o) end) end -- CART-1742
+            if f ~= NS and f:byte(1) ~= 1 then G7.allreaders(l, function (dst, strict) if not G7.RAWDST[dst] then load_obj(c, f, dst, nil, strict, o) end end) end -- CART-1742
         end
     end
     -- (PARAMETER PATHS, opts.pathsum — CART-1673: a parameter's port is tagged { fn, j, path = '' }, a load through a
@@ -1092,6 +1092,9 @@ local function build(store, opts)
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        -- (a RAW load — rawget, next / pairs' value — reads the object's own entries: no prototype, no __index handler,
+        -- now or when one is linked later. It had run both: rawget(W, "k") called W's handler, CART-2010)
+        if G7.RAWLOAD then G7.RAWDST[dst] = true end
         -- (a load of a field NAMED setfenv — `debug.setfenv`, `_G.setfenv`, `_G["setfenv"]` — may be the builtin: an
         -- over-count, never an under; a computed key is the computed-global contract's, CART-1775)
         if f == 'setfenv' and not G7.HOSTWALK then G7.ANYSETFENV = true end
@@ -1159,7 +1162,7 @@ local function build(store, opts)
                 m[c] = true
                 local r = rd[o]
                 if r then
-                    for f, l in sorted(r) do if f ~= NS then G7.allreaders(l, function (dst) idxcall(c, o, f, dst) end) end end -- CART-1742
+                    for f, l in sorted(r) do if f ~= NS then G7.allreaders(l, function (dst) if not G7.RAWDST[dst] then idxcall(c, o, f, dst) end end) end end -- CART-1742
                 end
             end
         end
@@ -1592,7 +1595,11 @@ local function build(store, opts)
         end
         M0['unpack'], M0['table#unpack'] = elems, elems
         M0['table#remove'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], K() }) end end
-        M0['rawget'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], a[2] or K() }) end end
+        M0['rawget'] = function (a, rl)
+            if not a[1] then return end
+            G7.RAWLOAD = true; local d = field(a[1], '[]'); G7.RAWLOAD = nil -- (raw: no __index, no prototype, CART-2010)
+            edge(d, rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], a[2] or K() })
+        end
         M0['rawset'] = function (a, rl)
             if a[1] and a[3] then
                 storec(a[1], '[]', a[3]); if a[2] then storec(a[1], '{k}', a[2]) end
@@ -2363,6 +2370,7 @@ local function build(store, opts)
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
+    G7.RAWDST = {} -- (the result ports of RAW loads: no prototype, no __index handler, CART-2010)
     G7.PERRS = {} -- (every pcall's error port: a hook raises inside a protected builtin too, CART-2019)
     G7.HOOKFNS = {} -- (each debug.sethook's hook ports: what they raise, any function may raise — CART-2019)
     G7.GETINFOS = {} -- (debug.getinfo calls whose `func` may be any function: { fn, arg?, func, any? }, CART-2016)
@@ -3490,9 +3498,11 @@ local function build(store, opts)
                 local tp, kp = expr(argn[1]), argn[2] and expr(argn[2]) or nil
                 local key = strkey(argn[2])
                 if key == '[]' and kp then G7.NEXTK = kp end
-                -- (and it is RAW — no __index, no prototype: the dump's loadRaw with its key, FLOW-0090, CART-1758. The
-                -- solve still lets it reach __index and prototypes: a superset, sound)
-                G7.RAWLOAD = key == '[]' or nil
+                -- (and it is RAW — no __index, no prototype: the dump's loadRaw with its key, FLOW-0090, CART-1758, and the
+                -- solve's load as well, CART-2010. A LITERAL key in a DUMP solve stays the named `load`: the IR has no named
+                -- raw load — a loadRaw's key variable holds "a string", which reads every raw entry — so there the solve
+                -- reads what that load reads, __index included: a superset, consistent with the IR)
+                G7.RAWLOAD = (key == '[]' or not G7.REC) or nil
                 local dst = field(tp, key)
                 G7.RAWLOAD = nil
                 twin({ dst }, { tp, kp })
