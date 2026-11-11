@@ -57,6 +57,9 @@
 --     solution = { v, top, h, hdyn, htop, htaint, err = { fn, cerr }, weak, rin, rout, rin_top?, rout_top?, cerr_top?,
 --                  ctx = nil, live = nil,
 --                  taint = { ports, seeds, from } },
+--       (err.fn [fn, sites]: what each function raises; INIT's — it has no port of its own — is what the functions its
+--       unknown-code call (contracts.ext_channel) holds raise, or init in err.top when one of theirs is saturated,
+--       CART-2019)
 --       from (CART-1824): every first-cause link, [node, parent | null, reason | null], sorted by node — a node is a var,
 --       ["h", site, field] / ["d", site] / ["k", site] a cell, ["err", fn] / ["ret", fn, i] a function port, ["p", port,
 --       { kind, loc }] an internal port (its walk statement); a { trigger, rule } link names the rule and the port that
@@ -153,7 +156,9 @@
 --   call's first result variable, which its `call` instruction names — one call's copies share it, CART-2018),
 --   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949;
 --   by IDENTITY since CART-2013: a call the text rule does not recognise — `local d = debug; d.sethook(h, m)` — runs
---   the native's model, which calls both hook candidates, tagged without the mask),
+--   the native's model, which calls both hook candidates, tagged without the mask; the call's operands are the event
+--   and the line, a number, CART-2019. What a hook raises, the solve lets every function and pcall raise — it fires
+--   wherever code runs — so those error sets are a superset of the IR's: flowpath refuses sethook),
 --   `gap:host-pcall` (a pcall / xpcall whose callee names a host builtin other than error / assert — require, table.sort,
 --   string.gsub …: what it runs may raise any value, so outside-raises-strings is not claimed there; the solve routes it
 --   into the pcall's error, CART-1995. `pcall(error, x)` / `pcall(assert, c, x)` protect a SYNTHETIC function instead —
@@ -988,14 +993,18 @@ function M.build(rec, X, sink)
     -- (init's unknown-code call — the EXTCALL channel — runs every function it holds: what those raise, init raises. Its
     -- port is tainted already (below), but its sites were none: a function there that raised an object — a debug hook's
     -- error, which every function may raise since CART-2019 — failed the call's closure)
-    local function extcall_errs()
-        local seen, ss = {}, {}
-        for o in X.each(X.EXTCALL or 0) do
+    local function extcall_errs() -- (-> sites, top: a callee whose error port is saturated makes init's top too)
+        local seen, ss, top = {}, {}, false
+        if not X.EXTCALL then return ss, top end
+        for o in X.each(X.EXTCALL) do
             local fpo = X.fnports[o]
-            if fpo and fpo.err then for e in X.each(fpo.err) do if not seen[e] then seen[e] = true; ss[#ss + 1] = e end end end
+            if fpo and fpo.err then
+                if X.top[fpo.err] then top = true end
+                for e in X.each(fpo.err) do if not seen[e] then seen[e] = true; ss[#ss + 1] = e end end
+            end
         end
         table.sort(ss)
-        return ss
+        return ss, top
     end
     for _, name in ipairs(keys) do
         local fp = byname[name]
@@ -1010,7 +1019,11 @@ function M.build(rec, X, sink)
     -- (init CALLS UNKNOWN CODE — the EXTCALL call — which may raise anything: its error port is tainted. Nothing
     -- catches an error leaving init, but unstated, it was the last E-reading failure on vimruntime and WoW, CART-1760)
     if X.XA then etaint[#etaint + 1] = tostring(FN('init')) end
-    do local ss = extcall_errs(); if #ss > 0 then ej[#ej + 1] = ('[%d,%s]'):format(FN('init'), jarr(ss)) end end
+    do
+        local ss, top = extcall_errs()
+        if top then etop[#etop + 1] = tostring(FN('init'))
+        elseif #ss > 0 then ej[#ej + 1] = ('[%d,%s]'):format(FN('init'), jarr(ss)) end
+    end
     local cerr = {}
     -- (a coroutine CHANNEL that is saturated or TAINTED holds any escaped value: rin_top / rout_top / cerr_top. Dumped
     -- as site lists alone, every lost value passed to resume or yielded failed the channel checks, CART-1757)

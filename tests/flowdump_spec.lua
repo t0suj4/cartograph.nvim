@@ -1394,6 +1394,20 @@ test('flowdump: aliased setlocal / setupvalue are tagged copies too (CART-2018)'
     n, D = tagged('local up = a\nlocal function getup() return up end\nlocal su = debug.setupvalue\nsu(getup, 1, b)\nprint(use(getup()))\n', 'debug:setupvalue@')
     eq(1, n, 'an aliased setupvalue: its tagged copy')
     eq(0, flowcheck.check(D).failed, 'closed')
+    local UP = 'local up = a\nlocal function getup() return up end\nlocal up2 = b\nlocal function getup2() return up2 end\n'
+    eq(1, (tagged(UP .. 'local _, w = debug.getupvalue(getup, 1)\nprint(use(w))\n', 'debug:getupvalue@')), 'getupvalue: its tagged copy')
+    eq(2, (tagged(UP .. 'debug.upvaluejoin(getup, 1, getup2, 1)\nprint(use(getup()))\n', 'debug:upvaluejoin@')), 'upvaluejoin: both copies tagged')
+    -- (a tag NAMES the copy, it excuses nothing: a corrupted tagged copy still fails the closure)
+    for _, F in ipairs(D.functions) do
+        local tagat = {}
+        for _, t in ipairs(F.tags or {}) do tagat[t[1]] = t[2] end
+        for i, ins in ipairs(F.body) do
+            if ins[1] == 'copy' and tostring(tagat[i - 1]):find('^debug:') then
+                for _, e in ipairs(D.solution.v) do if e[1] == ins[2] then e[2] = {} end end
+            end
+        end
+    end
+    ok(flowcheck.check(D).failed > 0, 'a corrupted tagged copy is still a failure')
 end)
 
 -- (CART-2019, flowpath FLOW-0049 h1: a debug hook raises wherever it fires — what it raises, every function raises — and

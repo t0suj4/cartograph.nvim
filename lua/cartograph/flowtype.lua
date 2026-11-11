@@ -1752,7 +1752,8 @@ local function build(store, opts)
         -- (on a STRING it replaces every string's metatable: the string library gains the new __index as a prototype —
         -- l34, CART-1811; the old one is kept, a sound over-approximation)
         -- (debug.sethook BY IDENTITY, CART-2013: the VM's call of the hook as at the walk's rule (CART-1949) — `call [hr] h
-        -- [ev]`, ev a string, tagged host:sethook, raising into the caller — for a call the walk did not recognise by its
+        -- [ev, line]`, ev a string and line a number, tagged host:sethook, raising into the caller (and every function, after
+        -- the solve, CART-2019) — for a call the walk did not recognise by its
         -- text: `local d = debug; d.sethook(h, "c")` had called no hook. The mask's text is not seen here: both
         -- candidates — the first argument, and the second after a thread — are called, a non-function runs nothing)
         M0['debug#sethook'] = function (a, _, cerr)
@@ -1855,6 +1856,7 @@ local function build(store, opts)
                 for j = (xp and 3 or 2), #a do rest[#rest + 1] = a[j] end
                 for k = 2, #rl do out[#out + 1] = rl[k] end
                 local perr = new(); addobj(perr, STR)
+                G7.PERRS[#G7.PERRS + 1] = perr -- (a hook may raise inside it, CART-2019)
                 if not xp then G7.emit({ 'pcall', rl, a[1], rest }) end
                 G7.callc(a[1], rest, #out > 0 and out or new(), nil, perr)
                 if rl[2] then
@@ -2361,6 +2363,7 @@ local function build(store, opts)
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
+    G7.PERRS = {} -- (every pcall's error port: a hook raises inside a protected builtin too, CART-2019)
     G7.HOOKFNS = {} -- (each debug.sethook's hook ports: what they raise, any function may raise — CART-2019)
     G7.GETINFOS = {} -- (debug.getinfo calls whose `func` may be any function: { fn, arg?, func, any? }, CART-2016)
     G7.FNMTPEND = {} -- (debug.setmetatable targets and their metatables: the function TYPE's metatable, CART-1957)
@@ -3726,6 +3729,7 @@ local function build(store, opts)
                 -- clause this rests on. xpcall hands it to its handler, whose result is the second value)
                 local perr = new()
                 addobj(perr, STR)
+                G7.PERRS[#G7.PERRS + 1] = perr -- (a debug hook may raise inside it — at a BUILTIN's call event too, CART-2019)
                 -- ★ THE PROTECTED FUNCTION IS A HOST BUILTIN (CART-1995, flowpath FLOW-0075). The core's pcall of a host
                 -- value starts no activation, so it raises nothing there — while Lua's does:
                 --   error / assert (the global, or a local alias of it, CART-1993): `pcall(error, x)` raises x ITSELF
@@ -3951,9 +3955,10 @@ local function build(store, opts)
             end
             -- ★ debug.sethook([thread,] hook, mask [, count]) (CART-1949, flowpath FLOW-0049): the VM calls the hook at the
             -- masked events of that thread with the event name ("call", "return", "line", "count") and, for a line event,
-            -- the line — a number, which holds nothing here. No tree code calls it, and it had been called by nothing.
-            -- Flow-insensitively the VM's call is a call HERE: `call [hr] h [ev]`, ev a string, tagged `host:sethook` (and
-            -- `:<mask>` for a literal mask) for flowpath; it raises into this function, as the core's call does. The hook
+            -- the line — a number (type:number since CART-1901/2019). No tree code calls it, and it had been called by
+            -- nothing. Flow-insensitively the VM's call is a call HERE: `call [hr] h [ev, line]`, tagged `host:sethook` (and
+            -- `:<mask>` for a literal mask) for flowpath; it raises into this function, as the core's call does — and,
+            -- after the solve, into every function and pcall, wherever the hook may fire (CART-2019). The hook
             -- is the argument before the first string-literal mask; with no literal mask both candidates are called (a
             -- thread or a non-function among them runs nothing)
             if argn[1] and (fname == 'debug.sethook' or isbuiltin('debug.sethook')) then
@@ -5134,24 +5139,28 @@ local function build(store, opts)
     -- up to the pcall protecting it. The hook's call at the sethook raised only into the sethook's own function: a hook
     -- armed inside a pcall'd function had raised past the pcall — a whole answer the run falsifies, by name and by alias.
     -- Each hook function's error port reaches every function's and chunk's (sound, coarse; flowpath refuses sethook)
+    -- (also every pcall's own error port — a hook firing at a BUILTIN's call event inside `pcall(type, 1)` raises into
+    -- that pcall, no Lua function in between — and a hook function that reaches its port in a LATER round: a filter, as
+    -- upvs's, links each one as it arrives)
     if #G7.HOOKFNS > 0 then
         local errs = {}
         for _, fp in pairs(fnports) do if fp.err then errs[#errs + 1] = fp.err end end
         for _, cp in pairs(G7.CHERR) do errs[#errs + 1] = cp end
+        for _, pe in ipairs(G7.PERRS) do errs[#errs + 1] = pe end
         table.sort(errs)
-        local done, grew = {}, false
+        local done = {}
         for _, hp in ipairs(G7.HOOKFNS) do
-            for o in each(hp) do
+            filter(hp, new(), function (o)
                 local fp = fnports[o]
                 if fp and fp.err and not done[o] then
                     done[o] = true
                     for _, e in ipairs(errs) do if e ~= fp.err then edge(fp.err, e) end end
-                    grew = true
                 end
-            end
+                return false
+            end)
         end
         G7.HOOKFNS = {}
-        if grew then solve() end
+        solve()
     end
     -- ★ debug.getinfo's `func` AT ANY LEVEL (CART-2016): a level other than a literal 1 — or an argument that may be a
     -- level: a number, a thread (its frames), past CAP, or unknown code's value — names any function that may be on the stack.
