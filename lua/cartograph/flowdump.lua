@@ -167,10 +167,12 @@
 --   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
 --   lists (CART-1803, CART-1813).
 --   (CART-1957: a number / boolean target is no gap — `type_metatables` = [[type, type site, holder site]] names the type's
---   metatable index; the gap stays for a function target, nothing held — nil — and a target past CAP)
---   `debug-typemeta`: a debug.setmetatable call by name whose target is no table or string — a function (the solve links
---   every function to the metatable's __index: no IR op says "every value of a type"), a number / boolean / nil (no
---   object: the solve reads nothing through it), or past CAP (CART-1957).
+--   metatable index, and the type site's META cell holds the metatable, CART-2017; the gap stays for a function
+--   target, nothing held — nil — and a target past CAP)
+--   `debug-typemeta`: a debug.setmetatable call — by name or through an alias, recorded by its model, CART-2017 —
+--   whose target is no table or string: a function, a closure or a C function (the solve links every function, the
+--   builtins' natives included, to the metatable's __index: no IR op says "every value of a type"), nil (no object),
+--   or past CAP (CART-1957).
 --   debug.setlocal / getlocal by name are COPIES into (out of) the locals of the frame their level names — a literal 1:
 --   the calling function's; else every function's — as the solve flows them (CART-1804; the gap `debug-local` until
 --   CART-1956).
@@ -421,7 +423,7 @@ function M.build(rec, X, sink)
                 any = true
                 -- (a number / boolean target is the TYPE's metatable, modelled since CART-1957: `type_metatables` names it —
                 -- no gap. A function's, or nothing held — nil, absence — stays the gap)
-                if X.fnports[o] then gap = true; break end
+                if X.fnports[o] or (X.NATIVE and X.NATIVE[o]) then gap = true; break end -- (a C function too, CART-2017)
             end
             if not any then gap = true end
         end
@@ -906,6 +908,8 @@ function M.build(rec, X, sink)
         end
     end
     local hj, hdj, htj, hxj, hkj = {}, {}, {}, {}, {}
+    local TMTYPES = {} -- (the types debug.setmetatable gave a metatable: number covers integer, CART-2017)
+    for _, e in ipairs(X.TYPEMTS or {}) do TMTYPES[e[1]] = true; if e[1] == 'number' then TMTYPES.integer = true end end
     local weak = {} -- (the sites a store that may set __mode reaches, CART-1723)
     local hktop = {}
     for o = 1, X.NO do
@@ -920,9 +924,13 @@ function M.build(rec, X, sink)
             end
         end
         -- (a HOST value — a profile-typed one, EXT — has no fields in the analysed heap: a load from it is its declared
-        -- type, what a walk stored on it is never read)
-        if m and not (X.TNAME[o] and not (X.hostkind and X.hostkind(X.TNAME[o]) == 'open')) and o ~= X.EXT then
+        -- type, what a walk stored on it is never read. Except a TYPE whose metatable debug.setmetatable set — a number /
+        -- boolean: its type site's META cell, which a checker reads the chain through, CART-2017)
+        local hostv = X.TNAME[o] and not (X.hostkind and X.hostkind(X.TNAME[o]) == 'open')
+        local tmtonly = hostv and TMTYPES[X.TNAME[o]]
+        if m and (not hostv or tmtonly) and o ~= X.EXT then
             for _, f in ipairs(X.okeys(o)) do
+                if tmtonly and f ~= '\1mt' then goto nextf end
                 local fp = m[f]
                 local ss = {}
                 if f == '{k}' then -- (flowtype's KEY SET of a table — what `pairs` yields as keys: not a field)

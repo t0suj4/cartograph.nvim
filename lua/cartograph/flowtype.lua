@@ -1140,10 +1140,11 @@ local function build(store, opts)
         -- setmetatable(x, mt) whose x also held functions made a call of them run mt's __call, CART-1710. Except through
         -- a port debug.setmetatable marked (G7.DBGMT): the function TYPE's metatable, CART-1957 — a call of such a
         -- function then also runs __call, which Lua does not: an over-approximation, only on such a tree)
-        -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761)
+        -- (and a HOST object takes it only when its kind is open, as in the solve, CART-1761 — but a TYPE's metatable
+        -- slot through a debug.setmetatable port does: debug.setmetatable(0, mt) sets the number type's, CART-2017)
         for o in each(x) do
             local tn = TNAME[o]
-            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and f == '\1mt' and not G7.DBGMT[x]) and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
+            if (not tn or G7.hostkind(tn) == 'open' or (f == '\1mt' and G7.DBGMT[x])) and not (fnports[o] and f == '\1mt' and not G7.DBGMT[x]) and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
         end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
@@ -1751,6 +1752,9 @@ local function build(store, opts)
         -- l34, CART-1811; the old one is kept, a sound over-approximation)
         M0['debug#setmetatable'] = function (a, rl)
             if a[1] then G7.DBGMT[a[1]] = true end
+            -- (the call, for the dump's debug-typemeta gap: from the MODEL, which runs by name and through an alias alike —
+            -- `local dsm = debug.setmetatable; dsm(f, mt)` had recorded none: the gap was by spelling, CART-2017)
+            if G7.REC and G7.NATFN then G7.TYPEMTCALLS[#G7.TYPEMTCALLS + 1] = { fn = G7.NATFN, args = a } end
             M0['setmetatable'](a, rl)
             if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
             if a[1] and a[2] then G7.FNMTPEND[#G7.FNMTPEND + 1] = { a[1], a[2] } end -- (on a FUNCTION: every function's, CART-1957)
@@ -3988,8 +3992,7 @@ local function build(store, opts)
                     elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
                     -- (debug.setfenv by NAME ran nothing: it sets f's environment as setfenv does, CART-1813)
-                    -- (debug.setmetatable by name: the dump names a target that is no table / string — CART-1957)
-                    if g0 and k0 == 'debug#setmetatable' and G7.REC then G7.TYPEMTCALLS[#G7.TYPEMTCALLS + 1] = { fn = G7.cur(), args = aps } end
+                    -- (debug.setmetatable: its model records the call for the dump, by name and by value — CART-1957 / 2017)
                     if g0 and k0 == 'debug#setfenv' and aps[1] and aps[2] then
                         edge(aps[2], G7.FENVP)
                         G7.FENV[#G7.FENV + 1] = { port = aps[1], env = aps[2] }
@@ -5034,10 +5037,17 @@ local function build(store, opts)
         local fos
         for _, q in ipairs(G7.FNMTPEND) do
             local y, hit = q[1], top[q[1]] or false
-            if not hit then for o in each(y) do if fnports[o] then hit = true; break end end end
+            -- (a C FUNCTION — a builtin's native, `debug.setmetatable(print, mt)` — is a function too: its type's metatable is
+            -- every function's, a closure's or a builtin's, CART-2017)
+            if not hit then for o in each(y) do if fnports[o] or G7.NATIVE[o] then hit = true; break end end end
             if hit then
                 G7.FNMT = true
-                if not fos then fos = {}; for o in pairs(fnports) do fos[#fos + 1] = o end; table.sort(fos) end
+                if not fos then
+                    fos = {}
+                    for o in pairs(fnports) do fos[#fos + 1] = o end
+                    for o in pairs(G7.NATIVE) do fos[#fos + 1] = o end
+                    table.sort(fos)
+                end
                 local idx = field(q[2], '__index')
                 -- (each port marked as debug.setmetatable's: a Lua link to a function is made only there, CART-1838; and
                 -- mt in the function's slot — what the core's setmeta writes, the dump's closedness — though a `\1mt` LOAD
@@ -5080,6 +5090,9 @@ local function build(store, opts)
                             end
                         end
                         local sp = new(); addobj(sp, H); proto(sp, field(q[2], '__index'), true)
+                        -- (the metatable is ALSO the type object's own slot: the model's setmetatable store, through its
+                        -- debug.setmetatable port, writes it — storec's exception for G7.DBGMT — so the dump's heap holds the
+                        -- type site's META cell, which a checker reads the chain through, CART-2017)
                         grew = true
                     end
                 end

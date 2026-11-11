@@ -2062,8 +2062,11 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
         return out
     end
     local FN = 'local function g() return {} end\n%s\nlocal h = function () end\nlocal r = h.foo()\nreturn r\n'
+    -- (CART-2017: through an ALIAS the call is a named gap too — it had been by spelling — and a C FUNCTION target,
+    -- `debug.setmetatable(print, mt)`, sets every function's: the clause had been kept, false)
     for _, form in ipairs({ 'debug.setmetatable(function () end, { __index = { foo = g } })',
-            'local dsm = debug.setmetatable\ndsm(function () end, { __index = { foo = g } })' }) do
+            'local dsm = debug.setmetatable\ndsm(function () end, { __index = { foo = g } })',
+            'debug.setmetatable(print, { __index = { foo = g } })' }) do
         local D = solve(FN:format(form))
         ok(not D.contracts.clauses['function-no-metatable'], form .. ': the clause is withheld')
         local t = foo_targets(D)
@@ -2075,7 +2078,7 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
         local slot = {}
         for _, e in ipairs(D.solution.h) do if e[1] == hs and e[2] == 100 then slot = e[3] end end
         ok(hs and #slot >= 1, form .. ': h\'s closure has the metatable in its slot: ' .. vim.inspect({ hs, slot }))
-        if form:find('^debug') then eq(1, gaps(D), 'by name: the call is a named gap') end
+        eq(1, gaps(D), form .. ': the call is a named gap, by name or by value')
     end
     local D = solve('debug.setmetatable(0, { __index = {} })\nlocal y = (5).foo\nreturn y\n')
     eq(0, gaps(D), 'a number target: its type\'s metatable, no gap (CART-1957)')
@@ -2826,6 +2829,13 @@ test('flowdump: debug.setmetatable on a number / boolean is its type\'s metatabl
     ok(holds_g(y), 'a number: (5).foo is g: ' .. vim.inspect(y)); eq(0, gap, 'no gap')
     eq(1, #D.type_metatables, 'type_metatables names the number type'); eq('number', D.type_metatables[1][1])
     eq(0, flowcheck.check(D).failed, 'the dump is closed')
+    -- (CART-2017: and the metatable is the TYPE SITE's META cell — a checker reads the chain through it; it had been
+    -- only in type_metatables' holder, and flowpath's check failed setmeta:meta (host-store))
+    local lab = {}
+    for _, st in ipairs(D.sites) do lab[st.id] = st.label end
+    local meta = {}
+    for _, e in ipairs(D.solution.h) do if e[1] == D.type_metatables[1][2] and e[2] == 100 then meta = e[3] end end
+    ok(#meta == 1 and tostring(lab[meta[1]]):match('^tbl:m%.lua:1:'), 'type:number\'s META cell holds mt: ' .. vim.inspect(meta))
     y, gap = run('debug.setmetatable(true, mt)\nY = (false).foo\n')
     ok(holds_g(y), 'a boolean: (false).foo is g: ' .. vim.inspect(y)); eq(0, gap)
     y = run('debug.setmetatable(1 > 2, mt)\nlocal n = 3\nY = (n == 3).foo\n')
