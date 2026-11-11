@@ -4147,6 +4147,13 @@ local function build(store, opts)
                 local o = newobj('tbl:' .. key_of(n))
                 addobj(p, o)
                 local npos = 0
+                -- (the LAST field, when it is a positional CALL, stores EVERY value the call returns at n, n+1, … — Lua's
+                -- multires rule for a constructor's last field; one shared cell `#` takes them all: its MULTI result ports
+                -- and the rest port that collects the values past them. `{ f() }` had stored f's first value only, so
+                -- t[5] read A where Lua gives E, CART-2004. Not `{ (f()) }` — a parenthesized_expression — nor a call
+                -- in any other position: one value each)
+                local lastf
+                for _, fl in tsutil.inext, n, -1 do if fl:type() == 'field' then lastf = fl end end
                 for _, fl in tsutil.inext, n, -1 do
                     if fl:type() == 'field' then
                         local k, v = fl:field('name')[1], fl:field('value')[1]
@@ -4166,11 +4173,17 @@ local function build(store, opts)
                             -- had run nothing, and pairs never yielded the key, CART-1770)
                             local bracket = k and not named
                             local kp = bracket and (key == '[]' or k:type() ~= 'string' and k:type() ~= 'number') and expr(k) or nil
-                            local vp = expr(v)
+                            local vl
+                            if not k and fl == lastf and v:type() == 'function_call' then
+                                G7.WANTREST = true
+                                vl = callv(v, MULTI)
+                                if type(vl) ~= 'table' then vl = { vl } end
+                            end
+                            local vp = vl and vl[1] or expr(v)
                             G7.NEXTK = key == '[]' and kp or nil
                             -- (a constructor's field is set RAW — no __newindex: the dump's storeRaw, FLOW-0090)
                             G7.RAWSTORE = true -- (a computed key too: the dump's storeRawDyn, CART-1771)
-                            edge(vp, ofp(o, key))
+                            if vl then for _, x in ipairs(vl) do edge(x, ofp(o, key)) end else edge(vp, ofp(o, key)) end
                             G7.RAWSTORE = nil
                             G7.NEXTK = nil
                             if G7.EXP['strict-records'] and v:type() == 'table_constructor' and G7.MAPNAME[key] then for x in each(vp) do G7.MAPSITE[x] = true end end

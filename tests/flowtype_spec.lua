@@ -164,6 +164,26 @@ local function kcase(src)
 end
 local function whole(v, m) return v and v.kind == 'exact' and not v.partial and #v.targets == 1 and tostring(v.targets[1]):match('%u%.' .. m .. '@') end
 
+-- (CART-2004, flowpath FLOW-0170: a constructor's LAST field, a call, stores EVERY value the call returns — `{ f() }` had
+-- stored only f's first, so t[5] read A where Lua gives E. The route fixture ctor_trailing_call pins the soundness; this
+-- pins BOTH sides of the predicate: a call in any other position, or parenthesized, still gives one value)
+test('flowtype: only a constructor\'s LAST field, an unparenthesized call, stores every value (CART-2004)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local five = 'local function f() return A, A, A, A, B end\n'
+    for what, c in pairs {
+        ['the last field'] = { 'local t = { A, f() }', false },
+        ['the only field'] = { 'local t = { f() }', false },
+        ['a call not last'] = { 'local t = { f(), A }', true },
+        ['a parenthesized call'] = { 'local t = { (f()) }', true },
+        ['a call before a keyed field'] = { 'local t = { f(), k = 1 }', true },
+        ['a KEYED last field'] = { 'local t = { k = f() }', true, 't.k' },
+    } do
+        local v = kcase { body = five .. c[1] .. '\nlocal o = ' .. (c[3] or 't[1]') }
+        if c[2] then ok(whole(v.run, 'run'), what .. ': one value, t holds A only: ' .. vim.inspect(v.run))
+        else ok(not whole(v.run, 'run'), what .. ': f\'s fifth value B reaches t: ' .. vim.inspect(v.run)) end
+    end
+end)
+
 test('flowtype: a function stored by a computed key may be the named member — no whole exact of the named one (CART-1726)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal k = ("run"):lower()\no[k] = B.run' }

@@ -49,7 +49,8 @@
 --       tagged `vararg:spread`; `argtable` under ver 51 a vararg function that never names `...` — PUC 5.1's `arg`
 --       table, whose reads are the gap `vararg-arg`. CART-1948: a resume's arguments and a yield's values spread too
 --       (a last `...` or call); `rest` each call / pcall / resume / yield whose values are all forwarded (`v(f())`,
---       `return f()`, `v(pcall(f))`, a yield's / resume's last call; CART-1996 for pcall / resume / yield) — its result
+--       `return f()`, `v(pcall(f))`, a yield's / resume's last call, a table constructor's last field `{ a, f() }` —
+--       every result stored raw into the array cell `#`, CART-2004; CART-1996 for pcall / resume / yield) — its result
 --       variable at that 1-based position collects EVERY value from there on, tagged
 --       `vararg:rest`, and the consumer's operand spreads from it; a file chunk's own `...` with no declared loader is
 --       the chunk's `vararg`, tainted in the solution — what require / the script passes)
