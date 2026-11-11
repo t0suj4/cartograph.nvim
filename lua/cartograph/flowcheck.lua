@@ -66,6 +66,11 @@ local CODE = {}
 for _, f in ipairs(D.functions) do CODE[f.id] = f end
 local fname = function (g) return D.names.functions[g + 1] end
 local fieldname = function (f) return D.names.fields[f + 1] end
+-- (the HIDDEN fields — a thread's `\1co` …, named with a leading \1; the metatable slot is META: under the clause
+-- hidden-fields a dynamic key never reaches them in Lua — indexing a thread raises — while a loadDyn / loadRaw here ranges
+-- over every field: a value read there is that clause's, named, CART-2011)
+local HIDDENF = {}
+for i, nm in ipairs(D.names and D.names.fields or {}) do if type(nm) == 'string' and nm:byte(1) == 1 then HIDDENF[i - 1] = true end end
 
 local EMPTY = {}
 local function v(x) return V[x] or EMPTY end
@@ -160,7 +165,8 @@ for _, F in ipairs(D.functions) do
                         if HTOP[c .. ':' .. f] and not TOP[x] then fail('field-top', x, ('h(%d,%s) is top'):format(c, tostring(fieldname(f)))) end
                     else
                         for f2, t in pairs(H[c] or EMPTY) do
-                            sub(t, x, f2 == META and 'field*META(model)' or (c == GLOBALS and 'field*contract:computed-global' or 'field*'))
+                            sub(t, x, f2 == META and 'field*META(model)' or HIDDENF[f2] and 'field*contract:hidden-fields'
+                                or (c == GLOBALS and 'field*contract:computed-global' or 'field*'))
                         end
                         sub(HDYN[c] or EMPTY, x, 'field[]')
                     end
@@ -184,7 +190,7 @@ for _, F in ipairs(D.functions) do
             for a in pairs(v(y)) do
                 if not HOST[a] then
                     for f2, t in pairs(H[a] or EMPTY) do
-                        if f2 ~= META then sub(t, x, a == GLOBALS and 'raw*contract:computed-global' or 'raw*') end
+                        if f2 ~= META then sub(t, x, HIDDENF[f2] and 'raw*contract:hidden-fields' or (a == GLOBALS and 'raw*contract:computed-global' or 'raw*')) end
                     end
                     sub(HDYN[a] or EMPTY, x, 'raw[]')
                 end

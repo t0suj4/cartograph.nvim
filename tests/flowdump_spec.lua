@@ -1440,6 +1440,20 @@ test('flowdump: a hook\'s error is every function\'s, and init\'s unknown-code c
     eq(0, flowcheck.check(D).failed, 'closed')
 end)
 
+-- (CART-2011: a loadDyn / loadRaw over a THREAD — `co[k]`, pairs(co) — reads its hidden coroutine field in the checker,
+-- which ranges over every field; Lua raises there, the solve reads nothing. The failure is the clause hidden-fields',
+-- named — it had been a bare field*)
+test('flowcheck: a dynamic read of a hidden field is the clause hidden-fields, named (CART-2011)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    for _, src in ipairs {
+        'local co = coroutine.create(function () end)\nlocal function g(k) return co[k] end\nreturn g\n',
+        'local co = coroutine.create(function () end)\nfor k, v in pairs(co) do print(v) end\n' } do
+        local c = flowcheck.check(dump(src), 3)
+        ok(next(c.counts) ~= nil, 'the read is reported: ' .. src)
+        for k in pairs(c.counts) do ok(k:find('contract:hidden-fields', 1, true), 'only as hidden-fields: ' .. k) end
+    end
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
