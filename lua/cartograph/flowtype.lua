@@ -1571,8 +1571,8 @@ local function build(store, opts)
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
         ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
         ['table#move'] = true, ['table#foreach'] = true, ['table#foreachi'] = true, ['string#gsub'] = true,
-        ['debug#sethook'] = true,
-        -- (a sort with no comparator runs __lt, and tostring / format / the iterators have no template: lost there)
+        ['debug#sethook'] = true, ['string#format'] = true,
+        -- (a sort with no comparator runs __lt, and tostring / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
         local M0 = G7.NATMODEL
@@ -1669,9 +1669,15 @@ local function build(store, opts)
             addobj(rl[1], STR)
             if a[1] then metacall(a[1], '__tostring', { a[1] }, rl[1], cerr) end
         end
+        -- (its IR TEMPLATE, CART-2015: the result a string, and an `op __tostring` per argument after the format, as the
+        -- walk's own path writes them — a METHOD call `fmt:format(obj)`, which runs this model once its receiver holds a
+        -- string (CART-2007), had run __tostring in the solve and nothing in a dump)
         M0['string#format'] = function (a, rl, cerr)
-            addobj(rl[1], STR)
-            for j = 2, #a do metacall(a[j], '__tostring', { a[j] }, new(), cerr) end
+            primv(rl[1], 'string')
+            for j = 2, #a do
+                local hr = new()
+                metacall(a[j], '__tostring', { a[j] }, hr, cerr); G7.emit({ 'op', hr, { a[j] }, '__tostring' })
+            end
         end
         -- (and a TABLE replacement is indexed by the capture — repl[cap], through its __index: Lua calls a handler
         -- h(repl, cap) there, which had never run, CART-2007. In the IR the model's template: the call of a function

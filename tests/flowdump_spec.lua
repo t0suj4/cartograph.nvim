@@ -1454,6 +1454,21 @@ test('flowcheck: a dynamic read of a hidden field is the clause hidden-fields, n
     end
 end)
 
+-- (CART-2015: string.format's model has an IR template — an `op __tostring` per argument — so a METHOD call
+-- `fmt:format(obj)` (the string-method bridge, CART-2007) and an alias carry the __tostring route in the dump too; it ran
+-- in the solve only)
+test('flowdump: a method or aliased string.format runs __tostring in the IR (CART-2015)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local O = 'local O = setmetatable({}, { __tostring = function (self) return "o" end })\n'
+    for _, src in ipairs { O .. 'local s = ("%s"):format(O)\n', O .. 'local fmt = string.format\nlocal s = fmt("%s", O)\n' } do
+        local D = dump(src)
+        local ops = 0
+        for _, F in ipairs(D.functions) do for _, ins in ipairs(F.body) do if ins[1] == 'op' then ops = ops + 1 end end end
+        ok(ops >= 1, 'an op for __tostring: ' .. src)
+        eq(0, flowcheck.check(D).failed, 'closed: ' .. src)
+    end
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
