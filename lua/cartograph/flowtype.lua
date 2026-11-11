@@ -1388,6 +1388,8 @@ local function build(store, opts)
         if not kp then
             kp = new(); KEYPORT[f] = kp
             if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
+            -- (a builtin's key the solve cannot name may be a number too — gsub's position capture, CART-2007)
+            if f == G7.MISSK then addobj(kp, typeobj('number')) end
         end
         bindcall(g, { op, kp }, dst, nil, G7.lerget(dst))
     end
@@ -1669,9 +1671,12 @@ local function build(store, opts)
             primv(rl[1], 'string')
             if rl[2] then primv(rl[2], 'integer') end
             if a[3] then
-                local cap = new(); primv(cap, 'string')
+                -- (the captures: strings, or a NUMBER for a position capture `()`, as many arguments as captures —
+                -- lua5.1, LuaJIT and 5.4 alike: one port spread into every parameter)
+                local cap = new(); primv(cap, 'string'); primv(cap, 'number')
                 local r = new()
-                G7.callc(a[3], { cap }, r, nil, cerr); G7.emit({ 'call', { r }, a[3], { cap } })
+                local ca = { cap, spread = 1 }
+                G7.callc(a[3], ca, r, nil, cerr); G7.emit({ 'call', { r }, a[3], ca })
                 local d = field(a[3], G7.MISSK)
                 G7.emit({ 'load', d, a[3], G7.MISSK })
             end
@@ -2289,8 +2294,8 @@ local function build(store, opts)
     -- signatures (and the profile's plain globals: WoW's tinsert) — is a NATIVE object its global or library field
     -- holds. A call through one whose text did not name it is a LOST call until the builtin has a model: results
     -- tainted, arguments escaped (bindcall). A native is a function VALUE with no fields: it never escapes, and the dump
-    -- states it a FIXED host site (host prim), which the E-tables drop. (The string library, the
-    -- method path, and nested namespaces such as vim.fn wait for the models)
+    -- states it a FIXED host site (host prim), which the E-tables drop. (A string METHOD runs its builtin's model once
+    -- the receiver holds a string — G7.SMC, CART-2007; nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
     -- (★ A SCALAR'S TYPE OBJECT NEVER ESCAPES, CART-1869: type:string, number, boolean, nil stand for VALUES — no table
     -- outside code may write. A handed table's key set holds type:string, and the escape closure had followed it; the
@@ -2550,8 +2555,13 @@ local function build(store, opts)
             return G7.CBCALL
         end
         function G7.isfn(o) return fnports[o] ~= nil end
-        -- (what debug.traceback hands back unchanged: any value but a string or a number, CART-2005)
-        function G7.tbpass(o) local t = TNAME[o]; return t ~= 'string' and t ~= 'number' and t ~= 'integer' end
+        -- (what debug.traceback hands back unchanged: any value but a string or a number, CART-2005 — and never a THREAD:
+        -- one is the `co` of the two-argument form, which Lua never returns)
+        function G7.tbpass(o)
+            local t = TNAME[o]
+            if t == 'string' or t == 'number' or t == 'integer' or t == 'thread' then return false end
+            return not tostring(obinfo[o] or ''):match('^thread:')
+        end
     end
     -- ── the graph's facts ───────────────────────────────────────────────────────────────────────────
     local fn_at = {}
@@ -4041,8 +4051,8 @@ local function build(store, opts)
             -- (CART-1708: tree code a BUILTIN runs. A function value handed to a call that is no resolved tree function
             -- may be called by it — its errors pass through to this caller. tostring runs __tostring and returns its
             -- result (5.1: any value); print and string.format run it on their arguments; table.sort compares the
-            -- elements — its comparator or their __lt. (string.gsub's replacement function needs no route: its
-            -- errors are the rule above, and it is handed only strings)
+            -- elements — its comparator or their __lt. (string.gsub's replacement runs in its MODEL — by name too, CART-2007:
+            -- a function is called with every capture, a string or a number; a table is indexed by one)
             for _, ap in ipairs(aps) do
                 local ce = curerr()
                 do

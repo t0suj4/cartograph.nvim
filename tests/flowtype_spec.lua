@@ -262,6 +262,33 @@ test('flowtype: a model-less builtin runs its argument\'s __index; a modelled ra
     eq('', objs.sinkr, 'select / type / rawequal, a user object\'s gsub run no handler: ' .. vim.inspect(objs))
 end)
 
+-- (CART-2007: gsub hands a replacement its CAPTURES — strings, or a NUMBER for a position capture `()`, one argument
+-- per capture; a table replacement is indexed by the first, a number key there — checked on lua5.1, LuaJIT, 5.4)
+test('flowtype: gsub passes every capture, a position capture a number, to a function or a table replacement (CART-2007)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local function sinkp(x) return x end',
+            'local function sinky(x) return x end',
+            'local function sinkk(x) return x end',
+            'local a = ("ab"):gsub("()", function (p) sinkp(p) end)',
+            'local b = ("k=v"):gsub("(%w)=(%w)", function (x, y) sinky(y) end)',
+            'local c = ("ab"):gsub("()", setmetatable({}, { __index = function (t, k) sinkk(k) end }))',
+            'return a, b, c' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    ok(tostring(objs.sinkp):find('type:number', 1, true), 'a position capture is a number: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinky):find('type:string', 1, true), 'the second capture is the second argument: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinkk):find('type:number', 1, true), 'a table replacement is indexed by a number there: ' .. vim.inspect(objs))
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
@@ -270,6 +297,8 @@ test('flowtype: debug.traceback hands back a non-string message, and only that (
             'local function sinks(x) return x end',
             'local function sinke(x) return x end',
             'local function sinkc(x) return x end',
+            'local function sinkt(x) return x end',
+            'sinkt(debug.traceback(coroutine.create(function () end), "m"))', -- (the thread is never handed back)
             'sinks(debug.traceback("m", 2))',
             'sinks(debug.traceback("m", math.floor(2)))', -- (a profile's declared `integer`)
             'sinke(debug.traceback(T, 2))',
@@ -289,6 +318,7 @@ test('flowtype: debug.traceback hands back a non-string message, and only that (
     end
     -- (a string message and a level: the traceback's string only — the level is a number, never handed back)
     eq('type', objs.sinks, 'a string message, a level: ' .. vim.inspect(objs))
+    eq('type', objs.sinkt, 'a thread and a string message: the string only: ' .. vim.inspect(objs))
     ok(tostring(objs.sinke):find('tbl', 1, true), 'a table message comes back: ' .. vim.inspect(objs))
     ok(tostring(objs.sinkc):find('tbl', 1, true), 'the message after a thread comes back: ' .. vim.inspect(objs))
 end)

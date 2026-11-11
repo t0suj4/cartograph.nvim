@@ -63,6 +63,13 @@
 --       set it off (escmore's fields / parameters); deterministic (the drain pops the lowest port),
 --     gn_exclude = [field id ...]? — the names the tree's own literal-keyed dynamic _G steps reach (LibStub's
 --       `_G[LIBSTUB_MAJOR] = LibStub`): out of contract GN's named set, their named reads saturated (CART-1820),
+--     (INLINED MODELS, CART-1794 / 2006 / 2007: a builtin's model with an IR template writes its instructions into the
+--       CALLING function's body — reached by value; BY NAME too for assert, table.foreach / foreachi, string.gsub,
+--       table.move, the debug mutators (flowtype's G7.NAMEDRUN); a STRING METHOD `s:gsub(…)` once its receiver holds
+--       a string; and a protected PCALL's model under `pcall(pcall, f)` (only pcall: another model's call is
+--       unprotected there). A builtin with no model, called by name, LOADS each argument by the reserved field name
+--       `(a key it lacks)` — a key no table holds, so the load's raw miss runs only the argument's __index chain, as
+--       Lua's builtins index their table arguments; gsub loads a table replacement the same way, CART-2007)
 --     natives = [[site, name] ...] — CART-1716 (flowpath FLOW-0083, CORE.md D34): each host builtin's site in the initial
 --       globals and its name (the site label after `native:` — pcall, setmetatable, coroutine.create, table.insert …).
 --       Every call expression has a `.call`: a builtin the translation SPELLS (pcall, setmeta, getmeta, cocreate, resume,

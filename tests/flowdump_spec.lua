@@ -1305,6 +1305,12 @@ test('flowdump: s:gsub(p, repl) loads a table replacement, os.time(t) loads t, b
     local D2 = dump(H .. 'local r = os.time(E)\n')
     eq(1, misses(D2), 'os.time: one load of its argument')
     eq(0, flowcheck.check(D2).failed, 'closed')
+    -- (a function replacement takes every capture: the call spreads its one capture port from the first parameter)
+    local D3 = dump('local r = ("k=v"):gsub("(%w)=(%w)", function (x, y) return y end)\n')
+    local spread = 0
+    for _, F in ipairs(D3.functions) do for _, sp in ipairs(F.spread or {}) do if sp[2] == 1 then spread = spread + 1 end end end
+    eq(1, spread, 'the replacement call spreads from position 1')
+    eq(0, flowcheck.check(D3).failed, 'closed')
 end)
 
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
