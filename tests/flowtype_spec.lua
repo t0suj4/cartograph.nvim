@@ -184,6 +184,40 @@ test('flowtype: only a constructor\'s LAST field, an unparenthesized call, store
     end
 end)
 
+-- (CART-2005, flowpath FLOW-0170: debug.traceback([co,] msg [, level]) returns a msg that is no string and no number
+-- UNCHANGED — the route fixtures traceback_msg / traceback_co_msg pin the pass-through on every Lua; this pins the other
+-- side: a string message and a level stay out, the result is the string)
+test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local T = {}',
+            'local function sinks(x) return x end',
+            'local function sinke(x) return x end',
+            'local function sinkc(x) return x end',
+            'sinks(debug.traceback("m", 2))',
+            'sinks(debug.traceback("m", math.floor(2)))', -- (a profile's declared `integer`)
+            'sinke(debug.traceback(T, 2))',
+            'sinkc(debug.traceback(coroutine.running(), T))',
+            'return T' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then
+            local l, why = R.arg_objs(c, 1)
+            objs[nm] = l and table.concat(vim.fn.sort(vim.tbl_map(function (x) return (x:gsub(':.*', '')) end, l)), ' ') or why
+        end
+    end
+    -- (a string message and a level: the traceback's string only — the level is a number, never handed back)
+    eq('type', objs.sinks, 'a string message, a level: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinke):find('tbl', 1, true), 'a table message comes back: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinkc):find('tbl', 1, true), 'the message after a thread comes back: ' .. vim.inspect(objs))
+end)
+
 test('flowtype: a function stored by a computed key may be the named member — no whole exact of the named one (CART-1726)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local v = kcase { body = 'local o = { run = A.run, stop = A.stop }\nlocal k = ("run"):lower()\no[k] = B.run' }

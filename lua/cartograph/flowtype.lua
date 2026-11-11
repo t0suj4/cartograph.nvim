@@ -2490,6 +2490,8 @@ local function build(store, opts)
             return G7.CBCALL
         end
         function G7.isfn(o) return fnports[o] ~= nil end
+        -- (what debug.traceback hands back unchanged: any value but a string or a number, CART-2005)
+        function G7.tbpass(o) local t = TNAME[o]; return t ~= 'string' and t ~= 'number' and t ~= 'integer' end
     end
     -- ── the graph's facts ───────────────────────────────────────────────────────────────────────────
     local fn_at = {}
@@ -3977,6 +3979,14 @@ local function build(store, opts)
             -- (table.remove(t [, pos]) returns an element of t — its array cells; its shifts move t's own values within
             -- t and the last store is nil: no set changes. 5.1 / LuaJIT are raw, CART-1790)
             if fname == 'table.remove' and aps[1] then edge(field(aps[1], '[]'), resl[1]) end
+            -- (debug.traceback([co,] msg [, level]) returns a msg that is no string and no number UNCHANGED — lua5.1,
+            -- LuaJIT and 5.4 alike (a number becomes the traceback's text): an error object passes through
+            -- `xpcall(f, debug.traceback)`, and the signature's `string` is the string case only. The message is the
+            -- 1st argument, or the 2nd after a thread; a level is a number, never passed. By its text with `debug` the
+            -- global, or a local alias of it. CART-2005)
+            if (fname == 'debug.traceback' and select(2, lookup('debug'))) or isbuiltin('debug.traceback') then
+                for j = 1, math.min(2, #aps) do filter(aps[j], resl[1], G7.tbpass) end
+            end
             if fname == 'print' or fname == 'string.format' then
                 for _, ap in ipairs(aps) do metacall(ap, '__tostring', { ap }, new(), curerr()) end
             end
