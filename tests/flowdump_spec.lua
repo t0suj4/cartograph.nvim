@@ -1255,6 +1255,35 @@ test('flowdump: table.move is a load and a store in the IR (CART-1814)', functio
     eq(0, flowcheck.check(D).failed, 'closed')
 end)
 
+-- (CART-2006, flowpath FLOW-0170: a DIRECT assert runs its model by name — every argument a copy into its result in the
+-- IR, not the signature's first only — and table.foreach / foreachi inline their callback's call: by name both had left
+-- results 2..n with no route, or only a taint the certificate need not keep)
+test('flowdump: a direct assert copies every argument, table.foreach calls its callback, pcall(pcall, f) inlines, in the IR (CART-2006)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D1 = dump('local _, x = assert(a)\nprint(use(x))\n')
+    local D2 = dump('local _, x = assert(a, b)\nprint(use(x))\n')
+    ok((opcodes(D2).copy or 0) > (opcodes(D1).copy or 0), 'assert(a, b): a copy of b into the second result')
+    eq(0, flowcheck.check(D2).failed, 'closed')
+    local D0 = dump('local r = nil\nprint(use(r))\n')
+    local D3 = dump('local r = table.foreach({ 1 }, function (k, v) return b end)\nprint(use(r))\n')
+    ok((opcodes(D3).keys or 0) > (opcodes(D0).keys or 0), 'foreach: the keys its callback gets')
+    ok((opcodes(D3).call or 0) > (opcodes(D0).call or 0) + 1, 'foreach: the native AND its callback are called')
+    eq(0, flowcheck.check(D3).failed, 'closed')
+    -- (a protected BUILTIN with a template inlines its model too: pcall(pcall, f)'s inner pcall calls f — it had been a
+    -- lost call, its third result only a taint)
+    local D4 = dump('local function f() return b end\nlocal _, _, r = pcall(pcall, f)\nprint(use(r))\n')
+    eq(2, opcodes(D4).pcall, 'the outer pcall and the inlined inner one')
+    eq(0, #D4.solution.taint.ports, 'no taint stands in for f\'s result')
+    eq(0, flowcheck.check(D4).failed, 'closed')
+    local D5 = dump('local function f() return b end\npcall(pcall, f)\n') -- (one result: the other branch)
+    eq(2, opcodes(D5).pcall, 'a statement pcall(pcall, f) inlines too')
+    eq(0, flowcheck.check(D5).failed, 'closed')
+    -- (and ONLY pcall: table.sort's model calls a comparator that raises — inlined into the caller, unprotected, that
+    -- raise would be the caller's and the dump not closed; it stays a lost call)
+    local D6 = dump('local ok, e = pcall(table.sort, { 2, 1 }, function (x, y) error(b) end)\nprint(use(e))\n')
+    eq(0, flowcheck.check(D6).failed, 'a protected sort stays closed')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end

@@ -187,6 +187,51 @@ end)
 -- (CART-2005, flowpath FLOW-0170: debug.traceback([co,] msg [, level]) returns a msg that is no string and no number
 -- UNCHANGED — the route fixtures traceback_msg / traceback_co_msg pin the pass-through on every Lua; this pins the other
 -- side: a string message and a level stay out, the result is the string)
+-- (CART-2006, flowpath FLOW-0170: a DIRECT assert returns every argument when the first is truthy — by name only the
+-- signature's generic first result had flowed: `local a, b, c = assert(A, B, E)` gave c nothing and b only a taint.
+-- The route fixtures assert_* cannot see it (the answer was partial); the result SETS can)
+test('flowtype: a direct assert returns every argument — spread, forwarded, and no taint; table.foreach its callback\'s result (CART-2006)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A, B, E = {}, {}, {}',
+            'local function sinkc(x) return x end',
+            'local function sinkb(x) return x end',
+            'local function sinka(x) return x end',
+            'local function sinks(x) return x end',
+            'local function sinkr(x) return x end',
+            'local function sinkf(x) return x end',
+            'local function sinki(x) return x end',
+            'local function five() return A, A, A, A, E end',
+            'local function v(...) local _, _, _, _, x = ...; sinkr(x) end',
+            'local function caller() local a, b, c = assert(A, B, E); sinkc(c) end',
+            'local function g01() local a, b = assert(A, E); sinkb(b) end',
+            'local function g1() local a = assert(A, E); sinka(a) end',
+            'local function g5() local a, b, c, d, e = assert(five()); sinks(e) end',
+            'local function fwd() v(assert(A, A, A, A, E)) end',
+            -- (the same class: table.foreach / foreachi return their callback's result — by name an `any` taint)
+            'local function fe() sinkf(table.foreach({ 1 }, function (k, v) return E end)) end',
+            'local function fi() sinki(table.foreachi({ A }, function (k, v) return v end)) end',
+            'caller(); g01(); g1(); g5(); fwd(); fe(); fi()' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    local A, E = 'tbl:m.lua:0:16', 'tbl:m.lua:0:24'
+    eq(E, objs.sinkc, 'the third argument is the third result: ' .. vim.inspect(objs))
+    eq(E, objs.sinkb, 'the second, whole — no declared-`any` taint: ' .. vim.inspect(objs))
+    eq(A, objs.sinka, 'one result is the first argument only: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinks):find(E, 1, true), 'past a spread last argument: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinkr):find(E, 1, true), 'a forwarded assert hands on every argument: ' .. vim.inspect(objs))
+    eq(E, objs.sinkf, 'table.foreach returns its callback\'s result, whole: ' .. vim.inspect(objs))
+    eq(A, objs.sinki, 'table.foreachi\'s callback gets the elements: ' .. vim.inspect(objs))
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

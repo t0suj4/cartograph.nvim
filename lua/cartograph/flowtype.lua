@@ -1545,7 +1545,7 @@ local function build(store, opts)
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
         ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
-        ['table#move'] = true,
+        ['table#move'] = true, ['table#foreach'] = true, ['table#foreachi'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1553,7 +1553,16 @@ local function build(store, opts)
         local function primv(p, T) local o = T == 'string' and STR or typeobj(T); addobj(p, o); G7.emit({ 'new', p, o }) end
         local function K() local k = new(); primv(k, 'number'); return k end
         local function prim(T) return function (_, rl) primv(rl[1], T) end end
-        M0['assert'] = function (a, rl) for i, r in ipairs(rl) do if a[i] then edge(a[i], r); G7.emit({ 'copy', r, a[i] }) end end end
+        -- (assert returns its arguments: result i is argument i; past a SPREAD last argument every result is its port,
+        -- and a FORWARDED list's rest result collects every argument from there — `assert(f())` and `v(assert(a, …))`,
+        -- CART-2006 / 1948)
+        M0['assert'] = function (a, rl)
+            for i, r in ipairs(rl) do
+                local lo, hi = i, rl.rest == i and #a or i
+                if a.spread and i > a.spread then lo, hi = a.spread, a.spread end
+                for j = lo, hi do if a[j] then edge(a[j], r); G7.emit({ 'copy', r, a[j] }) end end
+            end
+        end
         M0['select'] = function (a, rl) for _, r in ipairs(rl) do for j = 2, #a do edge(a[j], r); G7.emit({ 'copy', r, a[j] }) end end end
         local function elems(a, rl)
             if a[1] then local el = field(a[1], '[]'); local k = K(); for _, r in ipairs(rl) do edge(el, r); G7.emit({ 'loadRaw', r, a[1], k }) end end
@@ -1598,6 +1607,21 @@ local function build(store, opts)
             edge(field(a[1], '{k}'), rl[1]); G7.emit({ 'keys', rl[1], a[1] })
             if rl[2] then edge(field(a[1], '[]'), rl[2]); G7.emit({ 'loadRaw', rl[2], a[1], K() }) end
         end
+        -- (table.foreach(t, f) / foreachi (5.1, LuaJIT) call f(k, v) for each pair — foreachi's keys are numbers — and
+        -- return f's first non-nil result: the call's result is f's. By name the signature's generic `T` bound nothing,
+        -- an `any` that only tainted it, CART-2006)
+        local function foreach(numk)
+            return function (a, rl, cerr)
+                if not (a[1] and a[2]) then return end
+                local kp
+                if numk then kp = K() else kp = new(); edge(field(a[1], '{k}'), kp); G7.emit({ 'keys', kp, a[1] }) end
+                local el = field(a[1], '[]')
+                G7.emit({ 'loadRaw', el, a[1], K() })
+                local r = rl[1] or new()
+                G7.callc(a[2], { kp, el }, r, nil, cerr); G7.emit({ 'call', { r }, a[2], { kp, el } })
+            end
+        end
+        M0['table#foreach'], M0['table#foreachi'] = foreach(false), foreach(true)
         M0['error'] = function (a, _, cerr) if a[1] and cerr then edge(a[1], cerr); G7.emit({ 'error', a[1] }) end end
         M0['table#sort'] = function (a, _, cerr)
             if not a[1] then return end
@@ -2249,6 +2273,11 @@ local function build(store, opts)
     G7.NAMEDRUN['debug#setlocal'], G7.NAMEDRUN['debug#getlocal'] = true, true
     G7.NAMEDRUN['debug#getregistry'] = true
     G7.NAMEDRUN['table#move'] = true -- (by name it ran nothing: the model runs, CART-1814)
+    -- (assert returns EVERY argument when the first is truthy: by name only the signature's generic `T` — its first —
+    -- had flowed, results 2..n were empty or the declared `any`'s taint; the alias ran the model and was right. By name
+    -- the model runs too, its copies in the IR, CART-2006)
+    G7.NAMEDRUN['assert'] = true
+    G7.NAMEDRUN['table#foreach'], G7.NAMEDRUN['table#foreachi'] = true, true -- (its result is f's: by name `any`'s taint)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.LOCCALLS = {} -- (debug.setlocal / getlocal calls by name, for the dump: CART-1956)
@@ -3718,6 +3747,13 @@ local function build(store, opts)
                     if rest then fl.rest, out.rest = #fl, #out end
                     local fv = callee()
                     G7.ins({ 'pcall', out, fv, aps }, ptag)
+                    -- (the function a protected call's results belong to: a protected PCALL inlines its model there, as at a
+                    -- plain call — `pcall(pcall, f)` had been a lost call in the dump, its third result only a taint,
+                    -- CART-2006 / 1794. ONLY pcall: its model catches everything, so its inlined IR raises nothing. Another
+                    -- builtin's model may call code that raises — table.sort's comparator — and inlined into the caller,
+                    -- with no protected region, that raise would be the CALLER's; it stays a lost call)
+                    local inl = G7.REC and G7.W and bn == 'pcall'
+                    if inl then for _, r in ipairs(fl) do G7.RESFN[r] = G7.cur() end end
                     G7.callany(fv, aps, fl, nil, perr)
                     if out[2] then edge(perr, out[2]); handler(out[2]) end
                     ptwin(out, fv)
@@ -3727,6 +3763,7 @@ local function build(store, opts)
                 local fv = callee()
                 local r1 = fname == 'xpcall' and argn[2] and new() or nil
                 G7.ins({ 'pcall', r1 and { res, r1 } or { res }, fv, aps }, ptag)
+                if G7.REC and G7.W and bn == 'pcall' then G7.RESFN[res] = G7.cur() end -- (as above, CART-2006)
                 G7.callany(fv, aps, res, nil, perr)
                 if r1 then edge(res, r1); edge(perr, r1); handler(r1) end
                 ptwin(r1 and { res, r1 } or { res }, fv)
@@ -3909,6 +3946,8 @@ local function build(store, opts)
                 end
             end
             local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)
+                or (aps[1] and isbuiltin('assert')) -- (its model runs by name: G7.NAMEDRUN, CART-2006)
+                or ((fname == 'table.foreach' or fname == 'table.foreachi') and aps[2] and true)
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
