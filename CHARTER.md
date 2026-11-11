@@ -293,11 +293,12 @@ on the feature, not on the surface.
 
 **Lua's head start is practical, not strategic.** It leads because it is what we
 dogfood on, and that is the whole reason. Every Lua-locked capability is
-scaffolding debt, not a moat — when one ships, "what would the other fourteen
-languages need" is a real question with an answer owed, not a nice-to-have.
+scaffolding debt, not a moat — when one ships, "what would every other
+language need" is a real question with an answer owed, not a nice-to-have.
 
 **Honesty is never traded for usability; it is SCOPED.** When a truthful answer
-is overwhelming — 229 refusals beside 7 actionable findings — the response is
+is overwhelming — 229 refusals beside 7 actionable findings, in the first
+measurement above — the response is
 presentation and scope, never a weaker claim. Layering, budgets and lenses exist
 for exactly this, and a mode that hides the refusals is different in kind from a
 mode that shows fewer of them.
