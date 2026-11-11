@@ -2938,6 +2938,10 @@ test('flowdump: debug.setmetatable on a number / boolean is its type\'s metatabl
     local meta2 = {}
     for _, e in ipairs(D2.solution.h) do if e[1] == D2.type_metatables[1][2] and e[2] == 100 then meta2 = e[3] end end
     eq(1, #meta2, 'an integer target: the number type site\'s META cell holds mt')
+    -- (CART-2020: an __index FUNCTION on the type is handed the VALUE — the number, not the type's holder)
+    y = run('debug.setmetatable(0, { __index = function (v, k) Y = v end })\nlocal z = (5).k\n')
+    ok(#y >= 1 and vim.tbl_contains(y, 'type:number'), 'the handler gets the number: ' .. vim.inspect(y))
+    for _, l in ipairs(y) do ok(not tostring(l):match('^typemt:'), 'never the holder: ' .. vim.inspect(y)) end
     y, gap = run('debug.setmetatable(true, mt)\nY = (false).foo\n')
     ok(holds_g(y), 'a boolean: (false).foo is g: ' .. vim.inspect(y)); eq(0, gap)
     y = run('debug.setmetatable(1 > 2, mt)\nlocal n = 3\nY = (n == 3).foo\n')

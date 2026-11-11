@@ -5186,6 +5186,15 @@ local function build(store, opts)
                             end
                         end
                         local sp = new(); addobj(sp, H); proto(sp, field(q[2], '__index'), true)
+                        -- (and the metatable in the HOLDER's own slot: a value of the type reads `\1mt` through it, so its
+                        -- operators — __call, __len, __unm, __add … — and getmetatable(5) see it; an __index FUNCTION is
+                        -- handed the VALUE, the type object, not the holder — OBJPORT. They had run / read nothing, CART-2020)
+                        storec(sp, '\1mt', q[2])
+                        if not OBJPORT[H] then
+                            local op = new()
+                            for _, tk in ipairs(tn == 'number' and { 'number', 'integer' } or { tn }) do if TYPEOBJ[tk] then addobj(op, TYPEOBJ[tk]) end end
+                            OBJPORT[H] = op
+                        end
                         -- (the metatable is ALSO the type object's own slot — the dump's heap then holds the type site's META
                         -- cell, which a checker reads the chain through, CART-2017: the model's store writes the target's type
                         -- object, and this one EVERY object of the type — a number target is type:number or type:integer, and
