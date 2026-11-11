@@ -985,6 +985,18 @@ function M.build(rec, X, sink)
     end
     local function sites(p) local ss = {}; if p then for o in X.each(p) do ss[#ss + 1] = o end end; table.sort(ss); return ss end
     local ej, etop, etaint = {}, {}, {}
+    -- (init's unknown-code call — the EXTCALL channel — runs every function it holds: what those raise, init raises. Its
+    -- port is tainted already (below), but its sites were none: a function there that raised an object — a debug hook's
+    -- error, which every function may raise since CART-2019 — failed the call's closure)
+    local function extcall_errs()
+        local seen, ss = {}, {}
+        for o in X.each(X.EXTCALL or 0) do
+            local fpo = X.fnports[o]
+            if fpo and fpo.err then for e in X.each(fpo.err) do if not seen[e] then seen[e] = true; ss[#ss + 1] = e end end end
+        end
+        table.sort(ss)
+        return ss
+    end
     for _, name in ipairs(keys) do
         local fp = byname[name]
         local p = fp and fp.err or (name:find('^chunk:') and X.GERR) or nil
@@ -998,6 +1010,7 @@ function M.build(rec, X, sink)
     -- (init CALLS UNKNOWN CODE — the EXTCALL call — which may raise anything: its error port is tainted. Nothing
     -- catches an error leaving init, but unstated, it was the last E-reading failure on vimruntime and WoW, CART-1760)
     if X.XA then etaint[#etaint + 1] = tostring(FN('init')) end
+    do local ss = extcall_errs(); if #ss > 0 then ej[#ej + 1] = ('[%d,%s]'):format(FN('init'), jarr(ss)) end end
     local cerr = {}
     -- (a coroutine CHANNEL that is saturated or TAINTED holds any escaped value: rin_top / rout_top / cerr_top. Dumped
     -- as site lists alone, every lost value passed to resume or yielded failed the channel checks, CART-1757)

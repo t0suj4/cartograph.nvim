@@ -314,6 +314,29 @@ test('flowtype: a getinfo(2, "f").func read leaves an unrelated answer whole (CA
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-2019: the VM calls a line hook with (event, line) — the line a NUMBER on lua5.1, LuaJIT and 5.4; the hook had
+-- been handed the event only)
+test('flowtype: a debug.sethook hook gets the event and a number line (CART-2019)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function sinkl(x) return x end',
+        'local function sinkm(x) return x end',
+        'debug.sethook(function (ev, line) sinkl(line) end, "l")',
+        'local d = debug',
+        'd.sethook(function (ev, line) sinkm(line) end, "l")',
+        'debug.sethook()' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq('type:number', objs.sinkl, 'by name: the line is a number: ' .. vim.inspect(objs))
+    eq('type:number', objs.sinkm, 'through a library alias (the model): a number: ' .. vim.inspect(objs))
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({

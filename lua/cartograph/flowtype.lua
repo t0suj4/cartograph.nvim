@@ -1758,9 +1758,10 @@ local function build(store, opts)
         M0['debug#sethook'] = function (a, _, cerr)
             for j = 1, 2 do
                 if a[j] then
-                    local ev = new(); primv(ev, 'string')
+                    local ev, ln = new(), new(); primv(ev, 'string'); primv(ln, 'number')
                     local hr = new()
-                    G7.callc(a[j], { ev }, hr, nil, cerr); G7.emit({ 'call', { hr }, a[j], { ev } }, 'host:sethook')
+                    G7.callc(a[j], { ev, ln }, hr, nil, cerr); G7.emit({ 'call', { hr }, a[j], { ev, ln } }, 'host:sethook')
+                    G7.HOOKFNS[#G7.HOOKFNS + 1] = a[j]
                 end
             end
         end
@@ -2360,6 +2361,7 @@ local function build(store, opts)
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
+    G7.HOOKFNS = {} -- (each debug.sethook's hook ports: what they raise, any function may raise — CART-2019)
     G7.GETINFOS = {} -- (debug.getinfo calls whose `func` may be any function: { fn, arg?, func, any? }, CART-2016)
     G7.FNMTPEND = {} -- (debug.setmetatable targets and their metatables: the function TYPE's metatable, CART-1957)
     G7.TYPEMTCALLS = {} -- (debug.setmetatable calls by name, for the dump's debug-typemeta gap: CART-1957)
@@ -3967,13 +3969,15 @@ local function build(store, opts)
                     for _, j in ipairs(hs) do
                         local hp = aps[j]
                         if hp then
-                            local ev = new()
-                            addobj(ev, STR)
+                            -- (the event name, and for a line event the LINE: a number — lua5.1, LuaJIT, 5.4, CART-2019)
+                            local ev, ln = new(), new()
+                            addobj(ev, STR); addobj(ln, typeobj('number'))
                             G7.mu(function ()
                                 local hr = new()
-                                G7.ins({ 'call', { hr }, hp, { ev } }, tag)
-                                callc(hp, { ev }, hr, nil, curerr())
+                                G7.ins({ 'call', { hr }, hp, { ev, ln } }, tag)
+                                callc(hp, { ev, ln }, hr, nil, curerr())
                             end)
+                            G7.HOOKFNS[#G7.HOOKFNS + 1] = hp
                         end
                     end
                 end
@@ -5124,6 +5128,30 @@ local function build(store, opts)
         end
         G7.FNMTPEND = {}
         if G7.FNMT then solve() end
+    end
+    -- ★ A HOOK RAISES WHEREVER IT FIRES (CART-2019): the VM calls a debug.sethook hook at the events of whatever function
+    -- runs while it is set — flow-insensitively any function, a chunk too — so what the hook raises, that function raises,
+    -- up to the pcall protecting it. The hook's call at the sethook raised only into the sethook's own function: a hook
+    -- armed inside a pcall'd function had raised past the pcall — a whole answer the run falsifies, by name and by alias.
+    -- Each hook function's error port reaches every function's and chunk's (sound, coarse; flowpath refuses sethook)
+    if #G7.HOOKFNS > 0 then
+        local errs = {}
+        for _, fp in pairs(fnports) do if fp.err then errs[#errs + 1] = fp.err end end
+        for _, cp in pairs(G7.CHERR) do errs[#errs + 1] = cp end
+        table.sort(errs)
+        local done, grew = {}, false
+        for _, hp in ipairs(G7.HOOKFNS) do
+            for o in each(hp) do
+                local fp = fnports[o]
+                if fp and fp.err and not done[o] then
+                    done[o] = true
+                    for _, e in ipairs(errs) do if e ~= fp.err then edge(fp.err, e) end end
+                    grew = true
+                end
+            end
+        end
+        G7.HOOKFNS = {}
+        if grew then solve() end
     end
     -- ★ debug.getinfo's `func` AT ANY LEVEL (CART-2016): a level other than a literal 1 — or an argument that may be a
     -- level: a number, a thread (its frames), past CAP, or unknown code's value — names any function that may be on the stack.

@@ -1396,6 +1396,36 @@ test('flowdump: aliased setlocal / setupvalue are tagged copies too (CART-2018)'
     eq(0, flowcheck.check(D).failed, 'closed')
 end)
 
+-- (CART-2019, flowpath FLOW-0049 h1: a debug hook raises wherever it fires — what it raises, every function raises — and
+-- init's unknown-code call runs the functions it holds, so their errors are init's: it had listed none, and a function
+-- there raising the hook's object failed the call's closure)
+test('flowdump: a hook\'s error is every function\'s, and init\'s unknown-code call raises what its callees raise (CART-2019)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local D = dump(table.concat({
+        'local g',
+        'local function h(ev) if debug.getinfo(2, "f").func == g then error(b) end end',
+        'g = function () return a end',
+        'debug.sethook(h, "c")',
+        'local ok, e = pcall(g)',
+        'debug.sethook()',
+        'print(use(e))' }, '\n') .. '\n')
+    local site, fid = {}, {}
+    for _, st in ipairs(D.sites) do site[st.label] = st.id end
+    for i, nm in ipairs(D.names.functions) do fid[nm] = i - 1 end
+    -- (CLASSES' line 3: a's table, its metatable, b's table, its metatable — b is the third by column)
+    local l3 = {}
+    for l, id in pairs(site) do local c = l:match('^tbl:m%.lua:3:(%d+)$'); if c then l3[#l3 + 1] = { tonumber(c), id } end end
+    table.sort(l3, function (x, y) return x[1] < y[1] end)
+    local B = l3[3] and l3[3][2]
+    local err = {}
+    for _, e in ipairs(D.solution.err.fn) do err[e[1]] = e[2] end
+    local gid
+    for nm, id in pairs(fid) do if nm:match('::g@') then gid = id end end
+    ok(B and gid and vim.tbl_contains(err[gid] or {}, B), 'g raises the hook\'s b: ' .. vim.inspect({ B, gid, err }))
+    ok(vim.tbl_contains(err[fid.init] or {}, B), 'init raises what its unknown-code callees raise: ' .. vim.inspect(err[fid.init]))
+    eq(0, flowcheck.check(D).failed, 'closed')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
