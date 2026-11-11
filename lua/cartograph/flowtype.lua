@@ -2388,6 +2388,9 @@ local function build(store, opts)
         G7.LUA52 = lv ~= nil and lv >= 5.2
         G7.LUAVER = lv and math.floor(lv * 10 + 0.5) or 51 -- (the dump's `ver`: 51 unless the profile says, CART-1810)
         G7.LUAVSTATED = lv ~= nil -- (CART-1926: a 5.4-only route is followed unless the profile states an older version)
+        -- (a behaviour of Lua `v` and later — 52, 53 … — holds unless the profile STATES an older version: an unstated one
+        -- covers every version's behaviour, CART-2014)
+        function G7.since(v) return not (G7.LUAVSTATED and G7.LUAVER < v) end
     end -- (the library tables, the clause libraries-never-escape; each package.loaded, CART-1797)
     do
         local P = require 'cartograph.spec.profile'
@@ -4118,6 +4121,26 @@ local function build(store, opts)
                 local el = field(aps[1], '[]')
                 for _, r in ipairs(resl) do edge(el, r) end
             end
+            -- ★ METAMETHODS 5.2+ BUILTINS RUN (CART-2014; lua5.1 / LuaJIT run none, lua5.2 / 5.4 checked): unpack,
+            -- table.concat / insert / remove take the table's length through __len (5.2+); math.max / min compare through
+            -- __lt (5.3+) and return the winning ARGUMENT itself — a table among them too. By name; they had run nothing
+            if G7.since(52) and aps[1] and (fname == 'unpack' or fname == 'table.unpack' or fname == 'table.concat'
+                    or fname == 'table.insert' or fname == 'table.remove') then
+                metacall(aps[1], '__len', { aps[1], aps[1] }, new(), curerr())
+            end
+            if G7.since(53) and (fname == 'math.max' or fname == 'math.min') and #aps >= 2 then
+                for i = 1, #aps do
+                    -- (either operand's __lt, as a comparison's: the core's `op __lt` looks in both)
+                    for j = 1, #aps do
+                        if i ~= j then
+                            local hr = new()
+                            metacall(aps[i], '__lt', { aps[i], aps[j] }, hr, curerr())
+                            metacall(aps[j], '__lt', { aps[i], aps[j] }, hr, curerr())
+                        end
+                    end
+                    filter(aps[i], resl[1], function (o) local tn = TNAME[o]; return tn ~= 'number' and tn ~= 'integer' end)
+                end
+            end
             -- (table.remove(t [, pos]) returns an element of t — its array cells; its shifts move t's own values within
             -- t and the last store is nil: no set changes. 5.1 / LuaJIT are raw, CART-1790)
             if fname == 'table.remove' and aps[1] then edge(field(aps[1], '[]'), resl[1]) end
@@ -4588,6 +4611,15 @@ local function build(store, opts)
                         vp = field(tp, fname == 'ipairs' and '#' or '[]')
                         G7.RAWLOAD = nil
                         if fname == 'pairs' then kp = field(tp, '{k}') end
+                        -- (5.2+: pairs(t) with a __pairs runs it, and the loop iterates what it returns, beside the raw
+                        -- entries above, CART-2014: its ITERATOR — the handler's first result, the IR's one-result `op` —
+                        -- called with t as the state. A handler returning another state than t is not followed: the
+                        -- IR's op carries one result)
+                        if fname == 'pairs' and G7.since(52) then
+                            trip = { new(), new() }
+                            metacall(tp, '__pairs', { tp }, trip[1], curerr())
+                            edge(tp, trip[2])
+                        end
                         -- (the identity twin of `pairs(t)` / `ipairs(t)`, at the call's own position — CART-1716)
                         if G7.REC and G7.W then
                             local R = G7.REC

@@ -386,6 +386,45 @@ test('flowtype: a raw load runs no __index handler and reads no prototype (CART-
     vim.fn.delete(root, 'rf')
 end)
 
+-- (CART-2014: metamethods 5.2+ builtins run — pairs' __pairs and unpack / concat / insert / remove's __len (5.2+), math.max /
+-- min's __lt (5.3+: and the winning argument is the result). lua5.1 / LuaJIT run none: a profile STATING an older version
+-- runs none; an unstated one covers every version)
+test('flowtype: __pairs, __len and math.max\'s __lt run by the Lua version the profile states (CART-2014)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function sinkp(x) return x end', 'local function sinkl(x) return x end', 'local function sinkm(x) return x end',
+        'local B = {}',
+        'local mt = { __pairs = function (t) return function (s, k) if not k then return 1, B end end, t, nil end,',
+        '  __len = function (t) sinkl(t); return 0 end, __lt = function (a, b) sinkm(a); return true end }',
+        'local T = setmetatable({}, mt)',
+        'for _, v in pairs(T) do sinkp(v) end',
+        'table.concat(T)',
+        'local x = math.max(T, setmetatable({}, mt))' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        P.load = function () return { lua_version = lv } end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        local objs = {}
+        for _, c in ipairs(store.data.calls) do
+            local nm = (c.to or ''):match('::(sink%a)@')
+            if nm then local l, why = R.arg_objs(c, 1); if l then objs[nm] = #l > 0 and 'ran' or '' else objs[nm] = why end end
+        end
+        return objs
+    end
+    local o = run(nil)
+    eq({ sinkp = 'ran', sinkl = 'ran', sinkm = 'ran' }, o, 'no version stated: every version\'s behaviour')
+    o = run('5.1')
+    eq({ sinkp = '', sinkl = '', sinkm = '' }, o, '5.1 stated: none run')
+    o = run('5.2')
+    eq({ sinkp = 'ran', sinkl = 'ran', sinkm = '' }, o, '5.2 stated: __pairs and __len, not math.max\'s __lt')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
