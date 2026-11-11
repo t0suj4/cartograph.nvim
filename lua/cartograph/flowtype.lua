@@ -1540,13 +1540,32 @@ local function build(store, opts)
     -- (the inlined IR: an instruction into the calling function's body, the model's ports as the dump's variables; a
     -- primitive is a `new` of its type site, as a literal is; a key no instruction names, K())
     function G7.emit(ins) if G7.REC and G7.NATFN then G7.REC.ins(G7.NATFN, ins) end end
+    -- (string-method calls waiting for a string receiver: receiver port -> { { key, args, res, cerr, fn } }; each runs
+    -- its model once, CART-2007)
+    G7.SMC = {}
+    -- (a key no table holds: a builtin indexing its argument by a key the solve cannot name is modelled as this one's
+    -- raw MISS — what runs is the __index chain, which is all the caller sees; CART-2007)
+    G7.MISSK = '(a key it lacks)'
+    function G7.runsmc(l)
+        for _, sc in ipairs(l) do
+            if not sc.done then
+                sc.done = true
+                local ir = G7.NATIR[sc.key]
+                if not G7.REC or (ir and sc.fn) then
+                    G7.NATFN = G7.REC and sc.fn or nil
+                    G7.NATMODEL[sc.key](sc.args, sc.res, sc.cerr)
+                    G7.NATFN = nil
+                end
+            end
+        end
+    end
     G7.NATIR = { assert = true, select = true, unpack = true, ['table#unpack'] = true, ['table#remove'] = true,
         rawget = true, rawset = true, ['table#insert'] = true, next = true, error = true, pcall = true, type = true,
         ['table#concat'] = true, tonumber = true, rawlen = true, rawequal = true, setmetatable = true, getmetatable = true,
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
         ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
-        ['table#move'] = true, ['table#foreach'] = true, ['table#foreachi'] = true,
-        -- (a sort with no comparator runs __lt, and tostring / format / gsub / the iterators have no template: lost there)
+        ['table#move'] = true, ['table#foreach'] = true, ['table#foreachi'] = true, ['string#gsub'] = true,
+        -- (a sort with no comparator runs __lt, and tostring / format / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
         local M0 = G7.NATMODEL
@@ -1643,10 +1662,19 @@ local function build(store, opts)
             addobj(rl[1], STR)
             for j = 2, #a do metacall(a[j], '__tostring', { a[j] }, new(), cerr) end
         end
+        -- (and a TABLE replacement is indexed by the capture — repl[cap], through its __index: Lua calls a handler
+        -- h(repl, cap) there, which had never run, CART-2007. In the IR the model's template: the call of a function
+        -- replacement and the load of a table one, each a no-op on what it is not)
         M0['string#gsub'] = function (a, rl, cerr)
-            addobj(rl[1], STR)
-            if rl[2] then addobj(rl[2], typeobj('integer')) end
-            if a[3] then local cap = new(); addobj(cap, STR); G7.callc(a[3], { cap }, new(), nil, cerr) end
+            primv(rl[1], 'string')
+            if rl[2] then primv(rl[2], 'integer') end
+            if a[3] then
+                local cap = new(); primv(cap, 'string')
+                local r = new()
+                G7.callc(a[3], { cap }, r, nil, cerr); G7.emit({ 'call', { r }, a[3], { cap } })
+                local d = field(a[3], G7.MISSK)
+                G7.emit({ 'load', d, a[3], G7.MISSK })
+            end
         end
         -- (setmetatable returns its table, which gains the metatable — its __index a prototype, its handlers; getmetatable
         -- reads the slot, or its __metatable. pairs / ipairs return the iterator — next's native, the table — CART-1793)
@@ -2190,6 +2218,8 @@ local function build(store, opts)
                             if rt then addobj(mf[2], G7.retobj(rt, mf[2], tn .. '#' .. mf[1])) end
                         end
                     end
+                    local smc = G7.SMC[p]
+                    if smc then for _, o in dit(d) do if TNAME[o] == 'string' then G7.runsmc(smc); break end end end
                     -- (a FUNCTION takes no metatable — setmetatable raises on one, the dump's clause function-no-metatable:
                     -- a Lua link to a function target is not made, unless debug.setmetatable reached that target.
                     -- WoW w3: 9 of the top 26 __index objects were functions, CART-1838)
@@ -2278,6 +2308,7 @@ local function build(store, opts)
     -- the model runs too, its copies in the IR, CART-2006)
     G7.NAMEDRUN['assert'] = true
     G7.NAMEDRUN['table#foreach'], G7.NAMEDRUN['table#foreachi'] = true, true -- (its result is f's: by name `any`'s taint)
+    G7.NAMEDRUN['string#gsub'] = true -- (a table replacement's __index runs, CART-2007)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.LOCCALLS = {} -- (debug.setlocal / getlocal calls by name, for the dump: CART-1956)
@@ -3843,6 +3874,15 @@ local function build(store, opts)
             if recvp then
                 for k, r in ipairs(resl) do mflow(recvp, txt(f:field('method')[1]), r, k) end
                 mcalls[#mcalls + 1] = { recvp, txt(f:field('method')[1]), resl }
+                -- (a STRING METHOD runs its builtin's model once the receiver holds a string — `s:gsub(p, repl)` is
+                -- string.gsub(s, p, repl) — inlined into this function's IR where the model has a template. The method
+                -- path had only typed the results by the signature: a table replacement's __index never ran, CART-2007)
+                local skey = 'string#' .. txt(f:field('method')[1])
+                if G7.NATMODEL[skey] then
+                    local l = G7.SMC[recvp]
+                    if not l then l = {}; G7.SMC[recvp] = l end
+                    l[#l + 1] = { key = skey, args = aps, res = resl, cerr = curerr(), fn = G7.REC and G7.W and G7.cur() or nil }
+                end
                 -- ★ A HANDLER THE HOST CALLS (CART-1955): `frame:SetScript("OnEvent", h)` — a method the file's ecosystem
                 -- declares (G7.handlerform) — hands h to the host, which calls it at the frame's events with the receiver
                 -- and values it makes. The method's own callee is a host method no profile declares: it runs nothing
@@ -3921,6 +3961,13 @@ local function build(store, opts)
                     local _, g0 = lookup(fname:match('^[%a_][%w_]*') or fname)
                     -- (the DEBUG mutators have no path of their own: by name their model runs too, CART-1803)
                     if g0 and not G7.NAMEDRUN[k0] then for _, r in ipairs(resl) do G7.TEXTH[r] = true end end
+                    -- (a builtin with NO MODEL, by name: what it does with its arguments is unknown to the solve, and Lua's
+                    -- own index their table arguments through __index — os.time reads t.year …, and a handler h(t, k) runs.
+                    -- So each argument is INDEXED BY A KEY IT DOES NOT HOLD (G7.MISSK): a load whose raw miss runs the
+                    -- __index chain — a handler h(t, k), a prototype table's own chain — as at `t.k`, and a load in the IR.
+                    -- What is read is the builtin's (os.time's numbers): only the handlers' effects are the caller's. It
+                    -- had run nothing, CART-2007. Only __index: the other metamethods a builtin may run are not claimed)
+                    if g0 and not G7.NATMODEL[k0] then for _, ap in ipairs(aps) do field(ap, G7.MISSK) end end
                     -- (an UPVALUE call by name is translated by the dump into copies over the functions the solution
                     -- lists — G7.UPVCALLS, CART-1813; a FRAME call (setlocal / getlocal) into copies over the frame's locals
                     -- the solve's frame_locals names — G7.LOCCALLS, CART-1956: it had stayed the gap debug-local)

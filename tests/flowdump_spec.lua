@@ -1284,6 +1284,29 @@ test('flowdump: a direct assert copies every argument, table.foreach calls its c
     eq(0, flowcheck.check(D6).failed, 'a protected sort stays closed')
 end)
 
+-- (CART-2007: a string METHOD runs its builtin's model once the receiver holds a string, inlined where the model has a
+-- template — gsub's: a table replacement is LOADED by a key it lacks, so its __index runs in the IR, the handler's
+-- parameters written; a model-less builtin by name loads each argument the same way)
+test('flowdump: s:gsub(p, repl) loads a table replacement, os.time(t) loads t, by a key they lack (CART-2007)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function misses(D)
+        local n = 0
+        for _, F in ipairs(D.functions) do
+            for _, ins in ipairs(F.body) do
+                if ins[1] == 'load' and D.names.fields[ins[4] + 1] == '(a key it lacks)' then n = n + 1 end
+            end
+        end
+        return n
+    end
+    local H = 'local E = setmetatable({ v = b }, { __index = function (t, k) use(rawget(t, "v")); return "x" end })\n'
+    local D1 = dump(H .. 'local r = ("a"):gsub("a", E)\n')
+    eq(1, misses(D1), 'the method gsub: one load of its replacement')
+    eq(0, flowcheck.check(D1).failed, 'closed')
+    local D2 = dump(H .. 'local r = os.time(E)\n')
+    eq(1, misses(D2), 'os.time: one load of its argument')
+    eq(0, flowcheck.check(D2).failed, 'closed')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end

@@ -232,6 +232,36 @@ test('flowtype: a direct assert returns every argument — spread, forwarded, an
     eq(A, objs.sinki, 'table.foreachi\'s callback gets the elements: ' .. vim.inspect(objs))
 end)
 
+-- (CART-2007, flowpath FLOW-0170: a builtin with NO MODEL, by name, indexes its arguments — os.time reads t.year … through
+-- __index, a handler h(t, k) runs; a MODELLED raw builtin does not. The route fixtures *_index pin the run; this pins the
+-- gate both sides, on the handlers' parameter sets)
+test('flowtype: a model-less builtin runs its argument\'s __index; a modelled raw one does not (CART-2007)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local function sinkh(x) return x end',
+            'local function sinkr(x) return x end',
+            'local E = setmetatable({}, { __index = function (t, k) sinkh(t) end })',
+            'local W = setmetatable({}, { __index = function (t, k) sinkr(t) end })',
+            'local n = os.time(E)',
+            'local a, b, c = select(1, W), type(W), rawequal(W, W)',
+            -- (a user object's own gsub is no string method: its argument is not indexed)
+            'local U = { gsub = function (self, p, r) return 1 end }',
+            'local d = U:gsub("a", W)',
+            'return n, a, b, c, d' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq('tbl:m.lua:2:23', objs.sinkh, 'os.time indexes E: its handler runs with E: ' .. vim.inspect(objs))
+    eq('', objs.sinkr, 'select / type / rawequal, a user object\'s gsub run no handler: ' .. vim.inspect(objs))
+end)
+
 test('flowtype: debug.traceback hands back a non-string message, and only that (CART-2005)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local root = tree({
