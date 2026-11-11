@@ -147,6 +147,10 @@
 --   spec/ecosystem `handlers`, WoW's frame:SetScript / HookScript: emitted at the registration, the receiver first and
 --   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955; and the host's
 --   call of a hooksecurefunc WRAPPER where the ecosystem's hook form declares host_calls, at the hooksecurefunc, CART-1990),
+--   `debug:setlocal@<v>` / `debug:getlocal@<v>` / `debug:setupvalue@<v>` / `debug:getupvalue@<v>` /
+--   `debug:upvaluejoin@<v>` (a COPY translating that debug call — by name or through an alias, recorded by its model —
+--   into the frame locals' / upvalues' variables, CART-1956 / 1813: cross-function, not a closure's upvalue write; v the
+--   call's first result variable, which its `call` instruction names — one call's copies share it, CART-2018),
 --   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949;
 --   by IDENTITY since CART-2013: a call the text rule does not recognise — `local d = debug; d.sethook(h, m)` — runs
 --   the native's model, which calls both hook candidates, tagged without the mask),
@@ -403,15 +407,17 @@ function M.build(rec, X, sink)
         end
         local a, r = u.args, u.res
         local u1 = ups_of(a[1])
+        -- (each copy TAGGED with its call, as the frame calls' are: `debug:<op>@<v>`, v the call's first result, CART-2018)
+        local tag = 'debug:' .. u.op:gsub('^debug#', '') .. '@' .. tostring(r and r[1])
         if not u1 then rec.gap(u.fn, 'debug-upvalue', a)
         elseif u.op == 'debug#setupvalue' then
-            if a[3] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', up, a[3] }) end end
+            if a[3] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', up, a[3] }, tag) end end
         elseif u.op == 'debug#getupvalue' then
-            if r[2] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', r[2], up }) end end
+            if r[2] then for _, up in ipairs(u1) do rec.ins(u.fn, { 'copy', r[2], up }, tag) end end
         elseif u.op == 'debug#upvaluejoin' then
             local u2 = ups_of(a[3])
             if not u2 then rec.gap(u.fn, 'debug-upvalue', a)
-            else for _, x in ipairs(u1) do for _, y in ipairs(u2) do rec.ins(u.fn, { 'copy', x, y }); rec.ins(u.fn, { 'copy', y, x }) end end end
+            else for _, x in ipairs(u1) do for _, y in ipairs(u2) do rec.ins(u.fn, { 'copy', x, y }, tag); rec.ins(u.fn, { 'copy', y, x }, tag) end end end
         end
     end
     -- ★ A TYPE'S METATABLE (CART-1957): debug.setmetatable(v, mt) on a value that is no table sets the metatable of its
@@ -445,19 +451,24 @@ function M.build(rec, X, sink)
     -- level names — the solve's frame_locals: a literal level 1 and no thread, the calling function's locals; else every
     -- function's. The value (3rd argument, 4th with a thread: both, as the solve) is copied into each, and each into
     -- getlocal's SECOND result (the first is the name). Sorted: frame_locals walks a table keyed by function id
+    -- (TAGGED, CART-2018 / flowpath FLOW-0178: each copy carries `debug:setlocal@<v>` / `debug:getlocal@<v>`, v the
+    -- call's first result variable — named in its `call` instruction — so a checker can tell these cross-function
+    -- copies from a closure's real upvalue write, and drop or replace exactly one call's)
     for _, u in ipairs(X.LOCCALLS or {}) do
         local a, r = u.args, u.res
         if u.op == 'debug#setlocal' then
             local qs = X.FRAMELOCALS(r, 3)
             table.sort(qs)
+            local tag = 'debug:setlocal@' .. tostring(r[1])
             for _, q in ipairs(qs) do
-                if a[3] then rec.ins(u.fn, { 'copy', q, a[3] }) end
-                if a[4] then rec.ins(u.fn, { 'copy', q, a[4] }) end
+                if a[3] then rec.ins(u.fn, { 'copy', q, a[3] }, tag) end
+                if a[4] then rec.ins(u.fn, { 'copy', q, a[4] }, tag) end
             end
         elseif u.op == 'debug#getlocal' and r[2] then
             local qs = X.FRAMELOCALS(r, 2)
             table.sort(qs)
-            for _, q in ipairs(qs) do rec.ins(u.fn, { 'copy', r[2], q }) end
+            local tag = 'debug:getlocal@' .. tostring(r[1])
+            for _, q in ipairs(qs) do rec.ins(u.fn, { 'copy', r[2], q }, tag) end
         end
     end
     local out = {}

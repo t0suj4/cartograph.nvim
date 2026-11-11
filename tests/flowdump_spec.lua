@@ -1374,6 +1374,28 @@ test('flowdump: debug.sethook through a library alias calls its hook, tagged hos
     eq(0, (hooks(H .. 'local debug = { sethook = function () end }\ndebug.sethook(h, "c")\n')), 'a shadowed debug: none')
 end)
 
+-- (CART-2018, flowpath FLOW-0049 l6 / u5 and FLOW-0178: the copies translating a frame / upvalue call are recorded by
+-- the MODEL — through an alias too, which had been neither copies nor a gap — and each is TAGGED with its call)
+test('flowdump: aliased setlocal / setupvalue are tagged copies too (CART-2018)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function tagged(src, pfx)
+        local D = dump(src)
+        local n = 0
+        for _, F in ipairs(D.functions) do
+            local tagat = {}
+            for _, t in ipairs(F.tags or {}) do tagat[t[1]] = t[2] end
+            for i, ins in ipairs(F.body) do if ins[1] == 'copy' and tostring(tagat[i - 1]):find('^' .. pfx) then n = n + 1 end end
+        end
+        return n, D
+    end
+    local n, D = tagged('local sl = debug.setlocal\nlocal function setl() sl(2, 1, b) end\nlocal function f() local x = a; setl(); return x end\nprint(use(f()))\n', 'debug:setlocal@')
+    ok(n >= 1, 'an aliased setlocal: tagged copies: ' .. n)
+    eq(0, flowcheck.check(D).failed, 'closed')
+    n, D = tagged('local up = a\nlocal function getup() return up end\nlocal su = debug.setupvalue\nsu(getup, 1, b)\nprint(use(getup()))\n', 'debug:setupvalue@')
+    eq(1, n, 'an aliased setupvalue: its tagged copy')
+    eq(0, flowcheck.check(D).failed, 'closed')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
@@ -2063,8 +2085,8 @@ test('flowdump: debug.setlocal / getlocal are copies over the named frame\'s loc
                 for _, o in ipairs(V[ins[3]] or {}) do
                     local lab
                     for l, id in pairs(site) do if id == o then lab = l end end
-                    if lab == 'native:debug.setlocal' then per[fn.id] = { fn = fn, op = 'set', val = ins[4][3] } end
-                    if lab == 'native:debug.getlocal' then per[fn.id] = { fn = fn, op = 'get', res = ins[2][2] } end
+                    if lab == 'native:debug.setlocal' then per[fn.id] = { fn = fn, op = 'set', val = ins[4][3], r1 = ins[2][1] } end
+                    if lab == 'native:debug.getlocal' then per[fn.id] = { fn = fn, op = 'get', res = ins[2][2], r1 = ins[2][1] } end
                 end
             end
         end
@@ -2075,9 +2097,13 @@ test('flowdump: debug.setlocal / getlocal are copies over the named frame\'s loc
     ok(set1 and set2 and get1, 'three frame calls, one per function: ' .. vim.inspect(vim.tbl_keys(per)))
     local function copies(c)
         local n = 0
-        for _, ins in ipairs(c.fn.body) do
+        local tagat = {}
+        for _, t in ipairs(c.fn.tags or {}) do tagat[t[1]] = t[2] end
+        for i, ins in ipairs(c.fn.body) do
             if ins[1] == 'copy' and ((c.op == 'set' and ins[3] == c.val) or (c.op == 'get' and ins[2] == c.res)) then
                 n = n + 1
+                -- (each copy TAGGED with its call, CART-2018 / flowpath FLOW-0178: a checker drops exactly these)
+                eq(('debug:%slocal@%d'):format(c.op, c.r1), tagat[i - 1], 'the copy names its call')
                 if c.op == 'set' then ok(vim.tbl_contains(V[ins[2]] or {}, A), 'the local holds the value') end
             end
         end

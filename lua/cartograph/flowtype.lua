@@ -1786,11 +1786,17 @@ local function build(store, opts)
                 return false
             end)
         end
+        -- (the dump's translation of an upvalue / frame call into copies — G7.UPVCALLS / G7.LOCCALLS — is recorded by the
+        -- MODEL, which runs by name and through an alias alike: `local sl = debug.setlocal; sl(2, 1, C)` had been neither
+        -- copies nor a gap, its route unchecked, CART-2018 / flowpath FLOW-0049 u5 / l6)
+        local function dbgcall(list, key, a, rl) if G7.REC and G7.NATFN then list[#list + 1] = { fn = G7.NATFN, op = key, args = a, res = rl } end end
         M0['debug#setupvalue'] = function (a, rl)
+            dbgcall(G7.UPVCALLS, 'debug#setupvalue', a, rl)
             if a[1] and a[3] then upvs(a[1], function (up) edge(a[3], up) end) end
             addobj(rl[1], STR)
         end
         M0['debug#getupvalue'] = function (a, rl)
+            dbgcall(G7.UPVCALLS, 'debug#getupvalue', a, rl)
             if a[1] and rl[2] then upvs(a[1], function (up) edge(up, rl[2]) end) end
             addobj(rl[1], STR)
         end
@@ -1816,17 +1822,20 @@ local function build(store, opts)
             return not (ctx and ctx.lvl == 1 and ctx.nargs == nplain)
         end
         M0['debug#setlocal'] = function (a, rl)
+            dbgcall(G7.LOCCALLS, 'debug#setlocal', a, rl)
             local vs = { a[3], a[4] } -- (the value: 3rd without a thread, 4th with one)
             for _, q in ipairs(frame_locals(rl, 3)) do for _, v in pairs(vs) do edge(v, q) end end
             if anyframe(rl, 3) then for _, v in pairs(vs) do G7.ANYFRAME[#G7.ANYFRAME + 1] = { v, true } end end
             addobj(rl[1], STR)
         end
         M0['debug#getlocal'] = function (a, rl)
+            dbgcall(G7.LOCCALLS, 'debug#getlocal', a, rl)
             addobj(rl[1], STR)
             if rl[2] then for _, q in ipairs(frame_locals(rl, 2)) do edge(q, rl[2]) end end
             if rl[2] and anyframe(rl, 2) then G7.ANYFRAME[#G7.ANYFRAME + 1] = { rl[2], false } end
         end
-        M0['debug#upvaluejoin'] = function (a)
+        M0['debug#upvaluejoin'] = function (a, rl)
+            dbgcall(G7.UPVCALLS, 'debug#upvaluejoin', a, rl)
             if not (a[1] and a[3]) then return end
             -- (f1's upvalue becomes f2's cell: values flow both ways between their upvalues from now on)
             local u1, u3 = {}, {}
@@ -4003,11 +4012,8 @@ local function build(store, opts)
                     -- (an UPVALUE call by name is translated by the dump into copies over the functions the solution
                     -- lists — G7.UPVCALLS, CART-1813; a FRAME call (setlocal / getlocal) into copies over the frame's locals
                     -- the solve's frame_locals names — G7.LOCCALLS, CART-1956: it had stayed the gap debug-local)
-                    if g0 and G7.UPVGAP[k0] == 'debug-upvalue' then
-                        if G7.REC then G7.UPVCALLS[#G7.UPVCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
-                    elseif g0 and G7.UPVGAP[k0] == 'debug-local' then
-                        if G7.REC then G7.LOCCALLS[#G7.LOCCALLS + 1] = { fn = G7.cur(), op = k0, args = aps, res = resl } end
-                    elseif g0 and G7.UPVGAP[k0] then G7.gap(G7.UPVGAP[k0], aps) end
+                    -- (both recorded by the model since CART-2018, by name and through an alias alike)
+                    if g0 and G7.UPVGAP[k0] and G7.UPVGAP[k0] ~= 'debug-upvalue' and G7.UPVGAP[k0] ~= 'debug-local' then G7.gap(G7.UPVGAP[k0], aps) end
                     -- (setlocal / getlocal by name: the frame its level names — a literal 1 is the calling function)
                     -- (debug.setfenv by NAME ran nothing: it sets f's environment as setfenv does, CART-1813)
                     -- (debug.setmetatable: its model records the call for the dump, by name and by value — CART-1957 / 2017)
