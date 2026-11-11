@@ -1039,7 +1039,7 @@ end
 -- (tools/luareserved.lua → spec/luareserved.lua); the version is the profile's `lua_version`, read the way flowtype reads
 -- it (tonumber, CART-1802), and an UNSTATED or UNDISTILLED version is not guessed:
 --   known (a distilled version)  -> { version, n = identifiers it reserves, words }
---   unknown                       -> { version = nil|'5.2', n = identifiers some distilled version reserves and another
+--   unknown                       -> { version = nil|'5.3', n = identifiers some distilled version reserves and another
 --                                     does not (the VERSION-DEPENDENT words), words, unknown = why }
 -- Words every distilled version reserves are left to `compiles` (LuaJIT refuses them already) and the parse.
 local function lua_reserved_uses(text, prof)

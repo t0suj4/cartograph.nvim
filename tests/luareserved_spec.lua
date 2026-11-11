@@ -12,11 +12,16 @@ test('luareserved: the artifact holds what each distilled version is known to re
         ok(has(v51, w) and has(v54, w), w .. ' is reserved in both')
     end
     ok(has(v54, 'goto') and not has(v51, 'goto'), 'goto: 5.2+ only')
-    ok(not R.versions['5.2'], '5.2 is UNDISTILLED, not inferred')
+    -- 5.2 = stock PUC 5.2.1, the base of Factorio's fork (lua-factorio states 5.2): 5.1 plus goto, asked not inferred
+    local v52 = R.versions['5.2']
+    ok(v52, 'the 5.2 set is distilled')
+    ok(has(v52, 'goto'), 'goto is reserved in 5.2')
+    eq(#v51.words + 1, #v52.words, '5.2 reserves exactly one word more than 5.1')
+    ok(not R.versions['5.3'], '5.3 is UNDISTILLED, not inferred')
 end)
 
 test('luareserved: re-distilling from the installed interpreters reproduces the artifact (CART-1012)', function ()
-    for _, b in ipairs { 'lua5.1', 'lua5.4', 'luajit' } do
+    for _, b in ipairs { 'lua5.1', 'lua5.2', 'lua5.4', 'luajit' } do
         if vim.fn.executable(b) ~= 1 then skip(b .. ' is not installed: the artifact cannot be re-derived here') end
     end
     local root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')

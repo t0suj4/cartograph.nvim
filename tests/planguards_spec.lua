@@ -135,6 +135,10 @@ test('planguards: an identifier the profile Lua VERSION reserves fails; another 
         ok(r.why:find('`goto`', 1, true) and r.why:find('5.4', 1, true), r.why)
     end)
     with_profile(5.1, function (st) eq(pg.PASS, pg.GUARDS.parses(st, nil, B, A)[1].verdict, '5.1: goto is a name') end)
+    -- the REAL lua-factorio profile (states 5.2; 5.2 distilled from stock 5.2.1, the base of Factorio's fork)
+    local rf = pg.GUARDS.parses({ data = { profile = 'lua-factorio' } }, nil, B, A)[1]
+    eq(pg.FAIL, rf.verdict, 'Factorio (5.2) reserves goto')
+    ok(rf.why:find('5.2', 1, true), rf.why)
     -- the FIELD position too: 5.4 refuses `t.goto` as well as `local goto`
     with_profile('5.4', function (st)
         eq(pg.FAIL, pg.GUARDS.parses(st, nil, B, { ['a.lua'] = 'local y = t.goto\n' })[1].verdict, 'a field name is an identifier')
@@ -147,10 +151,12 @@ test('planguards: an UNSTATED or UNDISTILLED Lua version is no-claim, never a si
     local r = pg.GUARDS.parses(nil, nil, B, A)[1]
     eq(pg.NO_CLAIM, r.verdict, 'no store, no profile: the version is unknown')
     ok(r.why:find('states no Lua version', 1, true), r.why)
-    -- lua-factorio states 5.2, and no 5.2 interpreter was distilled: said, not inferred from 5.4
-    local r2 = pg.GUARDS.parses({ data = { profile = 'lua-factorio' } }, nil, B, A)[1]
-    eq(pg.NO_CLAIM, r2.verdict)
-    ok(r2.why:find('Lua 5.2 has no distilled', 1, true), r2.why)
+    -- a version stated but never distilled (no interpreter answered for it): said, not inferred from a neighbour
+    with_profile('9.9', function (st)
+        local r2 = pg.GUARDS.parses(st, nil, B, A)[1]
+        eq(pg.NO_CLAIM, r2.verdict)
+        ok(r2.why:find('Lua 9.9 has no distilled', 1, true), r2.why)
+    end)
     -- and a word NO version disputes is not dragged in: an ordinary edit stays PASS with no version known
     eq(pg.PASS, pg.GUARDS.parses(nil, nil, B, { ['a.lua'] = 'local global = 1\n' })[1].verdict)
 end)

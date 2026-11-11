@@ -13,14 +13,18 @@
 -- The artifact stamps each interpreter's `-v` line and the candidate set's hash, so a stale artifact is detectable
 -- (tests/luareserved_spec.lua re-distils when the interpreters are present).
 --
--- ⚠ WHAT IT DOES NOT HAVE: a version with no interpreter on this machine (5.2, 5.3, 5.5 on 2026-11-07) has NO entry,
+-- 5.2 (USER PERMIT 2026-11-11, scoped to this oracle): stock PUC 5.2.1, the base of Factorio's fork
+-- (github.com/Rseding91/Factorio-Lua) — the fork's llex token table and luaX_init are identical to stock 5.2.1, so
+-- stock answers for lua-factorio. Installed as `lua5.2` by pkgit (~/.config/pkgit/init.lua, tag v5.2.1).
+-- ⚠ WHAT IT DOES NOT HAVE: a version with no interpreter on this machine (5.3, 5.5 on 2026-11-11) has NO entry,
 -- and that absence is the honest answer — the guard says "undistilled" rather than guessing that 5.2 ⊂ 5.4.
 -- Adding one = install the interpreter and add a row to INTERPS.
 
 local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 local OUT = REPO .. '/lua/cartograph/spec/luareserved.lua'
 -- version key (the profile's `lua_version`, '%.1f') -> the interpreter that answers for it
-local INTERPS = { { key = '5.1', bin = 'lua5.1' }, { key = '5.4', bin = 'lua5.4' }, { key = 'luajit', bin = 'luajit' } }
+local INTERPS = { { key = '5.1', bin = 'lua5.1' }, { key = '5.2', bin = 'lua5.2' }, { key = '5.4', bin = 'lua5.4' },
+    { key = 'luajit', bin = 'luajit' } }
 
 local function candidates()
     local seen, out = {}, {}

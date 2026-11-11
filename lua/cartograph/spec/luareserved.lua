@@ -7,6 +7,8 @@ return {
     versions = {
         ["5.1"] = { interpreter = "Lua 5.1.5  Copyright (C) 1994-2012 Lua.org, PUC-Rio",
             words = { "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while" } },
+        ["5.2"] = { interpreter = "Lua 5.2.1  Copyright (C) 1994-2012 Lua.org, PUC-Rio",
+            words = { "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while" } },
         ["5.4"] = { interpreter = "Lua 5.4.6  Copyright (C) 1994-2023 Lua.org, PUC-Rio",
             words = { "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while" } },
         ["luajit"] = { interpreter = "LuaJIT 2.1.1782381659 -- Copyright (C) 2005-2026 Mike Pall. https://luajit.org/",
