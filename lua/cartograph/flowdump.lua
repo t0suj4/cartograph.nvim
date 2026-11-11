@@ -147,7 +147,9 @@
 --   spec/ecosystem `handlers`, WoW's frame:SetScript / HookScript: emitted at the registration, the receiver first and
 --   one tainted spread port after it; a plain call to the core, the tag names the premise, CART-1955; and the host's
 --   call of a hooksecurefunc WRAPPER where the ecosystem's hook form declares host_calls, at the hooksecurefunc, CART-1990),
---   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949),
+--   `host:sethook[:<mask>]` (the VM's call of a debug.sethook hook, at the sethook, the event name a string — CART-1949;
+--   by IDENTITY since CART-2013: a call the text rule does not recognise — `local d = debug; d.sethook(h, m)` — runs
+--   the native's model, which calls both hook candidates, tagged without the mask),
 --   `gap:host-pcall` (a pcall / xpcall whose callee names a host builtin other than error / assert — require, table.sort,
 --   string.gsub …: what it runs may raise any value, so outside-raises-strings is not claimed there; the solve routes it
 --   into the pcall's error, CART-1995. `pcall(error, x)` / `pcall(assert, c, x)` protect a SYNTHETIC function instead —

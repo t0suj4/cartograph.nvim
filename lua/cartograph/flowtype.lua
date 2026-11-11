@@ -1542,7 +1542,7 @@ local function build(store, opts)
     G7.NATMODEL, G7.NATDONE, G7.RESFN = {}, {}, {}
     -- (the inlined IR: an instruction into the calling function's body, the model's ports as the dump's variables; a
     -- primitive is a `new` of its type site, as a literal is; a key no instruction names, K())
-    function G7.emit(ins) if G7.REC and G7.NATFN then G7.REC.ins(G7.NATFN, ins) end end
+    function G7.emit(ins, tag) if G7.REC and G7.NATFN then G7.REC.ins(G7.NATFN, ins, tag) end end
     -- (string-method calls waiting for a string receiver: receiver port -> { { key, args, res, cerr, fn } }; each runs
     -- its model once, CART-2007)
     G7.SMC = {}
@@ -1568,6 +1568,7 @@ local function build(store, opts)
         ['debug#setmetatable'] = true, ['debug#getmetatable'] = true, ['debug#setupvalue'] = true, ['debug#getupvalue'] = true,
         ['debug#upvaluejoin'] = true, ['debug#setlocal'] = true, ['debug#getlocal'] = true, ['debug#getregistry'] = true,
         ['table#move'] = true, ['table#foreach'] = true, ['table#foreachi'] = true, ['string#gsub'] = true,
+        ['debug#sethook'] = true,
         -- (a sort with no comparator runs __lt, and tostring / format / the iterators have no template: lost there)
         ['table#sort'] = function (a) return a[2] ~= nil end }
     do
@@ -1750,6 +1751,19 @@ local function build(store, opts)
         -- dump gap `debug-upvalue`
         -- (on a STRING it replaces every string's metatable: the string library gains the new __index as a prototype —
         -- l34, CART-1811; the old one is kept, a sound over-approximation)
+        -- (debug.sethook BY IDENTITY, CART-2013: the VM's call of the hook as at the walk's rule (CART-1949) — `call [hr] h
+        -- [ev]`, ev a string, tagged host:sethook, raising into the caller — for a call the walk did not recognise by its
+        -- text: `local d = debug; d.sethook(h, "c")` had called no hook. The mask's text is not seen here: both
+        -- candidates — the first argument, and the second after a thread — are called, a non-function runs nothing)
+        M0['debug#sethook'] = function (a, _, cerr)
+            for j = 1, 2 do
+                if a[j] then
+                    local ev = new(); primv(ev, 'string')
+                    local hr = new()
+                    G7.callc(a[j], { ev }, hr, nil, cerr); G7.emit({ 'call', { hr }, a[j], { ev } }, 'host:sethook')
+                end
+            end
+        end
         M0['debug#setmetatable'] = function (a, rl)
             if a[1] then G7.DBGMT[a[1]] = true end
             -- (the call, for the dump's debug-typemeta gap: from the MODEL, which runs by name and through an alias alike —
@@ -3934,6 +3948,8 @@ local function build(store, opts)
             if argn[1] and (fname == 'debug.sethook' or isbuiltin('debug.sethook')) then
                 local _, gd = lookup('debug')
                 if gd or fname ~= 'debug.sethook' then
+                    -- (the native's model, CART-2013, is for a call this text rule did not recognise: not again here)
+                    for _, r in ipairs(resl) do G7.TEXTH[r] = true end
                     local function lit(x) return x and x:type() == 'string' end
                     local hs = lit(argn[2]) and { 1 } or lit(argn[3]) and { 2 } or { 1, 2 }
                     local mn = argn[hs[1] + 1]

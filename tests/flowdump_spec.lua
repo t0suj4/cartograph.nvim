@@ -1344,6 +1344,26 @@ test('flowdump: debug.getinfo\'s func is the named function; another level is th
     eq(1, n, 'an argument that may be a level: the gap')
 end)
 
+-- (CART-2013, flowpath FLOW-0049: debug.sethook BY IDENTITY — the native's model calls the hook, tagged host:sethook,
+-- for a call the text rule did not recognise: `local d = debug; d.sethook(h, "c")` had called no hook, a certified
+-- answer missing the hook's error. The spelled forms keep their one call; a shadowed `debug` calls nothing)
+test('flowdump: debug.sethook through a library alias calls its hook, tagged host:sethook (CART-2013)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function hooks(src)
+        local D = dump(src)
+        local n = 0
+        for _, F in ipairs(D.functions) do for _, t in ipairs(F.tags or {}) do if tostring(t[2]):find('^host:sethook') then n = n + 1 end end end
+        return n, D
+    end
+    local H = 'local function h(ev) error(b) end\n'
+    local n, D = hooks(H .. 'local d = debug\nd.sethook(h, "c")\n')
+    ok(n >= 1, 'a library alias: the hook is called: ' .. n)
+    eq(0, flowcheck.check(D).failed, 'closed')
+    eq(1, (hooks(H .. 'debug.sethook(h, "c")\n')), 'by name: one call, not the model\'s too')
+    eq(1, (hooks(H .. 'local sh = debug.sethook\nsh(h, "c")\n')), 'a function alias: one call')
+    eq(0, (hooks(H .. 'local debug = { sethook = function () end }\ndebug.sethook(h, "c")\n')), 'a shadowed debug: none')
+end)
+
 -- (CART-1813: a literal module lookup of package.loaded is no gap; a computed one still is)
 test('flowdump: package.loaded["<module>"] is no gap; package.loaded[k] still is (CART-1813)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
