@@ -3122,3 +3122,30 @@ test('flowdump: a native __index handler is a lost call in the dump — the load
     local P = dump('local A = setmetatable({}, { __index = { x = 1 } })\nreturn A.x\n')
     eq(0, #P.solution.taint.ports, 'a TABLE __index is a prototype: nothing tainted')
 end)
+
+-- (CART-2030, flowpath FLOW-0183's b08 / b15: os.date("*t")'s table and package.preload had no site — a store then a
+-- load of the same field read nothing, untainted, and the dump certified it. Now: os.date("*t") a site per call, the
+-- load holds the stored object, the dump closed; package.preload a site the host reads — stored into, it escapes)
+test('flowdump: os.date("*t") and package.preload are sites — a store is read back (CART-2030)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function lab(D) local l = {}; for _, x in ipairs(D.sites) do l[x.id] = x.label end; return l end
+    local function loadx(D)
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do if i[1] == 'load' and D.names.fields[i[4] + 1] == 'k' then return i[2] end end
+        end
+    end
+    local D = dump('local P = os.date("*t")\nP.k = a\nreturn P.k\n')
+    local l, x = lab(D), loadx(D)
+    local held = {}
+    for _, h in ipairs(D.solution.h or {}) do if l[h[1]] and l[h[1]]:match('^osdate:') then for _, o in ipairs(h[3]) do held[l[o]] = true end end end
+    ok(next(held) ~= nil, 'the osdate site holds a field: ' .. vim.inspect(held))
+    ok(not vim.tbl_contains(D.solution.taint.ports, x), 'P.k is a whole answer')
+    eq(0, flowcheck.check(D).failed, 'closed')
+    local Q = dump('local P = package.preload\nP.k = a\nreturn P.k\n')
+    local lq = lab(Q)
+    local esc = {}
+    for _, e in ipairs(Q.solution.taint.escaped_root) do esc[tostring(lq[e[1]])] = e[2] end
+    eq('escmore:package-host-table', esc['lib:package.preload'], 'package.preload, stored into, is the host\'s: ' .. vim.inspect(esc))
+    ok(vim.tbl_contains(Q.solution.taint.ports, loadx(Q)), 'and P.k tainted')
+    eq(0, flowcheck.check(Q).failed, 'closed')
+end)

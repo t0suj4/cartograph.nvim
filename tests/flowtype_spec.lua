@@ -5111,3 +5111,52 @@ test('flowtype: a native __index handler is called — its model answers, or the
     ok(tostring(objs.sinke):find('tbl:m.lua:3:10', 1, true), 'what a native handler raises — tostring runs __tostring, which raises K — reaches the load\'s pcall: ' .. vim.inspect(objs))
     eq('tbl:m.lua:3:10', objs.sinkp, 'a TABLE __index is still a prototype: ' .. vim.inspect(objs))
 end)
+
+-- (CART-2030, flowpath's hunt0180 b08 / b15: tables a builtin makes had NO SITE. os.date's signature returns
+-- `string|osdate`, a union the signature path types as nothing — `local P = os.date('*t'); P.k = A; P.k` read nothing,
+-- untainted, where Lua's '*t' is a fresh table. By the literal format: '*t' / '!*t' a table of its own per call, its
+-- fields the profile's osdate class's scalar types; any other literal, or none, a string; a computed format both.
+-- package.preload, a table require reads, had no site either: its store went nowhere)
+test('flowtype: os.date("*t") is a fresh table per call; package.preload is a table (CART-2030)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A = {}',
+            'local function sinkd(x) return x end',
+            'local P = os.date("*t")',
+            'P.k = A',
+            'sinkd(P.k)',
+            'local function sinky(x) return x end',
+            'sinky(os.date("!*t").isdst)',
+            'local function sinks(x) return x end',
+            'sinks(os.date("%Y"))',
+            'local function sinke(x) return x end',
+            'sinke(os.date())',
+            'local function sinkn(x) return x end',
+            'local fm = ("*T"):lower()',
+            'sinkn(os.date(fm))',
+            'local function sinkq(x) return x end',
+            'local Q = os.date("*t")',
+            'sinkq(Q.k)',
+            'local function sinkp(x) return x end',
+            'local R = package.preload',
+            'R.k = A',
+            'sinkp(R.k)' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    local A = 'tbl:m.lua:0:10'
+    eq(A, objs.sinkd, 'os.date("*t") is a table: P.k = A reads back A: ' .. vim.inspect(objs))
+    eq('', objs.sinkq, 'a table of its OWN per call: another call\'s k is not A: ' .. vim.inspect(objs))
+    eq('type:boolean', objs.sinky, '"!*t" too, its fields the osdate class\'s: ' .. vim.inspect(objs))
+    eq('type:string', objs.sinks, 'any other literal format is a string: ' .. vim.inspect(objs))
+    eq('type:string', objs.sinke, 'no format is "%c", a string: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinkn):find('type:string', 1, true) and tostring(objs.sinkn):find('osdate:', 1, true), 'a computed format: both: ' .. vim.inspect(objs))
+    eq('partial', objs.sinkp, 'package.preload holds A — and require reads it, so it is the host\'s: partial: ' .. vim.inspect(objs))
+end)

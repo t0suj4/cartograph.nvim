@@ -2006,6 +2006,21 @@ local function build(store, opts)
         if not o then o = newobj('new:' .. rt .. '@' .. tostring(r)); TNAME[o] = rt; m[rt] = o end
         return o
     end
+    -- (os.date("*t")'s table at call site `site`, into port r: an ordinary Lua table — no host type, so code's stores
+    -- are read back — whose fields hold the scalar parts of the profile's osdate class, CART-2030)
+    function G7.osdate(r, site)
+        local tp = new()
+        addobj(tp, newobj('osdate:' .. site))
+        for f, ty in sorted(G7.HFIELDS.osdate or NOTHING) do
+            local vp = new()
+            for part in (tostring(ty):gsub('%s', '') .. '|'):gmatch('([^|]*)|') do
+                part = part:gsub('%?$', '')
+                if SCALAR[part] and part ~= 'nil' then addobj(vp, typeobj(part)) end
+            end
+            storec(tp, f, vp)
+        end
+        edge(tp, r)
+    end
     -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
     local function onetype(ty)
         if type(ty) ~= 'string' then return nil end
@@ -2379,6 +2394,7 @@ local function build(store, opts)
     -- the receiver holds a string — G7.SMC, CART-2007; nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
     G7.NIDX = {} -- (a native __index handler's call per (handler, object, key port): idxcall, CART-2029)
+    G7.PKGHOST = {} -- (package's tables the host reads, escaped after the solve: G7.pkgloaded, CART-2030)
     -- (★ A SCALAR'S TYPE OBJECT NEVER ESCAPES, CART-1869: type:string, number, boolean, nil stand for VALUES — no table
     -- outside code may write. A handed table's key set holds type:string, and the escape closure had followed it; the
     -- string metatable and its __index, what a string reaches, are never-escaping library sites. Those made before here)
@@ -2513,6 +2529,17 @@ local function build(store, opts)
         addobj(ofp(pl, 'package'), lp)
         if e.STRLIB then addobj(ofp(pl, 'string'), e.STRLIB) end
         G7.libsite(lp); G7.libsite(pl)
+        -- (package's OTHER tables — the profile's packagelib fields typed `table`: preload — had no site, so
+        -- `package.preload.k = A; package.preload.k` read nothing, untainted (flowpath's b15, CART-2030). Each is an
+        -- ordinary table, NOT a library site: require reads it and calls the loaders stored there, so it is the
+        -- host's — escaped after the solve, G7.PKGHOST)
+        for f, ty in sorted(G7.HFIELDS.packagelib or NOTHING) do
+            if ty == 'table' and f ~= 'loaded' then
+                local o = newobj('lib:package.' .. f)
+                addobj(ofp(lp, f), o)
+                G7.PKGHOST[#G7.PKGHOST + 1] = o
+            end
+        end
     end
     -- (`package.loaded["<module>"]` with a LITERAL name the tree holds: that one module's export table — or nil, not yet
     -- loaded — is a named entry; a COMPUTED lookup stays the package-loaded gap (the user's decision on CART-1813).
@@ -4268,6 +4295,19 @@ local function build(store, opts)
                 else
                     G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, obj = to, any = true }
                 end
+            end
+            -- ★ os.date's "*t" / "!*t" IS A FRESH TABLE (CART-2030, flowpath FLOW-0183's b08): the signature returns
+            -- `string|osdate`, a union the signature path types as NOTHING — `P = os.date('*t'); P.k = A; P.k` read
+            -- nothing, untainted, and every date string held nothing too. By the literal format: "*t" / "!*t" an ordinary
+            -- table of its own per call, its fields the profile's osdate class's scalar types; any other literal, or none
+            -- ("%c"), a string; a format that is no literal (or an escape whose value is the version's) both
+            if (fname == 'os.date' and select(2, lookup('os'))) or isbuiltin('os.date') then
+                local a1 = argn[1]
+                local fmt = a1 and a1:type() == 'string' and strval(a1) or nil
+                local lit = not a1 or fmt ~= nil
+                local tbl = not lit or fmt == '*t' or fmt == '!*t'
+                if not (lit and tbl) then addobj(resl[1], typeobj('string')) end
+                if tbl then G7.osdate(resl[1], key_of(n)) end
             end
             if (fname == 'debug.traceback' and select(2, lookup('debug'))) or isbuiltin('debug.traceback') then
                 for j = 1, math.min(2, #aps) do filter(aps[j], resl[1], G7.tbpass) end
@@ -6094,6 +6134,10 @@ local function build(store, opts)
             if open then local tc = TCUR; G7.outw(o); TCUR = tc end
         end
     end
+    -- (package's tables the HOST reads — package.preload: require calls the loaders stored there — escape, CART-2030.
+    -- Only one code STORED into: an escape is not local — the first one hits `[]` for every object in a closed solve and
+    -- starts the outside's writes in an open one — and an untouched preload holds nothing require could run)
+    for _, o in ipairs(G7.PKGHOST) do if next(ofield[o] or NOTHING) then G7.escmore(o, 'package-host-table') end end
     if G7.ANYLOAD and G7.EXP['loaded-globals'] then
         TCUR = 'code loaded at run time reads and writes every global by name (CART-1796)'
         for _, e in ipairs(G7.ENVL) do
