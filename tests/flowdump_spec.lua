@@ -3149,3 +3149,40 @@ test('flowdump: os.date("*t") and package.preload are sites — a store is read 
     ok(vim.tbl_contains(Q.solution.taint.ports, loadx(Q)), 'and P.k tainted')
     eq(0, flowcheck.check(Q).failed, 'closed')
 end)
+
+-- (CART-2031, flowpath FLOW-0184's l17 / l24 / q08 — ver 51 dumps: print calls the global tostring's value with each
+-- argument, so a closure assigned there runs — the dump had no call, its store read nothing, certified; the STOCK
+-- tostring is no lost call: a plain print taints nothing. debug.setmetatable's result holds true's type on 5.1)
+test('flowdump: print calls the global tostring; debug.setmetatable returns a boolean on 5.1 (CART-2031)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function lab(D) local l = {}; for _, x in ipairs(D.sites) do l[x.id] = x.label end; return l end
+    local function stored(D, f) -- (the labels a store of field f writes)
+        local l, v, out = lab(D), {}, {}
+        for _, e in ipairs(D.solution.v) do v[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == f then for _, s in ipairs(v[i[4]] or {}) do out[#out + 1] = l[s] end end
+            end
+        end
+        table.sort(out)
+        return out
+    end
+    local D = dump('local Y, Z = {}, {}\ntostring = function (v) Z.zz = v; return "" end\nprint(Y)\n')
+    local tv, called = {}, false
+    for _, F in ipairs(D.functions) do
+        for _, i in ipairs(F.body) do
+            if i[1] == 'load' and D.names.fields[i[4] + 1] == 'tostring' then tv[i[2]] = true end
+            if i[1] == 'call' and tv[i[3]] then called = true end
+        end
+    end
+    ok(called, 'a call of the loaded global tostring')
+    eq({ 'tbl:m.lua:6:13' }, stored(D, 'zz'), 'the closure stores print\'s argument')
+    eq({}, D.solution.taint.ports, 'nothing tainted')
+    eq(0, flowcheck.check(D).failed, 'closed')
+    local S = dump('local Y = {}\nprint(Y)\n')
+    eq({}, S.solution.taint.escaped_root, 'the stock tostring is no lost call: print\'s argument does not escape')
+    eq(0, flowcheck.check(S).failed, 'closed')
+    local M = dump('local Z = {}\nZ.r = debug.setmetatable(5, { __index = {} })\ndebug.setmetatable(0, nil)\n')
+    eq({ 'type:boolean', 'type:number' }, stored(M, 'r'), 'unstated (ver 51): true, and 5.2+\'s target')
+    eq(0, flowcheck.check(M).failed, 'closed')
+end)

@@ -5160,3 +5160,48 @@ test('flowtype: os.date("*t") is a fresh table per call; package.preload is a ta
     ok(tostring(objs.sinkn):find('type:string', 1, true) and tostring(objs.sinkn):find('osdate:', 1, true), 'a computed format: both: ' .. vim.inspect(objs))
     eq('partial', objs.sinkp, 'package.preload holds A — and require reads it, so it is the host\'s: partial: ' .. vim.inspect(objs))
 end)
+
+-- (CART-2031, flowpath FLOW-0184's l17 / l24 / q08: lua5.1, LuaJIT and lua5.2 print each argument through the value
+-- the GLOBAL tostring holds — a closure assigned there ran with no call; 5.4 does not. And debug.setmetatable returns
+-- true on 5.1 / LuaJIT, its target on 5.2+ — the model had copied the target. Unstated: every version's behaviour)
+test('flowtype: print calls the global tostring before 5.4; debug.setmetatable returns true on 5.1 (CART-2031)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A, B = {}, {}',
+        'local function sinkt(x) return x end',
+        'local old = tostring',
+        'tostring = function (v) sinkt(v); return "" end',
+        'print(B)',
+        'tostring = old',
+        'local function sinkr(x) return x end',
+        'sinkr(debug.setmetatable(5, { __index = {} }))',
+        'debug.setmetatable(0, nil)',
+        'local function sinkn(x) return x end',
+        'local tostring = function (v) sinkn(v); return "" end',
+        'print(A)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        -- (only the stub profile: the base runtime's — debug.setmetatable's native — loads as it does)
+        P.load = function (nm, ...) if nm == 'stub' then return { lua_version = lv } end return old(nm, ...) end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        local objs = {}
+        for _, c in ipairs(store.data.calls) do
+            local nm = (c.to or ''):match('::(sink%a)@')
+            if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+        end
+        return objs
+    end
+    local A, B = 'tbl:m.lua:0:13', 'tbl:m.lua:0:17'
+    local o = run(nil)
+    eq({ sinkt = A .. ' ' .. B, sinkr = 'type:boolean type:number', sinkn = '' }, o,
+        'unstated: print calls the global tostring (flow-insensitively, print(A) too), the result both; a LOCAL tostring is not print\'s')
+    eq({ sinkt = A .. ' ' .. B, sinkr = 'type:boolean', sinkn = '' }, run('5.1'), '5.1: the call, and true')
+    eq({ sinkt = A .. ' ' .. B, sinkr = 'type:number', sinkn = '' }, run('5.2'), '5.2: the call, and the target')
+    eq({ sinkt = '', sinkr = 'type:number', sinkn = '' }, run('5.4'), '5.4: print calls no global')
+    vim.fn.delete(root, 'rf')
+end)

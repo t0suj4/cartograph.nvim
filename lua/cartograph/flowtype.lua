@@ -1742,7 +1742,7 @@ local function build(store, opts)
                 MTSTORES[#MTSTORES + 1] = { a[1], a[2] }
                 G7.emit({ 'setmeta', a[1], a[2] })
             end
-            if a[1] then edge(a[1], rl[1]); G7.emit({ 'copy', rl[1], a[1] }) end
+            if a[1] and rl[1] then edge(a[1], rl[1]); G7.emit({ 'copy', rl[1], a[1] }) end
         end
         M0['getmetatable'] = function (a, rl)
             if not a[1] then return end
@@ -1820,7 +1820,10 @@ local function build(store, opts)
             -- (the call, for the dump's debug-typemeta gap: from the MODEL, which runs by name and through an alias alike —
             -- `local dsm = debug.setmetatable; dsm(f, mt)` had recorded none: the gap was by spelling, CART-2017)
             if G7.REC and G7.NATFN then G7.TYPEMTCALLS[#G7.TYPEMTCALLS + 1] = { fn = G7.NATFN, args = a } end
-            M0['setmetatable'](a, rl)
+            -- (ITS RESULT IS THE VERSION'S, CART-2031 — flowpath's q08 / q09: lua5.1 / LuaJIT return true, 5.2+ the
+            -- target, checked. The model had copied the target under every version; unstated: both)
+            M0['setmetatable'](a, G7.since(52) and rl or {})
+            if rl[1] and not (G7.LUAVSTATED and G7.LUAVER >= 52) then primv(rl[1], 'boolean') end
             if a[1] and a[2] then G7.STRPEND[#G7.STRPEND + 1] = { 'setmeta', a[1], field(a[2], '__index') } end
             if a[1] and a[2] then G7.FNMTPEND[#G7.FNMTPEND + 1] = { a[1], a[2] } end -- (on a FUNCTION: every function's, CART-1957)
             if a[1] and a[2] then G7.TYPEMTPEND[#G7.TYPEMTPEND + 1] = { a[1], a[2] } end -- (a NUMBER / BOOLEAN: its type's, CART-1957)
@@ -4158,6 +4161,9 @@ local function build(store, opts)
             local ires = (fname == 'select' and #aps >= 2) or ((fname == 'unpack' or fname == 'table.unpack' or fname == 'table.remove') and aps[1] and true)
                 or (aps[1] and isbuiltin('assert')) -- (its model runs by name: G7.NAMEDRUN, CART-2006)
                 or ((fname == 'table.foreach' or fname == 'table.foreachi') and aps[2] and true)
+                -- (debug.setmetatable: its result is the version's — the signature's generic `T`, the target, is 5.2+'s
+                -- alone, CART-2031)
+                or (aps[1] and ((fname == 'debug.setmetatable' and select(2, lookup('debug'))) or isbuiltin('debug.setmetatable')))
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
@@ -4315,6 +4321,21 @@ local function build(store, opts)
             if fname == 'print' or fname == 'string.format' then
                 for _, ap in ipairs(aps) do metacall(ap, '__tostring', { ap }, new(), curerr()) end
             end
+            -- ★ 5.1 – 5.3 PRINT CALLS THE GLOBAL tostring (CART-2031, flowpath FLOW-0184's l17 / l19 / l24): each argument
+            -- goes through the value `tostring` holds when print runs — lua5.1, LuaJIT and lua5.2 checked (5.3's
+            -- source too); 5.4 calls luaL_tolstring. A closure assigned to tostring ran with no call and no edge. Under
+            -- an unstated version (every version's behaviour) or a stated one before 5.4. The dump: the global's load
+            -- and a `call` of it per argument; the solve calls what it holds but the STOCK tostring — the `op __tostring`
+            -- above is its behaviour, and a call of the native in a dump is a lost one that taints every print
+            if fname == 'print' and aps[1] and not (G7.LUAVSTATED and G7.LUAVER >= 54) then
+                local tp, fp = G7.gload('tostring'), new()
+                filter(tp, fp, function (o) return G7.NATIVE[o] ~= 'tostring' end)
+                for _, ap in ipairs(aps) do
+                    local r = new()
+                    if G7.M == 0 then G7.ins({ 'call', { r }, tp, { ap } }) end
+                    G7.mu(function () callc(fp, { ap }, r, nil, curerr()) end)
+                end
+            end
             if fname == 'table.sort' and aps[1] then
                 local el = field(aps[1], '[]')
                 if aps[2] then callc(aps[2], { el, el }, new(), nil, curerr())
@@ -4393,27 +4414,30 @@ local function build(store, opts)
             end
             return vals, restlast
         end
+        -- (a global READ loads through _G, into the reading function's own port — an identifier's, and what a builtin
+        -- reads by name: 5.1's print reads the global tostring, CART-2031)
+        function G7.gload(nm)
+            local gid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
+            if not gid then return G7.gread(nm) end
+            local m = G7.GR[gid]
+            if not m then m = {}; G7.GR[gid] = m end
+            local q = m[nm]
+            if not q then q = new(); edge(G7.gread(nm), q); m[nm] = q end
+            -- (`arg` in a vararg function is PUC 5.1's arg table when the function never names `...` — read here as
+            -- a global; the dump decides it once the whole body is walked, CART-1924)
+            if nm == 'arg' and fnstack[#fnstack] and fnstack[#fnstack].vararg then
+                local f = fnstack[#fnstack]
+                f.argreads = f.argreads or {}
+                f.argreads[#f.argreads + 1] = q
+            end
+            return q
+        end
         expr = function (n)
             local t = n:type()
             if t == 'identifier' then
                 local nm = txt(n)
                 local p, glob = lookup(nm)
-                if glob then -- (a global READ loads through _G, into the reading function's own port)
-                    local gid = fnstack[#fnstack] and fnstack[#fnstack].id or G7.CHUNK
-                    if not gid then return G7.gread(nm) end
-                    local m = G7.GR[gid]
-                    if not m then m = {}; G7.GR[gid] = m end
-                    local q = m[nm]
-                    if not q then q = new(); edge(G7.gread(nm), q); m[nm] = q end
-                    -- (`arg` in a vararg function is PUC 5.1's arg table when the function never names `...` — read here as
-                    -- a global; the dump decides it once the whole body is walked, CART-1924)
-                    if nm == 'arg' and fnstack[#fnstack] and fnstack[#fnstack].vararg then
-                        local f = fnstack[#fnstack]
-                        f.argreads = f.argreads or {}
-                        f.argreads[#f.argreads + 1] = q
-                    end
-                    return q
-                end
+                if glob then return G7.gload(nm) end
                 return p
             end
             -- (a file CHUNK's `...` is what its host passes, CART-1822: one port per file, tainted below as a lost
