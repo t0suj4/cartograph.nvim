@@ -2961,6 +2961,39 @@ local function build(store, opts)
         end
         local fnmap = fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
+        -- ★ A STRING LITERAL'S VALUE (CART-2026): its `content` child is SOURCE TEXT — `t['\102']` is t.f, but was read as a
+        -- field named `\102`: a load answering nothing, whole and wrong. Without a backslash the text is the value (every key
+        -- so far, unchanged), as in a long string `[[…]]`, which has no escapes. A short string's escapes are DECODED, one
+        -- pass, no code run: `\ddd`, `\n` `\t` … `\\` `\"` `\'`, a backslash-newline. One whose meaning is the VERSION's —
+        -- `\x` `\z` `\u` (5.1 reads `\x66` as "x66") — or that 5.2+ refuses (`\q`, `\256`) is no value: nil, the caller's
+        -- computed key. So is a value spelling one of the solve's own fields: the metatable slot `\1mt`, hidden `\1…`
+        -- slots, `[]`, `#`, `{k}`
+        local ESC = { a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', ['\\'] = '\\', ['"'] = '"', ["'"] = "'" }
+        local function strval(x)
+            local c = x:field('content')[1]
+            local ct = c and txt(c) or ''
+            if not ct:find('\\', 1, true) or txt(x):match('^%[=*%[') then return ct end
+            local out, i = {}, 1
+            while i <= #ct do
+                local j = ct:find('\\', i, true)
+                if not j then out[#out + 1] = ct:sub(i); break end
+                out[#out + 1] = ct:sub(i, j - 1)
+                local ch = ct:sub(j + 1, j + 1)
+                if ch:match('%d') then
+                    local d = ct:match('^%d%d?%d?', j + 1)
+                    if tonumber(d) > 255 then return nil end
+                    out[#out + 1] = string.char(tonumber(d)); i = j + 1 + #d
+                elseif ch == '\n' or ch == '\r' then -- (a backslash-newline: one newline, CR LF either way)
+                    out[#out + 1] = '\n'; i = j + 2
+                    local nx = ct:sub(i, i)
+                    if (nx == '\n' or nx == '\r') and nx ~= ch then i = i + 1 end
+                elseif ESC[ch] then out[#out + 1] = ESC[ch]; i = j + 2
+                else return nil end
+            end
+            local v = table.concat(out)
+            if v:byte(1) == 1 or v == '[]' or v == '#' or v == '{k}' then return nil end
+            return v
+        end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
         -- CONTEXT instance walks the original node, at the file's own positions)
         local kfile = (clone and not isctx) and ('clone:' .. file) or file
@@ -3100,7 +3133,7 @@ local function build(store, opts)
         end
         local function keyname(k)
             if not k then return '#' end -- (a positional constructor field)
-            if k:type() == 'string' then local c = k:field('content')[1]; return c and txt(c) or '[]' end
+            if k:type() == 'string' then return strval(k) or '[]' end
             -- (a CONSTANT — a local declared from a string literal and never assigned in its file, or a key parameter of
             -- a value-keyed instance — is that string: `_G[LIBSTUB_MAJOR]` is the global LibStub, CART-1729)
             -- (and, with litkeys, a local bound to a declared LOADER's name — `local addonName = ...`, never assigned — is
@@ -3123,7 +3156,7 @@ local function build(store, opts)
         -- numeric key is the array as a whole)
         local function acc_key(kind, kn, base, whole)
             if not ACC or not kn then return end
-            if kn:type() == 'string' then local c = kn:field('content')[1]; if c then acc(kind, c, txt(c), base) end
+            if kn:type() == 'string' then local c = kn:field('content')[1]; local sv = c and strval(kn); if sv then acc(kind, c, sv, base) end
             elseif kn:type() == 'number' and whole and tonumber(txt(kn)) then
                 local tb = whole:field('table')[1]
                 local _, _, er, ec = whole:range()
@@ -3350,8 +3383,8 @@ local function build(store, opts)
                 G7.REC.ins(G7.cur(), { 'call', r, fv, a }, 'native:twin')
             end
             local function modport(a)
-                local s = a and a:type() == 'string' and a:field('content')[1]
-                local mf = s and modfile[txt(s)]
+                local s = a and a:type() == 'string' and strval(a)
+                local mf = s and modfile[s]
                 return mf and port('mod:' .. mf)
             end
             if (fname == 'require' or isbuiltin('require')) and argn[1] then
@@ -3369,13 +3402,13 @@ local function build(store, opts)
                 end
                 if m then chunkraise(m); rtwin(port('mod:' .. m)); return port('mod:' .. m) end
                 local mp = modport(argn[1])
-                if mp then chunkraise(G7.MODFILE[txt(argn[1]:field('content')[1])]); rtwin(mp); return mp end
-                local s0 = argn[1] and argn[1]:type() == 'string' and argn[1]:field('content')[1]
+                if mp then chunkraise(G7.MODFILE[strval(argn[1])]); rtwin(mp); return mp end
+                local s0 = argn[1] and argn[1]:type() == 'string' and strval(argn[1])
                 -- (THROUGH AN ALIAS, CART-1993: only a module the tree or the library holds takes this path — req_at knows
                 -- only calls spelled `require`, so a root-level module is the by-value call below, a lost call: partial,
                 -- never the unknown-code EXT this branch gives a module it cannot find)
                 if fname ~= 'require' then
-                    if s0 and G7.libname(txt(s0)) then return G7.gport(txt(s0)) end
+                    if s0 and G7.libname(s0) then return G7.gport(s0) end
                     goto notrequire
                 end
                 -- (a module the tree does not hold: what it returns is unknown, CART-1707 — unless the environment PROFILE
@@ -3384,10 +3417,10 @@ local function build(store, opts)
                 for _, a in ipairs(argn) do expr(a) end
                 -- (`require "io"` IS the io library — package.loaded holds it, CART-1797: the result had been an empty
                 -- port, and `require("io").zz = a` stored into nothing, flowpath's l02 / l36-l39 / l42, CART-1811)
-                if s0 and G7.libname(txt(s0)) then rtwin(G7.gport(txt(s0))); return G7.gport(txt(s0)) end
+                if s0 and G7.libname(s0) then rtwin(G7.gport(s0)); return G7.gport(s0) end
                 local xp = new()
-                if not (s0 and G7.profmod(txt(s0))) then
-                    local c = s0 and G7.CON.at(file).mod[txt(s0)] -- (a MODULE contract: its own EXT, CART-1861)
+                if not (s0 and G7.profmod(s0)) then
+                    local c = s0 and G7.CON.at(file).mod[s0] -- (a MODULE contract: its own EXT, CART-1861)
                     G7.eroot(xp, c and G7.extc(c) or EXT, G7.XARR and { 'require', key_of(n) })
                 end
                 rtwin(xp)
@@ -3397,8 +3430,8 @@ local function build(store, opts)
             if fname == 'pcall' and argn[1] and argn[1]:type() == 'identifier' and txt(argn[1]) == 'require' then
                 local mp = modport(argn[2])
                 do -- (pcall(require, "io"): the library too, CART-1811 — l03)
-                    local s2 = not mp and argn[2] and argn[2]:type() == 'string' and argn[2]:field('content')[1]
-                    if s2 and G7.libname(txt(s2)) then mp = G7.gport(txt(s2)) end
+                    local s2 = not mp and argn[2] and argn[2]:type() == 'string' and strval(argn[2])
+                    if s2 and G7.libname(s2) then mp = G7.gport(s2) end
                 end
                 if mp then
                     if not want then return mp end
@@ -3499,8 +3532,7 @@ local function build(store, opts)
                 return new()
             end
             local function strkey(a)
-                local s = a and a:type() == 'string' and a:field('content')[1]
-                return s and txt(s) or '[]'
+                return a and a:type() == 'string' and strval(a) or '[]'
             end
             -- (rawget(t, 'f') reads every RAW entry — one written under a computed key too: a named load without __index,
             -- non-strict but on _G, as `t.f` is. Strict, it missed `t[k] = v` with k == 'f', CART-1746)
@@ -4192,13 +4224,7 @@ local function build(store, opts)
                 local function numlit(x) return x and x:type() == 'number' and tonumber(txt(x)) or nil end
                 -- (a string literal's VALUE, escapes decoded — `'\102'` is "f": read as source text it had no f, and func
                 -- was dropped with no gap, CART-2024. Evaluated as the literal it is, in an empty environment)
-                local function strlit(x)
-                    if not (x and x:type() == 'string') then return nil end
-                    local f = load('return ' .. txt(x), '=lit', 't', {})
-                    local okv, v
-                    if f then okv, v = pcall(f) end
-                    return okv and type(v) == 'string' and v or nil
-                end
+                local function strlit(x) return x and x:type() == 'string' and strval(x) or nil end
                 local a1, top0 = argn[1], fnstack[#fnstack]
                 local thr = a1 and not numlit(a1) and numlit(argn[2]) ~= nil
                 local what = strlit(argn[thr and 3 or 2])
@@ -4257,7 +4283,7 @@ local function build(store, opts)
                     local off = recvp and 1 or 0
                     for j, a in ipairs(argn) do
                         local sv
-                        if a:type() == 'string' then local cc = a:field('content')[1]; sv = cc and txt(cc) or ''
+                        if a:type() == 'string' then sv = strval(a)
                         elseif a:type() == 'identifier' then local p = lookup(txt(a)); sv = p and G7.CONSTK[p] end
                         if sv then vl = vl or {}; vl[j + off] = sv end
                     end
@@ -4383,7 +4409,7 @@ local function build(store, opts)
                 return r
             end
             if t == 'parenthesized_expression' then return expr(n:named_child(0)) end
-            if t == 'string' then local p = new(); addobj(p, STR); local c = n:field('content')[1]; G7.LITV[p] = c and txt(c) or ''; return p end -- (its text: CART-1820)
+            if t == 'string' then local p = new(); addobj(p, STR); G7.LITV[p] = strval(n); return p end -- (its text: CART-1820)
             -- ★ A NUMBER OR A BOOLEAN IS A VALUE TOO (CART-1901, flowpath FLOW-0126): a number / true / false literal holds its
             -- type object, as a string literal holds STR — it had been an EMPTY port, so "a scalar the solve does not track"
             -- read as "nothing flows here" (on WoW w3, 59 of 68 top-level number writes and 22 of 24 boolean ones read
@@ -4542,8 +4568,7 @@ local function build(store, opts)
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
                         if ev and ev:type() == 'string' and v:type() == 'identifier' and not G7.REASG[txt(v)] then
-                            local c = ev:field('content')[1]
-                            G7.CONSTK[p] = c and txt(c) or ''
+                            G7.CONSTK[p] = strval(ev)
                         end
                         -- (a local DECLARED from a parameter path is that path — an upper bound: a later assignment
                         -- to it is not checked here, the census marks it)

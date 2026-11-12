@@ -5011,3 +5011,61 @@ test('flowtype: a numeric for\'s index and ipairs\' index hold a number (CART-20
     eq('type:number', objs.sinkn, 'the numeric for\'s index: ' .. vim.inspect(objs))
     eq('type:number', objs.sinki, 'ipairs\' index: ' .. vim.inspect(objs))
 end)
+
+-- (CART-2026: a string literal naming a key was read as its SOURCE TEXT — `t['\102']` named a field `\102`, not f. The
+-- route fixtures esckey_* pin a load, a constructor key, a store and a method; this pins rawget's key, the constant
+-- local behind `_G[K]` (litkeys), and the soundness side: an escape whose meaning is the VERSION's (`\x66` is "f" on
+-- 5.2+, "x66" on 5.1) and one spelling the solve's own metatable slot are a computed key)
+test('flowtype: a string key spelled with escapes is its value; a version\'s escape is a computed key (CART-2026)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A, B, M = {}, {}, {}',
+            'local function sinkr(x) return x end',
+            'local function sinkx(x) return x end',
+            'local function sinkh(x) return x end',
+            'local function sinkg(x) return x end',
+            'local t = { f = A, x66 = B }',
+            [[local e = t['\102'] ]],
+            'local function sinkz(x) return x end',
+            [[sinkz(t['\300'])]],
+            'local function sinkn(x) return x end',
+            [[local t2 = { ['a\nb'] = A, z = B }]],
+            "sinkn(t2['a\\\nb'])",
+            [[sinkr(rawget(t, '\102'))]],
+            [[sinkx(t['\x66'])]],
+            [[local h = setmetatable({ ['\1mt'] = A }, M); sinkh(h['\1mt'])]],
+            [[local K = 'L\105b'; _G[K] = B; sinkg(Lib)]],
+            'local function sinkq(x) return x end',
+            [[sinkq(require('\102oo').x)]],
+            -- (a value-keyed instance's literal key, litkeys — CART-1729's shape: "\88" is "X")
+            'local function sinkv(x) return x end',
+            'local LIB = { libs = {} }',
+            'function LIB:New(major) self.libs[major] = self.libs[major] or {}; return self.libs[major] end',
+            [[local X = LIB:New("\88"); X.v = A]],
+            'local Y = LIB:New("Y"); Y.v = B',
+            'sinkv(LIB:New("X").v)' }, '\n') .. '\n',
+        ['lua/foo.lua'] = 'local C = {}\nreturn { x = C }\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true, litkeys = true, accesses = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    local A, B, M = 'tbl:m.lua:0:16', 'tbl:m.lua:0:20', 'tbl:m.lua:0:24'
+    eq(A .. ' ' .. B, objs.sinkz, '"\\300" is no byte — Lua refuses it: a computed key, no crash: ' .. vim.inspect(objs))
+    eq(A, objs.sinkn, 'a backslash-newline is a newline: "a\\<newline>b" is "a\\nb": ' .. vim.inspect(objs))
+    eq(A, objs.sinkv, 'LIB:New("\\88") is the instance LIB:New("X") reads: ' .. vim.inspect(objs))
+    -- (the ACCESS ROSTER names the field by its value — renamefield rewrites `t['\102']` with t.f; it had missed it)
+    local named = false
+    for _, r in ipairs(R.accesses or {}) do if r.field == 'f' and r.range[1] == 6 then named = true end end
+    ok(named, 'the access t[\'\\102\'] is a row for field f')
+    eq(A, objs.sinkr, 'rawget(t, "\\102") is t.f: ' .. vim.inspect(objs))
+    eq(A .. ' ' .. B, objs.sinkx, '"\\x66" is f or x66 by version: a computed key, both: ' .. vim.inspect(objs))
+    ok(not tostring(objs.sinkh):find(M, 1, true), '"\\1mt" is a user key, never the metatable slot: ' .. vim.inspect(objs))
+    eq(B, objs.sinkg, 'a constant local "L\\105b" keys _G as Lib (litkeys): ' .. vim.inspect(objs))
+    eq('tbl:lua/foo.lua:0:10', objs.sinkq, 'require("\\102oo") is the module foo: ' .. vim.inspect(objs))
+end)
