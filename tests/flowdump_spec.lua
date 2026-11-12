@@ -2226,7 +2226,9 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
     -- `debug.setmetatable(print, mt)`, sets every function's: the clause had been kept, false)
     for _, form in ipairs({ 'debug.setmetatable(function () end, { __index = { foo = g } })',
             'local dsm = debug.setmetatable\ndsm(function () end, { __index = { foo = g } })',
-            'debug.setmetatable(print, { __index = { foo = g } })' }) do
+            'debug.setmetatable(print, { __index = { foo = g } })',
+            -- (CART-2021: a HOST-typed function — a profile's declared `fun(…)`: it had been neither linked nor a gap)
+            'debug.setmetatable(string.gmatch("a", "a"), { __index = { foo = g } })' }) do
         local D = solve(FN:format(form))
         ok(not D.contracts.clauses['function-no-metatable'], form .. ': the clause is withheld')
         local t = foo_targets(D)
@@ -2238,7 +2240,33 @@ test('flowdump: debug.setmetatable on a function is every function\'s; a scalar 
         local slot = {}
         for _, e in ipairs(D.solution.h) do if e[1] == hs and e[2] == 100 then slot = e[3] end end
         ok(hs and #slot >= 1, form .. ': h\'s closure has the metatable in its slot: ' .. vim.inspect({ hs, slot }))
-        eq(1, gaps(D), form .. ': the call is a named gap, by name or by value')
+        -- (CART-2021, flowpath FLOW-0177: STATED TYPE-WIDE, no gap — the call's IR writes the function TYPE's site,
+        -- `new F type:function; setmeta F mt` tagged debug:typemeta, that site's META cell holds mt, and type_metatables
+        -- has its row. It had been the gap debug-typemeta: one setmeta cannot carry every function's link)
+        eq(0, gaps(D), form .. ': no gap, by name or by value')
+        local row
+        for _, e in ipairs(D.type_metatables) do if e[1] == 'function' then row = e end end
+        ok(row and type(row[2]) == 'number', form .. ': type_metatables has the function row: ' .. vim.inspect(D.type_metatables))
+        local tmeta = {}
+        for _, e in ipairs(D.solution.h) do if row and e[1] == row[2] and e[2] == 100 then tmeta = e[3] end end
+        ok(#tmeta >= 1 and vim.deep_equal(tmeta, slot), form .. ': the type site\'s META cell holds mt: ' .. vim.inspect({ tmeta, slot }))
+        local V = {}
+        for _, e in ipairs(D.solution.v) do V[e[1]] = e[2] end
+        local stated = 0
+        for _, F in ipairs(D.functions) do
+            local tagat = {}
+            for _, t in ipairs(F.tags or {}) do tagat[t[1]] = t[2] end
+            for i, ins in ipairs(F.body) do
+                if ins[1] == 'setmeta' and tagat[i - 1] == 'debug:typemeta' and row and vim.tbl_contains(V[ins[2]] or {}, row[2]) then stated = stated + 1 end
+            end
+        end
+        eq(1, stated, form .. ': one tagged setmeta writes the type site')
+    end
+    -- (the gap STAYS where the target holds nothing — nil: no object, no type)
+    do
+        local D = solve('local z\ndebug.setmetatable(z, { __index = {} })\nreturn z\n')
+        eq(1, gaps(D), 'a nil target: the named gap')
+        eq(0, #D.type_metatables, 'and no type row')
     end
     local D = solve('debug.setmetatable(0, { __index = {} })\nlocal y = (5).foo\nreturn y\n')
     eq(0, gaps(D), 'a number target: its type\'s metatable, no gap (CART-1957)')

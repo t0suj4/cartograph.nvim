@@ -178,12 +178,14 @@
 --   otherwise the dump translates it into copies between its value and every upvalue of the functions the solution
 --   lists (CART-1803, CART-1813).
 --   (CART-1957: a number / boolean target is no gap — `type_metatables` = [[type, type site, holder site]] names the type's
---   metatable index, and the type site's META cell holds the metatable, CART-2017; the gap stays for a function
---   target, nothing held — nil — and a target past CAP)
+--   metatable index, and the type site's META cell holds the metatable, CART-2017. A FUNCTION target — a closure, a C
+--   function, a host-typed one — is no gap either since CART-2021: Lua gives functions ONE metatable, the type's, so
+--   the call's IR adds `new F T; setmeta F mt` (tag `debug:typemeta`), T the type site type:function, whose META
+--   cell holds mt, and `type_metatables` has a row ["function", type site, holder]: every function site — closures and
+--   natives (`natives`), created before or after the call — indexes through it. Each function site's own META cell
+--   holds mt too (what the solve links, what a chain read per site finds); the clause function-no-metatable is withheld)
 --   `debug-typemeta`: a debug.setmetatable call — by name or through an alias, recorded by its model, CART-2017 —
---   whose target is no table or string: a function, a closure or a C function (the solve links every function, the
---   builtins' natives included, to the metatable's __index: no IR op says "every value of a type"), nil (no object),
---   or past CAP (CART-1957).
+--   whose target holds nothing (nil: no object), is unknown code's value, or is past CAP (CART-1957).
 --   `debug-getinfo`: a debug.getinfo call whose result's `func` may be ANY function — a level other than a literal 1,
 --   or an argument that may be a level (a number, past CAP, unknown code's) — no IR op says "the function n frames up".
 --   The result is a fresh table (`getinfo:<site>`); a literal level 1 stores the calling function's `self`, a function
@@ -426,28 +428,33 @@ function M.build(rec, X, sink)
         end
     end
     -- ★ A TYPE'S METATABLE (CART-1957): debug.setmetatable(v, mt) on a value that is no table sets the metatable of its
-    -- whole TYPE. On a string the solve applies it to the string library; on a function to every function (prototype
-    -- links the IR's one `setmeta` does not carry); a number / boolean / nil holds no object, and nothing reads through
-    -- it. A GAP `debug-typemeta` at every such call by name whose target is past CAP, holds nothing (nil — a number /
-    -- boolean target is its type's metatable since CART-1957, `type_metatables`, no gap
-    -- literal) or holds a function — the IR cannot say "every value of this type"
+    -- whole TYPE. On a string the solve applies it to the string library; a number / boolean is its type site's
+    -- (`type_metatables`, CART-1957); a FUNCTION the function type's since CART-2021 — the call also writes the type
+    -- site type:function (`setmeta` on X.FNTP, tag debug:typemeta) and `type_metatables` has its row. A GAP
+    -- `debug-typemeta` at every such call whose target is past CAP, unknown code's value, or holds nothing (nil)
     for _, u in ipairs(X.TYPEMTCALLS or {}) do
         local t = u.args[1]
         local gap = not t or (X.top and X.top[t]) or false
         if t and X.top and X.top[t] then X.FNMAYBE = true end -- (past CAP: it may be a function)
+        local fnt = false
         if not gap then
             local any = false
             for o in X.each(t) do
                 any = true
-                -- (a number / boolean target is the TYPE's metatable, modelled since CART-1957: `type_metatables` names it —
-                -- no gap. A function's, or nothing held — nil, absence — stays the gap)
-                -- (a C function, or unknown code's value — an exported parameter in open mode, seeded after the solve linked
-                -- functions: the clause function-no-metatable is withheld for it too, CART-2017)
-                if X.fnports[o] or (X.NATIVE and X.NATIVE[o]) or o == X.EXT or (X.XC and X.XC[o]) then gap = true; X.FNMAYBE = true; break end
+                -- (unknown code's value — an exported parameter in open mode, seeded after the solve linked functions: the
+                -- clause function-no-metatable is withheld for it too, CART-2017)
+                if o == X.EXT or (X.XC and X.XC[o]) then gap = true; X.FNMAYBE = true; break end
+                -- (a FUNCTION — a closure, a C function, a host-typed one: the function TYPE's metatable, stated since
+                -- CART-2021; it was the gap)
+                if X.fnports[o] or (X.NATIVE and X.NATIVE[o]) or (X.TNAME[o] and (X.TNAME[o] == 'function' or X.TNAME[o]:match('^%(?fun%('))) then fnt = true end
             end
             if not any then gap = true end
         end
-        if gap then rec.gap(u.fn, 'debug-typemeta', u.args) end
+        if gap then rec.gap(u.fn, 'debug-typemeta', u.args)
+        elseif fnt and X.FNTP and u.args[2] then
+            rec.ins(u.fn, { 'new', X.FNTP, X.FNTO }, 'debug:typemeta')
+            rec.ins(u.fn, { 'setmeta', X.FNTP, u.args[2] }, 'debug:typemeta')
+        end
     end
     -- (debug.getinfo whose `func` may be any function — a level other than a literal 1, or an argument that may be one:
     -- the IR cannot say "the function n frames up", CART-2016)

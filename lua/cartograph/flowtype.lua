@@ -974,7 +974,8 @@ local function build(store, opts)
             if tn == 'string' and sl and f ~= '#' then load_obj(sl, f, dst, seen, strict, o) end
             -- (a number / boolean whose TYPE took a metatable — debug.setmetatable(0, mt): its __index, through the type's
             -- holder, CART-1957)
-            local tkey = tn == 'integer' and 'number' or tn
+            -- (a host-typed function whose TYPE took one — debug.setmetatable(f, mt): the function type's holder, CART-2021)
+            local tkey = tn == 'integer' and 'number' or (G7.TYPEPROTO['function'] and G7.isfnty(tn) and 'function') or tn
             local tph = G7.TYPEPROTO[tkey]
             if tph and f ~= '#' then load_obj(tph, f, dst, seen, strict, o)
             elseif (tkey == 'number' or tkey == 'boolean') and f ~= '#' then
@@ -1001,7 +1002,9 @@ local function build(store, opts)
         -- (a FUNCTION has no metatable of its own — the dump's contract `function-no-metatable`: calling one never
         -- consults __call, and `setmetatable(fn)` raises. Its `\1mt` port, made by every call's __call route, was
         -- tainted by a field hit of `\1mt` and made each generic for over a plain iterator partial, CART-1754)
-        if f == '\1mt' and fnports[o] then return end
+        -- (UNLESS debug.setmetatable gave the function TYPE one — G7.FNMT: then every function's slot holds it, and its
+        -- operators, __newindex and getmetatable read it; they had read nothing, CART-2021)
+        if f == '\1mt' and fnports[o] and not G7.FNMT then return end
         -- (`#` — `_G[1]`, ipairs(_G) — is no NAME: a numeric key is what a dynamic store may write, so it reads them, CART-1799)
         if not strict and f ~= '[]' and f ~= '#' and (G7.ISG[o] or G7.EXP['strict-names'] or (G7.EXP['strict-records'] and not G7.MAPSITE[o] and not TNAME[o])) and f:byte(1) ~= 1 then strict = true end
         if G7.RG and G7.PKGL[o] and (f == '[]' or f == '{k}') and not G7.RG[dst] then G7.rgflag(dst) end -- (refl-scope: a reflective read)
@@ -1933,6 +1936,8 @@ local function build(store, opts)
         for t, k in pairs(opts.host_kinds or NOTHING) do HKINDS[t] = k end
         for sk, c in pairs(opts.creates or NOTHING) do G7.CREATES[sk] = c end
     end
+    -- (a host-typed FUNCTION: `function`, or a signature `fun(…): …` — a profile's declared function, CART-2021)
+    function G7.isfnty(tn) return tn == 'function' or tn:match('^%(?fun%(') ~= nil end
     function G7.hostkind(tn)
         local HKINDS = G7.HKINDS
         local k = HKINDS[tn]
@@ -5161,8 +5166,11 @@ local function build(store, opts)
             local y, hit = q[1], top[q[1]] or false
             -- (a C FUNCTION — a builtin's native, `debug.setmetatable(print, mt)` — is a function too: its type's metatable is
             -- every function's, a closure's or a builtin's, CART-2017)
-            if not hit then for o in each(y) do if fnports[o] or G7.NATIVE[o] then hit = true; break end end end
+            -- (and a HOST-typed function — a profile's declared `function`, type:function: it had been neither linked nor a
+            -- gap, CART-2021)
+            if not hit then for o in each(y) do if fnports[o] or G7.NATIVE[o] or (TNAME[o] and G7.isfnty(TNAME[o])) then hit = true; break end end end
             if hit then
+                local fresh = not G7.FNMT
                 G7.FNMT = true
                 if not fos then
                     fos = {}
@@ -5176,6 +5184,38 @@ local function build(store, opts)
                 -- on a function still reads nothing, CART-1754)
                 for _, o in ipairs(fos) do
                     local sp = new(); G7.DBGMT[sp] = true; addobj(sp, o); proto(sp, idx, true); storec(sp, '\1mt', q[2])
+                end
+                -- ★ STATED TYPE-WIDE (CART-2021, flowpath FLOW-0177): the function TYPE's site type:function holds mt in its
+                -- own slot — the dump's META cell, written by a `setmeta` on G7.FNTP — and a HOLDER typemt:function, as a
+                -- number's (type_metatables): a host-typed function reads through it, an __index function is handed the value
+                local FT = typeobj('function')
+                local H = G7.TYPEPROTO['function']
+                if not H then
+                    H = newobj('typemt:function')
+                    G7.NOESC[H] = true
+                    G7.TYPEPROTO['function'] = H
+                    G7.TYPEMTS[#G7.TYPEMTS + 1] = { 'function', H }
+                    local op = new(); addobj(op, FT); OBJPORT[H] = op
+                    G7.FNTP, G7.FNTO = new(), FT; addobj(G7.FNTP, FT)
+                end
+                local hp = new(); addobj(hp, H); proto(hp, idx, true); storec(hp, '\1mt', q[2])
+                local tp = new(); G7.DBGMT[tp] = true; addobj(tp, FT); storec(tp, '\1mt', q[2])
+                -- (the `\1mt` loads a function answered nothing to before — every call's __call route, an operator's,
+                -- getmetatable's, a store's __newindex — and every load on a host-typed function: asked again)
+                if fresh then
+                    local LREC, again = G7.LREC, {}
+                    for x, i0 in pairs(loads) do
+                        local i = LREC[i0 + 3]
+                        while true do
+                            local f1 = LREC[i]
+                            for o in each(x) do
+                                if (f1 == '\1mt' and fnports[o]) or (TNAME[o] and G7.isfnty(TNAME[o])) then again[#again + 1] = { o, f1, LREC[i + 1], LREC[i + 2] } end
+                            end
+                            if i == i0 then break end
+                            i = LREC[i + 3]
+                        end
+                    end
+                    for _, e in ipairs(again) do load_obj(e[1], e[2], e[3], nil, e[4]) end
                 end
             end
         end
@@ -7403,7 +7443,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, FNTP = G7.FNTP, FNTO = G7.FNTO, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
