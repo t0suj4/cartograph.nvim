@@ -3091,3 +3091,34 @@ test('flowdump: debug.setmetatable on a number / boolean is its type\'s metatabl
     y = run('mt.__index.bar = g\nmt.__index.foo2 = function (n) Y = n.bar end\ndebug.setmetatable(0, mt)\nlocal f = (5).foo2\nf(7)\n')
     ok(holds_g(y), 'a load first seen after the holder exists reads through it: ' .. vim.inspect(y))
 end)
+
+-- (CART-2029, flowpath FLOW-0182's hunt b13 / b11 / b14: a NATIVE __index handler was read as a prototype TABLE — the
+-- load got the native's absent fields: OBS empty and UNTAINTED, where Lua's assert(t, "x") answers t. Its call has no
+-- IR here (no instruction stands for a handler a load runs), so in the dump it is a LOST call: the load tainted)
+test('flowdump: a native __index handler is a lost call in the dump — the load is tainted, never empty (CART-2029)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (the destinations of the IR's `load` of field x: A.x)
+    local function rets(D)
+        local out = {}
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do if i[1] == 'load' and D.names.fields[i[4] + 1] == 'x' then out[#out + 1] = i[2] end end
+        end
+        return out
+    end
+    for _, h in ipairs({ 'assert', 'next', 'debug.traceback' }) do
+        local D = dump('local A = setmetatable({}, { __index = ' .. h .. ' })\nreturn A.x\n')
+        local r = rets(D)
+        ok(#r == 1 and vim.tbl_contains(D.solution.taint.ports, r[1]), h .. ' as __index: the load A.x is tainted: ' .. vim.inspect(r))
+        eq(0, flowcheck.check(D).failed, h .. ': closed')
+    end
+    -- (a lost call hands its arguments out: the table KEY a dynamic load passes the handler escapes. Its object escapes
+    -- with it, so a later dynamic load's key escapes by that route too — dynamic-load-key)
+    local E = dump('local B = setmetatable({}, { __index = debug.traceback })\nlocal K = {}\nlocal y = B.x\nreturn B[K]\n')
+    local lab = {}
+    for _, x in ipairs(E.sites) do lab[x.id] = x.label end
+    local esc = {}
+    for _, i in ipairs(E.solution.taint.escaped) do esc[tostring(lab[i])] = true end
+    ok(esc['tbl:m.lua:' .. (select(2, CLASSES:gsub('\n', '')) + 1) .. ':10'], 'K, the key B[K] hands debug.traceback, escapes: ' .. vim.inspect(esc))
+    local P = dump('local A = setmetatable({}, { __index = { x = 1 } })\nreturn A.x\n')
+    eq(0, #P.solution.taint.ports, 'a TABLE __index is a prototype: nothing tainted')
+end)

@@ -1161,8 +1161,11 @@ local function build(store, opts)
     -- EITHER side gains one; linking only on t's arrivals lost an idx object that came later, an ORDER-dependent miss)
     local protos_rev = {}
     local function protolink(o, c, lua)
-        if lua and fnports[c] then -- (a lua __index FUNCTION: each load on o calls it, CART-1703 — and it stays a prototype:
-            -- the field rosters see a function there and refuse, rename-field / reshape)
+        -- (a lua __index FUNCTION: each load on o calls it, CART-1703 — and it stays a prototype: the field rosters see a
+        -- function there and refuse, rename-field / reshape. A NATIVE one too — `__index = assert` answers the table:
+        -- bindcall runs its model, or the call is lost and the load tainted. As a table it had read the native's absent
+        -- fields: nothing, untainted, CART-2029)
+        if lua and (fnports[c] or G7.NATIVE[c]) then
             local m = IDXFN[o]
             if not m then m = {}; IDXFN[o] = m end
             if not m[c] then
@@ -1401,6 +1404,21 @@ local function build(store, opts)
             if f ~= '[]' then addobj(kp, typeobj(f == '#' and 'number' or 'string')) end
             -- (a builtin's key the solve cannot name may be a number too — gsub's position capture, CART-2007)
             if f == G7.MISSK then addobj(kp, typeobj('number')) end
+        end
+        -- (a NATIVE handler's model makes fresh ports at each run — next's own `{k}` load on a table whose __index is next
+        -- re-entered it without end. Its call is the same for one (handler, object, key): ONE result and error port,
+        -- made first, each load a copy of them — a lost call taints them and so each load, CART-2029)
+        if G7.NATIVE[g] then
+            local mk = g .. ':' .. o .. ':' .. kp
+            local m = G7.NIDX[mk]
+            if not m then
+                m = { new(), new() }; G7.NIDX[mk] = m
+                bindcall(g, { op, kp }, m[1], nil, m[2])
+            end
+            edge(m[1], dst)
+            local ce = G7.lerget(dst)
+            if ce then edge(m[2], ce) end
+            return
         end
         bindcall(g, { op, kp }, dst, nil, G7.lerget(dst))
     end
@@ -2360,6 +2378,7 @@ local function build(store, opts)
     -- states it a FIXED host site (host prim), which the E-tables drop. (A string METHOD runs its builtin's model once
     -- the receiver holds a string — G7.SMC, CART-2007; nested namespaces such as vim.fn wait for the models)
     G7.NOESC, G7.NATIVE, G7.NATOBJ, G7.NATKEYS, G7.TEXTH, G7.NATLOST = {}, {}, {}, {}, {}, {}
+    G7.NIDX = {} -- (a native __index handler's call per (handler, object, key port): idxcall, CART-2029)
     -- (★ A SCALAR'S TYPE OBJECT NEVER ESCAPES, CART-1869: type:string, number, boolean, nil stand for VALUES — no table
     -- outside code may write. A handed table's key set holds type:string, and the escape closure had followed it; the
     -- string metatable and its __index, what a string reaches, are never-escaping library sites. Those made before here)

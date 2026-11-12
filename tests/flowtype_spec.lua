@@ -5069,3 +5069,45 @@ test('flowtype: a string key spelled with escapes is its value; a version\'s esc
     eq(B, objs.sinkg, 'a constant local "L\\105b" keys _G as Lib (litkeys): ' .. vim.inspect(objs))
     eq('tbl:lua/foo.lua:0:10', objs.sinkq, 'require("\\102oo") is the module foo: ' .. vim.inspect(objs))
 end)
+
+-- (CART-2029, flowpath's hunt0180 b11 / b13 / b14: a NATIVE as a metatable's __index was linked as a prototype TABLE —
+-- the load read the native's (absent) fields: `setmetatable({}, { __index = assert }).x` held nothing, untainted, where
+-- Lua calls assert(t, "x") and answers t. A native handler is CALLED as a Lua one is: its model runs — assert returns
+-- its arguments, next the table's keys — or, with none, the call is lost and the load's value tainted)
+test('flowtype: a native __index handler is called — its model answers, or the load is lost (CART-2029)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A = setmetatable({}, { __index = assert })',
+            'local function sinka(x) return x end',
+            'sinka(A.x)',
+            'local K = {}',
+            'local t = setmetatable({ [K] = true }, { __index = next })',
+            'local function sinkn(x) return x end',
+            'sinkn(t[nil])',
+            'local B = setmetatable({}, { __index = debug.traceback })',
+            'local function sinkb(x) return x end',
+            'sinkb(B.x)',
+            'local function sinke(x) return x end',
+            'local T = setmetatable({}, { __index = tostring, __tostring = function () error(K) end })',
+            'local okt, et = pcall(function () local v = T.x end)',
+            'sinke(et)',
+            'local P = { x = K }',
+            'local C = setmetatable({}, { __index = P })',
+            'local function sinkp(x) return x end',
+            'sinkp(C.x)' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq('tbl:m.lua:0:23', objs.sinka, 'assert(A, "x") is A: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinkn):find('tbl:m.lua:3:10', 1, true), 'next(t, nil) is a key of t, K: ' .. vim.inspect(objs))
+    eq('partial', objs.sinkb, 'debug.traceback has no model: a lost call, the load partial: ' .. vim.inspect(objs))
+    ok(tostring(objs.sinke):find('tbl:m.lua:3:10', 1, true), 'what a native handler raises — tostring runs __tostring, which raises K — reaches the load\'s pcall: ' .. vim.inspect(objs))
+    eq('tbl:m.lua:3:10', objs.sinkp, 'a TABLE __index is still a prototype: ' .. vim.inspect(objs))
+end)
