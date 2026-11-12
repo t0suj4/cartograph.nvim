@@ -967,6 +967,9 @@ local function build(store, opts)
         -- lookup reads EXT's `\1mt`, now EXT, and that call hands the value to unknown code)
         if o == G7.EXT or G7.XC[o] then if via then G7.eroot(dst, o, { 'proto', via }) else addobj(dst, o) end end
         local tn = TNAME[o]
+        -- (a function CALLED is called: its metatable's __call is never consulted — a closure, a C function, a host-typed
+        -- one, CART-2021)
+        if f == '\1mt' and G7.NOFNMT[dst] and (fnports[o] or G7.NATIVE[o] or (tn and G7.isfnty(tn))) then return end
         if tn then
             -- (a string's metatable __index is the string library: `s.f` and `s[k]` — a computed key too — read its fields,
             -- `string.pick = …` among them; `s[k]` had read nothing, an unexplained loadDyn in the dump, CART-1730)
@@ -1095,6 +1098,7 @@ local function build(store, opts)
     end
     local function field(x, f, strict) -- a LOAD x.f -> its result port
         local dst = new()
+        if G7.CALLRT then G7.NOFNMT[dst] = true end -- (a __call route's metatable: no function's, CART-2021)
         -- (a RAW load — rawget, next / pairs' value — reads the object's own entries: no prototype, no __index handler,
         -- now or when one is linked later. It had run both: rawget(W, "k") called W's handler, CART-2010)
         if G7.RAWLOAD then G7.RAWDST[dst] = true end
@@ -1490,13 +1494,24 @@ local function build(store, opts)
     -- deeper level is one merged port closed over its own `__call` (a fixpoint: cycles stop), called with that port
     -- first and every earlier callee and argument after it as one spread — an over-approximation of the positions.
     -- The 5.4 rules hold unless the profile STATES an older version: an unstated one covers every version's behaviour
+    -- (a CALL's __call route reads the callee's metatable — but a FUNCTION called is called, never its __call: Lua
+    -- consults __call only for a value that is no function. Since a function may hold a metatable — debug.setmetatable,
+    -- CART-2021 — the route's `\1mt` ports are marked at creation, G7.CALLRT, and skip every function object)
+    G7.NOFNMT = {}
+    function G7.mtport(x, mm)
+        if mm ~= '__call' then return field(x, '\1mt', true) end
+        G7.CALLRT = true
+        local mp = field(x, '\1mt', true)
+        G7.CALLRT = nil
+        return mp
+    end
     local function metacall(x, mm, args, res, cerr, site)
-        local h = field(field(x, '\1mt', true), mm) -- (non-strict: a handler written `mt[k] = f` counts)
+        local h = field(G7.mtport(x, mm), mm) -- (non-strict: a handler written `mt[k] = f` counts)
         METAH[h] = mm
         callc(h, args, res, site, cerr)
         local pre54 = G7.LUAVSTATED and G7.LUAVER < 54 -- (a version the profile STATES; unstated: every version's behaviour)
         if mm == '__call' and pre54 then return end
-        local h2 = field(field(h, '\1mt', true), '__call')
+        local h2 = field(G7.mtport(h, '__call'), '__call')
         METAH[h2] = '__call'
         local a2 = { h }
         for _, ap in ipairs(args) do a2[#a2 + 1] = ap end
@@ -1505,7 +1520,7 @@ local function build(store, opts)
         if pre54 then return end
         local hs, va = new(), new()
         edge(h2, hs)
-        local hc = field(field(hs, '\1mt', true), '__call')
+        local hc = field(G7.mtport(hs, '__call'), '__call')
         METAH[hc] = '__call'
         edge(hc, hs)
         for _, ap in ipairs(a2) do edge(ap, va) end

@@ -4955,3 +4955,36 @@ test('flowtype: number and boolean values hold their type objects; nil stays emp
     eq({ 'type:number' }, objs('BW'), 'a bitwise operator')
     eq({ 'type:number', 'type:string' }, objs('SN'), 'a string and a number: two types')
 end)
+
+-- (CART-2021: once a FUNCTION may hold a metatable — debug.setmetatable(f, mt) — a call's __call route read every
+-- function callee's metatable and ran its __call: `f()` returned the handler's result too. Lua calls a function as a
+-- function; __call is consulted only for a value that is no function. Sound, but every call of every function in such a
+-- program gained the handler's results. The route fixtures cannot see it — the answer was a superset)
+test('flowtype: a function CALLED never runs its metatable\'s __call — a callable table still does (CART-2021)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local A, Z, T = {}, {}, {}',
+            'local function sinkf(x) return x end',
+            'local function sinkp(x) return x end',
+            'local function sinkt(x) return x end',
+            'local function f() return Z end',
+            'debug.setmetatable(f, { __call = function () return A end })',
+            'sinkf(f())',
+            'sinkp(print())',
+            'local c = setmetatable({}, { __call = function () return T end })',
+            'sinkt(c())' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    local A, Z, T = 'tbl:m.lua:0:16', 'tbl:m.lua:0:20', 'tbl:m.lua:0:24'
+    eq(Z, objs.sinkf, 'f() is f\'s result only: ' .. vim.inspect(objs))
+    ok(not tostring(objs.sinkp):find(A, 1, true), 'a C function called runs no __call either: ' .. vim.inspect(objs))
+    eq(T, objs.sinkt, 'a callable TABLE runs its __call: ' .. vim.inspect(objs))
+end)
