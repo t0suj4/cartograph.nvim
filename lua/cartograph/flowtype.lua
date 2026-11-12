@@ -4190,17 +4190,25 @@ local function build(store, opts)
                 -- and 5.4: getinfo(2, "S").func is nil — no flow and no gap; the THREAD form names a frame of that
                 -- coroutine: any function)
                 local function numlit(x) return x and x:type() == 'number' and tonumber(txt(x)) or nil end
+                -- (a string literal's VALUE, escapes decoded — `'\102'` is "f": read as source text it had no f, and func
+                -- was dropped with no gap, CART-2024. Evaluated as the literal it is, in an empty environment)
                 local function strlit(x)
                     if not (x and x:type() == 'string') then return nil end
-                    local c = x:field('content')[1]
-                    return c and txt(c) or ''
+                    local f = load('return ' .. txt(x), '=lit', 't', {})
+                    local okv, v
+                    if f then okv, v = pcall(f) end
+                    return okv and type(v) == 'string' and v or nil
                 end
                 local a1, top0 = argn[1], fnstack[#fnstack]
                 local thr = a1 and not numlit(a1) and numlit(argn[2]) ~= nil
                 local what = strlit(argn[thr and 3 or 2])
-                local lvl = not thr and numlit(a1) or nil
+                -- (a STRING level is a level: Lua coerces '2' — a literal numeric string is that level, CART-2024; any
+                -- other string raises — no func)
+                local slv = not thr and strlit(a1)
+                local lvl = not thr and (numlit(a1) or (slv and tonumber(slv))) or nil
                 local fport = ofp(to, 'func')
                 if what and not what:find('f', 1, true) then -- (no `func` field)
+                elseif slv and not lvl then -- (a non-numeric string: getinfo raises)
                 elseif thr then
                     G7.GETINFOS[#G7.GETINFOS + 1] = { fn = G7.REC and G7.W and G7.cur() or nil, func = fport, obj = to, any = true }
                 elseif lvl == 1 and top0 and top0.obj then
@@ -4667,7 +4675,8 @@ local function build(store, opts)
                         i = i + 1
                         local p = declare(txt(v))
                         V[i] = p
-                        if i == 1 and fname_ipairs then numeric[p] = true end
+                        -- (ipairs' index is a NUMBER: it held nothing, CART-2024)
+                        if i == 1 and fname_ipairs then numeric[p] = true; addobj(p, typeobj('number')) end
                         if i == 2 and vp then edge(vp, p) end
                         if i == 1 and kp then edge(kp, p) end
                     end
@@ -4686,7 +4695,9 @@ local function build(store, opts)
                     for _, x in tsutil.inamed, cl, -1 do
                         if x:type() == 'identifier' then
                             local p = declare(txt(x))
-                            if cl:type() == 'for_numeric_clause' then numeric[p] = true end
+                            -- (a numeric for's index is a NUMBER: `for i = 2, 2 do x = i end` left x's set empty, so a
+                            -- "may this be a number" test — getinfo's level — missed it, CART-2024)
+                            if cl:type() == 'for_numeric_clause' then numeric[p] = true; addobj(p, typeobj('number')) end
                         else expr(x) end
                     end
                 end
@@ -5277,7 +5288,8 @@ local function build(store, opts)
                 else
                     for o in each(gi.arg) do
                         local tn = TNAME[o]
-                        if tn == 'number' or tn == 'integer' or tn == 'thread' or o == EXT or G7.XC[o] or tostring(obinfo[o] or ''):match('^thread:') then any = true; break end
+                        -- (a STRING may be a numeric one — `tostring(2)`: a level, CART-2024)
+                        if tn == 'number' or tn == 'integer' or tn == 'string' or tn == 'thread' or o == EXT or G7.XC[o] or tostring(obinfo[o] or ''):match('^thread:') then any = true; break end
                     end
                 end
             end

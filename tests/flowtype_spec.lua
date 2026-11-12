@@ -4988,3 +4988,26 @@ test('flowtype: a function CALLED never runs its metatable\'s __call — a calla
     ok(not tostring(objs.sinkp):find(A, 1, true), 'a C function called runs no __call either: ' .. vim.inspect(objs))
     eq(T, objs.sinkt, 'a callable TABLE runs its __call: ' .. vim.inspect(objs))
 end)
+
+-- (CART-2024, flowpath FLOW-0179's hunt n3: a numeric for's index — and ipairs' — held NO number site:
+-- `for i = 2, 2 do x = i end` left x's set empty, so a "may this be a number" test missed it)
+test('flowtype: a numeric for\'s index and ipairs\' index hold a number (CART-2024)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['m.lua'] = table.concat({
+            'local function sinkn(x) return x end',
+            'local function sinki(x) return x end',
+            'for i = 2, 2 do sinkn(i) end',
+            'for i, v in ipairs({ 1 }) do sinki(i) end' }, '\n') .. '\n',
+    })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    vim.fn.delete(root, 'rf')
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq('type:number', objs.sinkn, 'the numeric for\'s index: ' .. vim.inspect(objs))
+    eq('type:number', objs.sinki, 'ipairs\' index: ' .. vim.inspect(objs))
+end)

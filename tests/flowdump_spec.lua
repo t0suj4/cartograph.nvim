@@ -1354,6 +1354,38 @@ test('flowdump: debug.getinfo\'s func is the named function; another level is th
     for _, l in ipairs(held) do ok(not tostring(l):match('^thread:'), 'the thread is not func: ' .. vim.inspect(held)) end
 end)
 
+-- (CART-2024, flowpath FLOW-0179's hunt — probes/debuglib n3, x7, x10, x16, x17; lua5.1, LuaJIT and 5.4 agree: a level
+-- the rule could not read as one had made func NOTHING with no gap — `what` spelled with an escape ('\102' is "f"), a
+-- STRING level ('2', tostring(2): Lua coerces it), a numeric for's index (it held no number site))
+test('flowdump: getinfo reads an escaped `what`, a string level and a for index as what Lua does (CART-2024)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(src)
+        local D = dump(src)
+        local n = 0
+        for _, g in ipairs(D.gaps) do if g.kind == 'debug-getinfo' then n = n + 1 end end
+        local lab, fid, held = {}, nil, {}
+        for _, st in ipairs(D.sites) do lab[st.id] = st.label end
+        for i, nm in ipairs(D.names.fields) do if nm == 'func' then fid = i - 1 end end
+        for _, e in ipairs(D.solution.h) do
+            if e[2] == fid and tostring(lab[e[1]]):match('^getinfo:') then for _, o in ipairs(e[3]) do held[#held + 1] = lab[o] end end
+        end
+        return n, held
+    end
+    local G = '\nlocal function g() local r = who(); return r end\nprint(use(g()))\n'
+    eq(1, (run('local function who() return debug.getinfo(2, "\\102").func end' .. G)), 'an escaped "f": func exists — the gap')
+    eq(1, (run('local function who() return debug.getinfo("2", "f").func end' .. G)), 'a string level "2": the gap')
+    eq(1, (run('local lv = tostring(2)\nlocal function who() return debug.getinfo(lv, "f").func end' .. G)),
+        'a computed string level: the gap')
+    eq(1, (run('local function who() local x; for i = 2, 2 do x = i end; return debug.getinfo(x, "f").func end' .. G)),
+        'a numeric for\'s index as the level: the gap')
+    local n, held = run('local function g() return debug.getinfo("1", "f").func end\nprint(use(g()))\n')
+    eq(0, n, 'a string level "1": the calling function, no gap')
+    ok(#held == 1 and tostring(held[1]):find('::g@', 1, true), 'a string level "1": func is g: ' .. vim.inspect(held))
+    -- (the other side: an escape that spells no "f", and a non-numeric string — getinfo raises — have no func)
+    eq(0, (run('local function who() return debug.getinfo(2, "\\83").func end' .. G)), '"\\83" is "S": no func, no gap')
+    eq(0, (run('local function who() return debug.getinfo("x", "f").func end' .. G)), 'a non-numeric string raises: no gap')
+end)
+
 -- (CART-2013, flowpath FLOW-0049: debug.sethook BY IDENTITY — the native's model calls the hook, tagged host:sethook,
 -- for a call the text rule did not recognise: `local d = debug; d.sethook(h, "c")` had called no hook, a certified
 -- answer missing the hook's error. The spelled forms keep their one call; a shadowed `debug` calls nothing)
