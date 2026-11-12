@@ -1626,11 +1626,41 @@ local function build(store, opts)
             end
         end
         M0['select'] = function (a, rl) for _, r in ipairs(rl) do for j = 2, #a do edge(a[j], r); G7.emit({ 'copy', r, a[j] }) end end end
-        local function elems(a, rl)
-            if a[1] then local el = field(a[1], '[]'); local k = K(); for _, r in ipairs(rl) do edge(el, r); G7.emit({ 'loadRaw', r, a[1], k }) end end
+        -- ★ BY VALUE TOO, THE TABLE BUILTINS RUN THE VERSION'S METAMETHODS (CART-2012; checked: lua5.1 / LuaJIT run none,
+        -- lua5.2 __len only, lua5.4 all): unpack, table.concat / insert / remove / sort take the length through __len
+        -- (5.2+) and read the elements through __index, remove and sort write them through __newindex (5.3+:
+        -- lua_geti / lua_seti). By name the walk's own path runs them (CART-2014 / 2007); the MODELS — a builtin
+        -- reached by value, `L.f = table.concat; L.f(t)` — read raw and ran no handler: a __len or __index function
+        -- was never called. Unstated: every version's behaviour; a stated 5.1 / 5.2 reads raw (rawget's RAWLOAD)
+        function G7.tblen(t, cerr)
+            if not G7.since(52) then return end
+            local hr = new()
+            metacall(t, '__len', { t, t }, hr, cerr); G7.emit({ 'op', hr, { t, t }, '__len' })
+        end
+        function G7.tbread(t, r, k, irx) -- (irx: the IR load's destination, when it is not r)
+            -- (the load's KEY is the template's: a handler h(t, k) is called with it, as the IR's loadDyn says)
+            if G7.since(53) then G7.NEXTK = k; edge(field(t, '[]'), r); G7.emit({ 'load', irx or r, t, '[]', k }); return end
+            G7.RAWLOAD = true; local d = field(t, '[]'); G7.RAWLOAD = nil
+            edge(d, r); G7.emit({ 'loadRaw', irx or r, t, k })
+        end
+        function G7.tbwrite(t, v, cerr)
+            if not G7.since(53) then return end
+            local kp = K()
+            metastore(t, '#', kp, v, cerr); G7.emit({ 'store', t, '#', v })
+        end
+        local function elems(a, rl, cerr)
+            if not a[1] then return end
+            G7.tblen(a[1], cerr)
+            local k = K()
+            for _, r in ipairs(rl) do G7.tbread(a[1], r, k) end
         end
         M0['unpack'], M0['table#unpack'] = elems, elems
-        M0['table#remove'] = function (a, rl) if a[1] then edge(field(a[1], '[]'), rl[1]); G7.emit({ 'loadRaw', rl[1], a[1], K() }) end end
+        M0['table#remove'] = function (a, rl, cerr)
+            if not a[1] then return end
+            G7.tblen(a[1], cerr)
+            G7.tbread(a[1], rl[1] or new(), K())
+            G7.tbwrite(a[1], new(), cerr) -- (t[#t] = nil)
+        end
         M0['rawget'] = function (a, rl)
             if not a[1] then return end
             G7.RAWLOAD = true; local d = field(a[1], '[]'); G7.RAWLOAD = nil -- (raw: no __index, no prototype, CART-2010)
@@ -1648,6 +1678,7 @@ local function build(store, opts)
         -- lacked: 64 certificate refusals on WoW, CART-1795)
         M0['table#insert'] = function (a, _, cerr)
             if not (a[1] and #a >= 2) then return end
+            G7.tblen(a[1], cerr) -- (CART-2012)
             local v = a[#a]
             storec(a[1], '#', v)
             local kp = new(); addobj(kp, typeobj('number'))
@@ -1691,10 +1722,12 @@ local function build(store, opts)
         M0['error'] = function (a, _, cerr) if a[1] and cerr then edge(a[1], cerr); G7.emit({ 'error', a[1] }) end end
         M0['table#sort'] = function (a, _, cerr)
             if not a[1] then return end
-            local el = field(a[1], '[]')
+            G7.tblen(a[1], cerr) -- (CART-2012: its length, its elements read and written back through the metamethods)
+            local el = new()
+            G7.tbread(a[1], el, K())
+            G7.tbwrite(a[1], el, cerr)
             -- (no comparator: the elements' __lt, as by name — CART-1793)
             if a[2] then
-                G7.emit({ 'loadRaw', el, a[1], K() })
                 local r = new()
                 G7.callc(a[2], { el, el }, r, nil, cerr); G7.emit({ 'call', { r }, a[2], { el, el } })
             else metacall(el, '__lt', { el, el }, new(), cerr) end
@@ -1920,6 +1953,17 @@ local function build(store, opts)
         end
         M0['pcall'], M0['xpcall'] = pc(false), pc(true)
         for _, k in ipairs { 'type', 'table#concat' } do M0[k] = prim('string') end
+        -- (table.concat reads its list: length and elements, through the metamethods by version — CART-2012)
+        M0['table#concat'] = function (a, rl, cerr)
+            primv(rl[1], 'string')
+            if not a[1] then return end
+            G7.tblen(a[1], cerr)
+            -- (the elements are read for their handlers alone — what they hold becomes the string: the IR's load goes
+            -- into a ⊤ variable the solve leaves EMPTY, so nothing escapes; the certificate takes a dynamic load only
+            -- into ⊤. The solve's own load, into a port of its own, runs the handlers)
+            local x = new(); settop(x)
+            G7.tbread(a[1], new(), K(), x)
+        end
         M0['tonumber'], M0['rawlen'], M0['rawequal'] = prim('number'), prim('integer'), prim('boolean')
     end
     local EXT = newobj('external')
@@ -4235,7 +4279,7 @@ local function build(store, opts)
             -- table.concat / insert / remove take the table's length through __len (5.2+); math.max / min compare through
             -- __lt (5.3+) and return the winning ARGUMENT itself — a table among them too. By name; they had run nothing
             if G7.since(52) and aps[1] and (fname == 'unpack' or fname == 'table.unpack' or fname == 'table.concat'
-                    or fname == 'table.insert' or fname == 'table.remove') then
+                    or fname == 'table.insert' or fname == 'table.remove' or fname == 'table.sort') then -- (sort: lua5.2 checked, CART-2012)
                 metacall(aps[1], '__len', { aps[1], aps[1] }, new(), curerr())
             end
             if G7.since(53) and (fname == 'math.max' or fname == 'math.min') and #aps >= 2 then

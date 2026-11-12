@@ -3186,3 +3186,38 @@ test('flowdump: print calls the global tostring; debug.setmetatable returns a bo
     eq({ 'type:boolean', 'type:number' }, stored(M, 'r'), 'unstated (ver 51): true, and 5.2+\'s target')
     eq(0, flowcheck.check(M).failed, 'closed')
 end)
+
+-- (CART-2012: a table builtin BY VALUE inlines its template, and the templates were raw — a loadRaw, no __len: Lua 5.3+
+-- reads through __index (a handler h(t, k) runs) and 5.2+ takes __len. Unstated (ver 51 covers every version): the
+-- template's load is a loadDyn whose key reaches the handler — closed — and table.concat's, read for its handlers
+-- alone, goes into a ⊤ variable that holds nothing, so the dump still certifies)
+test('flowdump: table builtins by value read through __index and take __len (CART-2012)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function ops(D)
+        local o = {}
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                local nm = i[1]
+                if nm == 'op' then nm = 'op:' .. tostring(D.names.fields[i[4] + 1]) end
+                o[nm] = (o[nm] or 0) + 1
+            end
+        end
+        return o
+    end
+    local C = dump('local L = { c = table.concat }\nlocal H = setmetatable({}, { __len = function () return 1 end, __index = function (t, k) return "s" end })\nL.c(H)\n')
+    local o = ops(C)
+    eq(1, o.loadDyn, 'concat reads its list: ' .. vim.inspect(o))
+    eq(1, o['op:__len'], 'and takes its length')
+    local dyn
+    for _, F in ipairs(C.functions) do for _, i in ipairs(F.body) do if i[1] == 'loadDyn' then dyn = i[2] end end end
+    ok(vim.tbl_contains(C.solution.taint.ports, dyn), 'into a ⊤ variable')
+    eq({}, C.solution.taint.escaped_root, 'that escapes nothing')
+    eq(0, flowcheck.check(C).failed, 'closed: the handler\'s key holds the load\'s')
+    local U = dump('local L = { u = unpack }\nlocal T = setmetatable({}, { __index = function (t, k) return a end })\nreturn L.u(T)\n')
+    local ou = ops(U)
+    eq(1, ou.loadDyn, 'unpack reads through __index: ' .. vim.inspect(ou))
+    eq(nil, ou.loadRaw, 'not raw')
+    -- (closed but for the metatable slot a loadDyn ranges over here — the walker's own `unpack(T)` fails the same, CART-2037)
+    local cu = flowcheck.check(U)
+    for k in pairs(cu.counts) do eq('untagged loadDyn:field*META(model)', k, 'only the metatable slot: ' .. vim.inspect(cu.fails)) end
+end)

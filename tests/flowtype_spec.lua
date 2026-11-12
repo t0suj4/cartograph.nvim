@@ -5205,3 +5205,79 @@ test('flowtype: print calls the global tostring before 5.4; debug.setmetatable r
     eq({ sinkt = '', sinkr = 'type:number', sinkn = '' }, run('5.4'), '5.4: print calls no global')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2012: a table builtin reached BY VALUE runs its model, and the models were raw — a __len or __index FUNCTION
+-- never ran: `L.c = table.concat; L.c(H)` called no handler. Checked: lua5.1 / LuaJIT run none, lua5.2 __len (sort
+-- too), lua5.4 __len, __index on every read and __newindex on remove's / sort's writes. Unstated: every version's)
+test('flowtype: table builtins by value run __len (5.2+) and __index / __newindex (5.3+) (CART-2012)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local L = { u = unpack, r = table.remove, s = table.sort, c = table.concat, i = table.insert }',
+        'local A = {}',
+        'local P = { A }',
+        'local function sinku(x) return x end',
+        'local function sinkr(x) return x end',
+        'local function sinks(x) return x end',
+        'local function sinkh(x) return x end',
+        'local function sinkl(x) return x end',
+        'local function sinkw(x) return x end',
+        'local function sinkx(x) return x end',
+        'local function sinky(x) return x end',
+        'local T = setmetatable({}, { __index = P })',
+        'sinku(L.u(T))',
+        'sinkr(L.r(T))',
+        'L.s(T, function (a, b) sinks(a); return false end)',
+        'local H = setmetatable({}, { __index = function (t, k) sinkh(t); return "s" end })',
+        'L.c(H)',
+        'local N = setmetatable({}, { __len = function (t) sinkl(t); return 0 end })',
+        'L.i(N, 1)',
+        'local W = setmetatable({}, { __len = function () return 1 end, __newindex = function (t, k, v) sinkw(t) end })',
+        'L.r(W)',
+        'local S2 = setmetatable({}, { __len = function (t) sinkx(t); return 0 end })',
+        'L.s(S2)',
+        'local S3 = setmetatable({}, { __len = function (t) sinky(t); return 0 end })',
+        'table.sort(S3)',
+        'local function sinkv(x) return x end',
+        'local U2 = setmetatable({}, { __len = function (t) sinkv(t); return 0 end })',
+        'L.u(U2)',
+        'local function sinkz(x) return x end',
+        'local Z = setmetatable({}, { __len = function () return 2 end, __index = function (t, k) return k end, __newindex = function (t, k, v) sinkz(t); rawset(t, k, v) end })',
+        'L.s(Z, function () return true end)',
+        'local function sinkk(x) return x end',
+        'local K = setmetatable({}, { __len = function () return 1 end, __index = function (t, k) sinkk(k) end })',
+        'L.u(K)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        P.load = function (nm, ...) if nm == 'stub' then return { lua_version = lv } end return old(nm, ...) end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        local objs = {}
+        for _, c in ipairs(store.data.calls) do
+            local nm = (c.to or ''):match('::(sink%a)@')
+            if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+        end
+        return objs
+    end
+    local A, H, N, W, S2, S3 = 'tbl:m.lua:1:10', 'tbl:m.lua:15:23', 'tbl:m.lua:17:23', 'tbl:m.lua:19:23', 'tbl:m.lua:21:24', 'tbl:m.lua:23:24'
+    local U2, Z = 'tbl:m.lua:26:24', 'tbl:m.lua:29:23'
+    local all = { sinku = A, sinkr = A, sinks = A, sinkh = H, sinkl = N, sinkw = W, sinkx = S2, sinky = S3, sinkv = U2, sinkz = Z }
+    -- (the handler's KEY: the template's number — the string beside it is CART-2036's lookup)
+    local function key(o) local k = o.sinkk; o.sinkk = nil; return k end
+    local o = run(nil)
+    ok(tostring(key(o)):find('type:number', 1, true), 'unstated: __index(t, k) is called with the read\'s numeric key')
+    eq(all, o, 'unstated: every version\'s — the handlers run, the prototype is read')
+    o = run('5.4')
+    ok(tostring(key(o)):find('type:number', 1, true), '5.4: the key')
+    eq(all, o, '5.4: all')
+    o = run('5.1')
+    eq('', key(o), '5.1: no handler')
+    eq({ sinku = '', sinkr = '', sinks = '', sinkh = '', sinkl = '', sinkw = '', sinkx = '', sinky = '', sinkv = '', sinkz = '' }, o, '5.1: raw, none')
+    o = run('5.2')
+    o.sinkh, o.sinkk = nil, nil -- (5.2 reads raw, but __len's lookup runs a FUNCTION __index: CART-2036)
+    eq({ sinku = '', sinkr = '', sinks = '', sinkl = N, sinkw = '', sinkx = S2, sinky = S3, sinkv = U2, sinkz = '' }, o, '5.2: __len alone (sort\'s, by name too)')
+    vim.fn.delete(root, 'rf')
+end)
