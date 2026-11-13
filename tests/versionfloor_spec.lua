@@ -685,6 +685,7 @@ local LUA_NEAR = {
     { 'local s = [=[ [[ ]=]', '[[ inside a LEVEL-1 long string' },
     { '--[==[ [[ ]==]\nlocal x = 1', '[[ inside a level-2 long comment' },
     { 'local x = 0x1p4 + 0xFF', 'an unsigned hex exponent (5.1 reads it through strtod) and a plain hex' },
+    { 'local x = 0xab + 0xbb', 'a hex numeral holding the digit b is no 0b binary literal (CART-2039)' },
     { 'local f = g(\n  1)', 'a ( on the callee\'s own line' },
     { 'local t = f\n{ 1 }', 'a table argument on the next line (only ( is ambiguous)' },
 }
@@ -725,10 +726,15 @@ test('versionfloor lua: the versions are the interpreters\' answers, LuaJIT kept
     eq(false, F['break-not-last'].luajit, 'LuaJIT refuses a mid-block break, as 5.1 does')
     eq(false, F['int-div'].luajit, 'LuaJIT refuses //')
     -- the one entry with no version, and why: loading is not its question, meaning is
-    local feats, dropped = vf.lua_features(D)
+    local feats, dropped, jitonly = vf.lua_features(D)
     eq({ ['escape-u'] = F['escape-u'].why }, dropped, 'only \\u{} goes without a version')
     ok(F['escape-u'].why:find('removal', 1, true), '5.1 accepts it, 5.2 refuses it: ' .. F['escape-u'].why)
-    eq(#vf.LUA_SYNTAX - 1, #feats, 'every other detector is in the floor table')
+    -- (LuaJIT's own numerals: every PUC interpreter refuses them, LuaJIT accepts — LuaJIT-only, CART-2039)
+    local jo = {}
+    for _, f in ipairs(jitonly) do jo[#jo + 1] = f.id end
+    table.sort(jo)
+    eq({ 'binary-literal', 'imaginary-literal', 'int64-literal' }, jo, 'the LuaJIT-only syntax, by the interpreters\' answers')
+    eq(#vf.LUA_SYNTAX - 1 - #jitonly, #feats, 'every other detector is in the floor table')
     eq(#vf.LUA_SYNTAX, D.detectors, 'the artifact was distilled from this detector set')
 end)
 
@@ -781,4 +787,47 @@ test('versionfloor lua: the report names the PUC ruler, the guessed version and 
     ok(text:find('removals are not modelled', 1, true), 'no ceiling table, said plainly')
     ok(not text:find('ECMAScript does not remove', 1, true), 'and not ECMAScript\'s sentence')
     vim.fn.delete(root, 'rf')
+end)
+
+-- ★ THE LuaJIT COLUMN AND THE DECLARED SIDE (CART-2039): LuaJIT's own numerals (1LL, 1ULL, 1i, 0b101) no PUC version
+-- accepts were reported nowhere; and the project's declared dialect (luadialect.resolve: .luarc, .luacheckrc, a Neovim
+-- plugin's layout) was never the answer key. LuaJIT-only syntax is listed BESIDE the PUC floor, never on it; a LuaJIT
+-- declaration is checked against the LuaJIT column, a PUC one against the floor and against LuaJIT-only syntax
+test('versionfloor lua: LuaJIT-only syntax is reported beside the floor, and the declared dialect is checked (CART-2039)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local function report(files)
+        local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+        for name, lines in pairs(files) do vim.fn.mkdir(vim.fn.fnamemodify(root .. '/' .. name, ':h'), 'p'); write(root, name, lines) end
+        local data = ts.extract(root); data.root = root
+        store.ingest(data)
+        local facts, stats = vf.facts(store)
+        local text = table.concat(vf.report(store), '\n')
+        vim.fn.delete(root, 'rf')
+        return text, facts, stats
+    end
+    local JIT = { 'local M = {}', 'function M.f() return 1LL + 0b101 end', 'return M' }
+    -- no declaration: LuaJIT-only listed, kept off the floor and off the facts portability reads
+    local t, facts, stats = report({ ['a.lua'] = JIT })
+    eq(0, #facts, 'no PUC fact: LuaJIT-only syntax has no PUC version')
+    eq(2, #stats.jitonly, 'both numerals found')
+    ok(t:find('LuaJIT-ONLY syntax — no PUC Lua version accepts it, 2 site(s):', 1, true), t)
+    ok(t:find('1LL / 1ULL 64-bit integer literal', 1, true) and t:find('0b101 binary literal', 1, true), t)
+    -- a PUC declaration (.luarc.json: Lua 5.4) with LuaJIT-only syntax: a broken promise
+    t = report({ ['a.lua'] = JIT, ['.luarc.json'] = { '{ "runtime.version": "Lua 5.4" }' } })
+    ok(t:find('BROKEN PROMISE — .luarc.json declares Lua 5.4, but the code uses LuaJIT-only syntax, which Lua 5.4 refuses', 1, true), t)
+    -- a LuaJIT declaration: checked against the LuaJIT column — // refused, goto accepted
+    local LJ = { ['.luarc.json'] = { '{ "runtime.version": "LuaJIT" }' } }
+    LJ['a.lua'] = { 'local M = {}', 'function M.f(a) return a // 2 end', 'return M' }
+    t = report(LJ)
+    ok(t:find('BROKEN PROMISE — .luarc.json declares LuaJIT, but LuaJIT refuses 1 site(s), first // floor division at a.lua:2', 1, true), t)
+    ok(not t:find('open-ended', 1, true), 'a LuaJIT declaration is not "open-ended": ' .. t)
+    LJ['a.lua'] = { 'local M = {}', 'function M.f() goto done ::done:: end', 'return M' }
+    t = report(LJ)
+    ok(t:find('✓ .luarc.json declares LuaJIT, and LuaJIT accepts every site found', 1, true), t)
+    -- a PUC declaration the floor satisfies: the generic invariant, on the PUC ruler
+    t = report({ ['a.lua'] = { 'local M = {}', 'function M.f() goto done ::done:: end', 'return M' },
+        ['.luarc.json'] = { '{ "runtime.version": "Lua 5.4" }' } })
+    ok(t:find('.luarc.json declares Lua 5.4; no detected feature needs past 5.2', 1, true), t)
 end)

@@ -329,26 +329,43 @@ M.LUA_SYNTAX = {
     { id = 'attrib-close', desc = 'local x <close>', node = 'attribute',
         test = function (n, src) return lua_text(n, src):match('^<%s*close%s*>$') ~= nil end,
         snippets = { 'local x <close> = nil' } },
+    -- LuaJIT's OWN numerals (CART-2039): no PUC version accepts them, LuaJIT does — the distill says so, and they are
+    -- reported as LuaJIT-only (M.LUAJIT_ONLY), never as a PUC floor
+    { id = 'int64-literal', desc = '1LL / 1ULL 64-bit integer literal', node = 'number',
+        test = function (n, src) return lua_text(n, src):match('[lL][lL]$') ~= nil end,
+        snippets = { 'local x = 1LL', 'local x = 1ULL', 'local x = 0x10ull' } },
+    { id = 'imaginary-literal', desc = '1i imaginary literal', node = 'number',
+        test = function (n, src) return lua_text(n, src):match('^[%d%.]+[iI]$') ~= nil end,
+        snippets = { 'local x = 1i', 'local x = 2.5i' } },
+    { id = 'binary-literal', desc = '0b101 binary literal', node = 'number',
+        test = function (n, src) return lua_text(n, src):match('^0[bB]') ~= nil end,
+        snippets = { 'local x = 0b101' } },
 }
 
 --- The Lua table: each detector joined with its DISTILLED version. Returns the
 --- feature list and the ids left out with why (exposed for the spec and the tool).
 function M.lua_features(dist)
-    local feats, dropped = {}, {}
+    local feats, dropped, jitonly = {}, {}, {}
     for _, f in ipairs(M.LUA_SYNTAX) do
         local d = dist and dist.features and dist.features[f.id]
+        local puc = false
+        for k, a in pairs(d and d.asked or {}) do if k:match('^%d') and a then puc = true end end
         if d and d.v then
             feats[#feats + 1] = { id = f.id, v = d.v, exact = d.exact, jit = d.luajit,
                 desc = f.desc, node = f.node, test = f.test }
+        elseif d and d.luajit == true and not puc then
+            -- (LuaJIT accepts it, no PUC interpreter asked does: LuaJIT-only syntax, CART-2039)
+            jitonly[#jitonly + 1] = { id = f.id, desc = f.desc, node = f.node, test = f.test, jitonly = true }
         else
             dropped[f.id] = not d and 'not distilled' or (d.why or 'no version')
         end
     end
-    return feats, dropped
+    return feats, dropped, jitonly
 end
 do
     local okd, dist = pcall(require, 'cartograph.spec.luafloor')
-    M.FEATURES.lua = M.lua_features(okd and dist or nil)
+    local feats, _, jitonly = M.lua_features(okd and dist or nil)
+    M.FEATURES.lua, M.LUAJIT_ONLY = feats, jitonly
 end
 
 --- Version-scale name per language, for the header: an ECMAScript year is not a
@@ -508,6 +525,11 @@ function M.scan(lang, src)
         bynode[f.node] = bynode[f.node] or {}
         table.insert(bynode[f.node], f)
     end
+    -- (and LuaJIT-only syntax, CART-2039: a fact with `jitonly` and no version — M.facts keeps it off the PUC floor)
+    for _, f in ipairs(lang == 'lua' and M.LUAJIT_ONLY or {}) do
+        bynode[f.node] = bynode[f.node] or {}
+        table.insert(bynode[f.node], f)
+    end
     local ok, parser = pcall(vim.treesitter.get_string_parser, require('cartograph.parseview').view(src, lang), lang)
     if not ok then return nil, 'no ' .. lang .. ' parser' end
     local ok2, trees = pcall(function () return parser:parse() end)
@@ -521,7 +543,7 @@ function M.scan(lang, src)
             for _, f in ipairs(cands) do
                 if not f.test or f.test(n, src) then
                     local l = n:range()
-                    out[#out + 1] = { id = f.id, v = f.v, desc = f.desc, line = l }
+                    out[#out + 1] = { id = f.id, v = f.v, desc = f.desc, line = l, jitonly = f.jitonly }
                 end
             end
         end
@@ -553,7 +575,7 @@ function M.facts(store)
         end
     end
     table.sort(order)
-    local facts, stats = {}, { files = 0, unknown = 0, langs = {} }
+    local facts, stats = {}, { files = 0, unknown = 0, langs = {}, jitonly = {} }
     for _, file in ipairs(order) do
         local lang = ext2lang[file:match('%.([%w]+)$'):lower()]
         stats.langs[lang] = true
@@ -565,7 +587,8 @@ function M.facts(store)
             for _, f in ipairs(got) do
                 f.file = file
                 f.lang = lang   -- a fact belongs to a SCALE, via its language
-                facts[#facts + 1] = f
+                -- (LuaJIT-only syntax has no PUC version: beside the floor, never on it — CART-2039)
+                if f.jitonly then stats.jitonly[#stats.jitonly + 1] = f else facts[#facts + 1] = f end
             end
         else
             stats.unknown = stats.unknown + 1
@@ -668,6 +691,21 @@ function M.declarations(root)
             end
         end
     end
+    -- LUA (CART-2039): what the project DECLARES its dialect to be — luadialect.resolve reads .luarc.json / .jsonc,
+    -- .luacheckrc, a Neovim plugin's layout (LuaJIT), a Factorio mod's profile (5.2). Its unset default is no declaration.
+    -- 'jit' is LuaJIT: no point on the PUC ruler, checked against the LuaJIT column instead (`jit = true`, v = nil)
+    do
+        local okd, ld = pcall(require, 'cartograph.luadialect')
+        local lv, lsrc
+        if okd then lv, lsrc = ld.resolve(root) end
+        if lv and lsrc and not lsrc:match('^default') then
+            if lv == 'jit' then
+                out[#out + 1] = { source = lsrc, raw = 'LuaJIT', jit = true, scale = M.SCALE.lua }
+            else
+                out[#out + 1] = { source = lsrc, raw = 'Lua ' .. lv, v = lv, scale = M.SCALE.lua }
+            end
+        end
+    end
     local tsc = read('tsconfig.json')
     local tgt = tsc and tsc:match('"target"%s*:%s*"([^"]+)"')
     if tgt then
@@ -696,6 +734,7 @@ function M.invariant(store, computed, holders, scale)
     if not root or root:match('^%w+://') then return { verdict = 'undeclared' } end
     local d = M.declared(root, scale)
     if not d then return { verdict = 'undeclared' } end
+    if d.jit then return { verdict = 'jit', declared = d } end -- (LuaJIT: judged by the LuaJIT column, CART-2039)
     if not d.v then
         return { verdict = 'open-ended', declared = d }
     end
@@ -1129,7 +1168,7 @@ function M.report(store)
             end
         end
         -- LUA (CART-0782): the ruler is PUC Lua's, asked of interpreters, and LuaJIT is a sibling dialect beside it
-        if k == M.scale_key('lua') and #ids > 0 then
+        if k == M.scale_key('lua') then
             local meta = {}
             for _, f in ipairs(M.FEATURES.lua or {}) do meta[f.id] = f end
             local guess, jn, jfirst = {}, 0, nil
@@ -1147,8 +1186,34 @@ function M.report(store)
             if jn > 0 then
                 L[#L + 1] = ('  LuaJIT (a sibling dialect, not on this ruler) REFUSES %d site(s) above, first %s')
                     :format(jn, jfirst)
-            else
+            elseif #ids > 0 then
                 L[#L + 1] = '  LuaJIT (a sibling dialect, not on this ruler) accepts every site above'
+            end
+            -- (LuaJIT-ONLY syntax, CART-2039: no PUC version accepts these at all)
+            local jby, jids = M.group(stats.jitonly or {})
+            if #jids > 0 then
+                local nj = 0
+                for _, id in ipairs(jids) do nj = nj + jby[id].n end
+                L[#L + 1] = ('  LuaJIT-ONLY syntax — no PUC Lua version accepts it, %d site(s):'):format(nj)
+                for _, id in ipairs(jids) do
+                    local g = jby[id]
+                    L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format('jit', g.desc, g.n, g.site,
+                        g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+                end
+            end
+            -- (the project's DECLARED dialect against both columns, CART-2039)
+            local root = (store.data or {}).root
+            local d = root and not root:match('^%w+://') and M.declared(root, k) or nil
+            if d and d.jit then
+                if jn > 0 then
+                    L[#L + 1] = ('  ⚠ BROKEN PROMISE — %s declares LuaJIT, but LuaJIT refuses %d site(s), first %s')
+                        :format(d.source, jn, jfirst)
+                else
+                    L[#L + 1] = ('  ✓ %s declares LuaJIT, and LuaJIT accepts every site found'):format(d.source)
+                end
+            elseif d and #jids > 0 then
+                L[#L + 1] = ('  ⚠ BROKEN PROMISE — %s declares %s, but the code uses LuaJIT-only syntax, which %s refuses: first %s at %s')
+                    :format(d.source, d.raw, d.raw, jby[jids[1]].desc, jby[jids[1]].site)
             end
         end
         local hby, hids = M.group(hedged[k] or {})

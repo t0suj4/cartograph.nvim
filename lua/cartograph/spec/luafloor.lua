@@ -2,8 +2,8 @@
 -- versionfloor's Lua syntax detectors needs, asked of each interpreter (loadfile: compile only). A feature
 -- with no `v` has a `why` and is left out of the floor; `exact = false` means no interpreter for `v` was asked.
 return {
-    detectors = 19,
-    detectors_sha = "7a0bab3f8c1291f6597ca98253e67b04d558ce36000b51ce40583afcdbb668f0",
+    detectors = 22,
+    detectors_sha = "f01e45b5a271e0a44c1efacd943b38c62b043e7b774ec072ed2df3403ad8e553",
     interpreters = {
         ["5.1"] = "Lua 5.1.5  Copyright (C) 1994-2012 Lua.org, PUC-Rio",
         ["5.2"] = "Lua 5.2.1  Copyright (C) 1994-2012 Lua.org, PUC-Rio",
@@ -15,6 +15,8 @@ return {
             asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = true, ["luajit"] = false } },
         ["attrib-const"] = { v = "5.3", exact = false, luajit = false,
             asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = true, ["luajit"] = false } },
+        ["binary-literal"] = { why = "no PUC interpreter accepts it", luajit = true,
+            asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = false, ["luajit"] = true } },
         ["bit-and"] = { v = "5.3", exact = false, luajit = false,
             asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = true, ["luajit"] = false } },
         ["bit-not"] = { v = "5.3", exact = false, luajit = false,
@@ -37,8 +39,12 @@ return {
             asked = { ["5.1"] = false, ["5.2"] = true, ["5.4"] = true, ["luajit"] = true } },
         ["hex-float"] = { v = "5.2", exact = true, luajit = true,
             asked = { ["5.1"] = false, ["5.2"] = true, ["5.4"] = true, ["luajit"] = true } },
+        ["imaginary-literal"] = { why = "no PUC interpreter accepts it", luajit = true,
+            asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = false, ["luajit"] = true } },
         ["int-div"] = { v = "5.3", exact = false, luajit = false,
             asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = true, ["luajit"] = false } },
+        ["int64-literal"] = { why = "no PUC interpreter accepts it", luajit = true,
+            asked = { ["5.1"] = false, ["5.2"] = false, ["5.4"] = false, ["luajit"] = true } },
         ["label"] = { v = "5.2", exact = true, luajit = true,
             asked = { ["5.1"] = false, ["5.2"] = true, ["5.4"] = true, ["luajit"] = true } },
         ["nested-long-comment"] = { v = "5.2", exact = true, luajit = true,
