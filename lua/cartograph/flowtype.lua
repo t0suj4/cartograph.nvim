@@ -569,6 +569,11 @@ local function build(store, opts)
     -- known — R.stats.xnosrc counts those, a delivery path the recorder does not cover)
     G7.XARR = opts.explain and {} or nil
     G7.LKU = G7.XARR and {} or nil -- (call -> why its member lookup is unknown, CART-1877)
+    -- (opts.explain: every store a HOST object refused by its kind — CART-1761's rule, the edge the solve does not make —
+    -- per type and field, with the stores' sites: R.host_store_drops, so the rule can be ASKED for, CART-2045. SSITE: a
+    -- recorded store's site, for one dropped when an object arrives later)
+    G7.HDROP = opts.explain and {} or nil
+    G7.SSITE = opts.explain and {} or nil
     local SATSNAP = {}
     local function settop(p)
         if top[p] then return end
@@ -1142,6 +1147,7 @@ local function build(store, opts)
             local SREC = G7.SREC
             local i = #SREC + 1
             SREC[i], SREC[i + 1], SREC[i + 2] = f, v, i
+            if G7.SSITE then G7.SSITE[i] = G7.STSITE; G7.STI = i end
             local t = stores[x]
             if t then SREC[i + 2] = SREC[t + 2]; SREC[t + 2] = i end
             stores[x] = i
@@ -1154,7 +1160,8 @@ local function build(store, opts)
         -- slot through a debug.setmetatable port does: debug.setmetatable(0, mt) sets the number type's, CART-2017)
         for o in each(x) do
             local tn = TNAME[o]
-            if (not tn or G7.hostkind(tn) == 'open' or (f == '\1mt' and G7.DBGMT[x])) and not (fnports[o] and f == '\1mt' and not G7.DBGMT[x]) and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f)) end
+            if (not tn or G7.hostkind(tn) == 'open' or (f == '\1mt' and G7.DBGMT[x])) and not (fnports[o] and f == '\1mt' and not G7.DBGMT[x]) and not (f == '\1mt' and G7.MTT and G7.gemeta(x, o)) then edge(v, ofp(o, f))
+            elseif G7.HDROP and tn and G7.hostkind(tn) ~= 'open' and not (f == '\1mt' and G7.DBGMT[x]) then G7.hdrop(tn, f, G7.STSITE, G7.STI) end
         end
     end
     -- (`setmetatable(t, { __index = idx })`: every object at t has every object at idx as a prototype — linked when
@@ -2023,6 +2030,14 @@ local function build(store, opts)
     end
     -- (a host-typed FUNCTION: `function`, or a signature `fun(…): …` — a profile's declared function, CART-2021)
     function G7.isfnty(tn) return tn == 'function' or tn:match('^%(?fun%(') ~= nil end
+    -- (a store the host kind refused, under explain: counted per type and field, its sites kept — CART-2045)
+    function G7.hdrop(tn, f, site, si)
+        local key = tn .. '\0' .. f
+        local r = G7.HDROP[key]
+        if not r then r = { type = tn, field = f, kind = G7.hostkind(tn), st = {}, sites = {} }; G7.HDROP[key] = r end
+        if si then r.st[si] = true end
+        if site then r.sites[site] = true end
+    end
     function G7.hostkind(tn)
         local HKINDS = G7.HKINDS
         local k = HKINDS[tn]
@@ -2328,13 +2343,14 @@ local function build(store, opts)
                     local SREC, si = G7.SREC, stores[p]
                     si = si and SREC[si + 2]
                     while si do
-                        local st1, st2 = SREC[si], SREC[si + 1]
+                        local st1, st2, si0 = SREC[si], SREC[si + 1], si
                         if si == stores[p] then si = nil else si = SREC[si + 2] end
                         for _, o in dit(d) do
                             -- (a host object takes a store only when its kind is OPEN: a 'prim' raises, a 'members' one has
                             -- its declared members only, CART-1761)
                             local tn = TNAME[o]
-                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st1 == '\1mt') and not (st1 == '\1mt' and G7.MTT and G7.gemeta(p, o)) then edge(st2, ofp(o, st1)) end
+                            if (not tn or G7.hostkind(tn) == 'open') and not (fnports[o] and st1 == '\1mt') and not (st1 == '\1mt' and G7.MTT and G7.gemeta(p, o)) then edge(st2, ofp(o, st1))
+                            elseif G7.HDROP and tn and G7.hostkind(tn) ~= 'open' then G7.hdrop(tn, st1, G7.SSITE[si0], si0) end
                         end
                     end
                     G7.mtcopy(p)
@@ -3321,7 +3337,9 @@ local function build(store, opts)
             elseif t == 'dot_index_expression' then
                 local base = expr(target:field('table')[1])
                 acc('write', target:field('field')[1], txt(target:field('field')[1]), base)
+                if G7.SSITE then G7.STSITE = key_of(target:field('field')[1]) end -- (the store's site, explain: CART-2045)
                 storec(base, txt(target:field('field')[1]), v)
+                G7.STSITE = nil
                 local kp = new(); addobj(kp, STR)
                 local s0 = at(target:field('field')[1])
                 metastore(base, txt(target:field('field')[1]), kp, v, curerr())
@@ -3344,7 +3362,9 @@ local function build(store, opts)
                     local kp0 = kn and keyname(kn) == '[]' and expr(kn) or nil
                     G7.KP0 = kp0
                     G7.NEXTK = kp0
+                    if G7.SSITE then G7.STSITE = key_of(target) end
                     storec(base, keyname(kn), v)
+                    G7.STSITE = nil
                 end
                 local kp = G7.KP0 or (kn and expr(kn)) or new()
                 G7.KP0 = nil
@@ -7368,6 +7388,20 @@ local function build(store, opts)
             return { cause = 'lookup', lookup = why[1], at = why[1] == 'unmapped-function' and tostring(obinfo[why[2]]) or why[2] and label(why[2]) or '-' }
         end
         do local n = 0; for _, m in pairs(G7.XARR or NOTHING) do for _, w in pairs(m) do if w == false then n = n + 1 end end end; stats.xnosrc = n end
+        -- (the stores a host object's kind refused — CART-1761: `prim` raises, `members` has its declared members only,
+        -- `open` keeps every store — as { type, kind, field, n = the stores refused, sites }, by type then field, CART-2045)
+        R.host_store_drops = function ()
+            local out = {}
+            for _, r in pairs(G7.HDROP or NOTHING) do
+                local ss, n = {}, 0
+                for k in pairs(r.sites) do ss[#ss + 1] = k end
+                for _ in pairs(r.st) do n = n + 1 end
+                table.sort(ss)
+                out[#out + 1] = { type = r.type, kind = r.kind, field = r.field, n = n, sites = ss }
+            end
+            table.sort(out, function (a, b) if a.type ~= b.type then return a.type < b.type end return a.field < b.field end)
+            return out
+        end
     end
     -- (the allocation sites reaching argument i of call c -> { obinfo key… } | nil, why: a saturated or partial port,
     -- an external value, no port — never a short list read as the whole)
