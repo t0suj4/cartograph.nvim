@@ -2075,10 +2075,10 @@ local function build(store, opts)
     end
     -- (os.date("*t")'s table at call site `site`, into port r: an ordinary Lua table — no host type, so code's stores
     -- are read back — whose fields hold the scalar parts of the profile's osdate class, CART-2030)
-    function G7.osdate(r, site)
-        local tp = new()
-        addobj(tp, newobj('osdate:' .. site))
-        for f, ty in sorted(G7.HFIELDS.osdate or NOTHING) do
+    -- (a host RECORD's scalar fields, as stores into the ordinary table at tp: each field of the profile's class `cls`
+    -- holds its declared scalar parts — osdate's integers, debuginfo's source / currentline … CART-2030, CART-2022)
+    function G7.recscalars(tp, cls)
+        for f, ty in sorted(G7.HFIELDS[cls] or NOTHING) do
             local vp = new()
             for part in (tostring(ty):gsub('%s', '') .. '|'):gmatch('([^|]*)|') do
                 part = part:gsub('%?$', '')
@@ -2086,6 +2086,11 @@ local function build(store, opts)
             end
             storec(tp, f, vp)
         end
+    end
+    function G7.osdate(r, site)
+        local tp = new()
+        addobj(tp, newobj('osdate:' .. site))
+        G7.recscalars(tp, 'osdate')
         edge(tp, r)
     end
     -- (a declared type that is ONE type: `X?` / `X|nil` is X, a real union is none)
@@ -4335,6 +4340,9 @@ local function build(store, opts)
                 or (aps[1] and ((fname == 'debug.setmetatable' and select(2, lookup('debug'))) or isbuiltin('debug.setmetatable')))
                 -- (os.date: its literal format decides, CART-2030 — not its `string|osdate` union's parts, CART-2035)
                 or ((fname == 'os.date' and select(2, lookup('os'))) or isbuiltin('os.date'))
+                -- (debug.getinfo: CART-2016's fresh table, its scalar fields its own — not the signature's host
+                -- type:debuginfo beside it, which a store `i.func = A` hit as a host-store failure, CART-2022)
+                or ((fname == 'debug.getinfo' and select(2, lookup('debug'))) or isbuiltin('debug.getinfo'))
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             -- ★ ONLY THE LIBRARY'S OWN NAME IS ITS SIGNATURE (CART-2048): the key is the callee's SPELLING, and module-meta
             -- signatures are keyed by the meta file's LOCAL table (jit.util's `util#funcinfo`, string.buffer's `buffer#new`,
@@ -4449,8 +4457,10 @@ local function build(store, opts)
             -- ★ debug.getinfo(...) IS A FRESH TABLE (CART-2016, flowpath FLOW-0049): its `func` is the function the call
             -- names — a literal level 1: the CALLING function, its own closure (the dump's `self`); a function argument:
             -- itself; any other level, or an argument that may be one: any function (the dump's gap debug-getinfo, decided
-            -- after the solve) — and `activelines` a table. The signature's type:debuginfo stays beside it for the scalar
-            -- fields (source, currentline …). `func` had held nothing: g() == g's own getinfo read empty
+            -- after the solve) — and `activelines` a table. Its SCALAR fields (source, currentline …) are the table's own,
+            -- from the profile's debuginfo class (G7.recscalars) — the signature's host type:debuginfo is no longer added
+            -- beside it (ires): a program's store into the result, `i.func = A`, hit that host object and failed the
+            -- dump's host-store check (CART-2022). `func` had held nothing: g() == g's own getinfo read empty
             if (fname == 'debug.getinfo' and select(2, lookup('debug'))) or isbuiltin('debug.getinfo') then
                 local tp = new()
                 local to = newobj('getinfo:' .. key_of(n))
@@ -4472,6 +4482,9 @@ local function build(store, opts)
                 local slv = not thr and strlit(a1)
                 local lvl = not thr and (numlit(a1) or (slv and tonumber(slv))) or nil
                 local fport = ofp(to, 'func')
+                -- (its SCALAR fields — unless a literal `what` asks only for `f` / `L`, which fill func and activelines
+                -- alone: `pairs(debug.getinfo(1, 'f'))` meets no source string, flowpath's g9 / x12, CART-2022)
+                if not (what and not what:find('[^fL]')) then G7.recscalars(tp, 'debuginfo') end
                 if what and not what:find('f', 1, true) then -- (no `func` field)
                 elseif slv and not lvl then -- (a non-numeric string: getinfo raises)
                 elseif thr then

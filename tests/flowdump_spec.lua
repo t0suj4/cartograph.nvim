@@ -3293,3 +3293,32 @@ test('flowdump: jit.opt and package.loaders are tables, io.stdout a file; an unt
     local N = dump('local Z = {}\nZ.n = 1\n')
     eq({}, N.solution.taint.escaped_root, 'an untouched package escapes nothing: the host\'s seed is no store')
 end)
+
+-- (CART-2022, flowpath debuglib g10 / hunt0183 h30: a store INTO a debug.getinfo result failed the dump's host-store check
+-- — the result held the signature's host type:debuginfo beside CART-2016's fresh table. Now the fresh table carries the
+-- debuginfo class's scalar fields itself and the host type is not added; a literal `what` of only f / L fills no scalar)
+test('flowdump: a store into a debug.getinfo result is the table\'s own; its scalar fields are the table\'s (CART-2022)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function lab(D) local l = {}; for _, x in ipairs(D.sites) do l[x.id] = x.label end; return l end
+    local function stored(D, f)
+        local l, v, out = lab(D), {}, {}
+        for _, e in ipairs(D.solution.v) do v[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == f then for _, s in ipairs(v[i[4]] or {}) do out[#out + 1] = l[s] end end
+            end
+        end
+        table.sort(out)
+        return out
+    end
+    local D = dump('local Z, A = {}, {}\nlocal i = debug.getinfo(1, "S")\ni.k = A\nZ.o = i.k\nZ.s = i.source\nZ.r = i\n')
+    eq({ 'tbl:m.lua:6:17' }, stored(D, 'o'), 'what was stored is read back')
+    eq({ 'type:string' }, stored(D, 's'), 'source is a string: the table\'s own field')
+    local r = stored(D, 'r')
+    eq(1, #r, 'the result is the fresh table alone: ' .. vim.inspect(r))
+    ok(r[1]:match('^getinfo:'), r[1])
+    eq(0, flowcheck.check(D).failed, 'closed: no host-store failure')
+    -- `what` = 'f': func alone, no scalar a pairs could meet
+    local F = dump('local Z = {}\nlocal function g() for k, v in pairs(debug.getinfo(1, "f")) do Z.v = v end end\ng()\n')
+    for _, x in ipairs(stored(F, 'v')) do ok(not x:match('^type:'), 'no scalar field under what "f": ' .. x) end
+end)
