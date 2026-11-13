@@ -5769,6 +5769,56 @@ local MENTION_ID = { identifier = true }
 local NO_NAMES = {}
 -- pure-content pieces of a string literal, per grammar: anything ELSE
 -- inside a string is interpolation (typed-strings v1: k='lit' means KNOWN)
+-- ★ A STRING LITERAL'S VALUE, NOT ITS SPELLING (CART-2051, CART-2027 for every grammar): the argument reader kept the
+-- source text minus ONE quote at each end, so python's `r"…"` / `b'…'` kept its prefix and opening quote, a
+-- `"""…"""` its extra quotes, and every escape stayed a backslash (`"\n"` read as backslash-n). The value, from what
+-- the GRAMMAR marks: the delimiters it marks (`string_start` / `string_end`: the prefix and the triple quote with them),
+-- else one quote at each end as before; each marked `escape_sequence` decoded when it is a one-character escape every
+-- C-family grammar here reads alike (\n \t \r \0 \a \b \f \v \\ \" \'); any other marked escape (\u…, \x…,
+-- \N{…}, \e) has no value here: nil, and the caller records an expression, never the raw spelling. A raw string
+-- marks no escapes, so its backslashes stay (r"\w" is backslash-w). A spec with its own decoder (lua's
+-- string_value) answers instead. LIMIT: an escape the grammar does not mark stays as written (tree-sitter-ruby
+-- marks no `\u00A0` and no single-quoted `\'`)
+local COMMON_ESC = { n = '\n', t = '\t', r = '\r', ['0'] = '\0', a = '\a', b = '\b', f = '\f', v = '\v',
+    ['\\'] = '\\', ['"'] = '"', ["'"] = "'" }
+local function string_lit_value(a, src, spec)
+    local text = node_text(a, src)
+    if spec.string_value then return spec.string_value(a, src) end
+    local _, _, s0 = a:start()
+    local _, _, e0 = a:end_()
+    local lo, hi = s0, e0 -- (the value's byte range, [lo, hi))
+    local esc = {}
+    local function scan(n)
+        for _, ch in inext, n, -1 do
+            local t = ch:type()
+            if t == 'string_start' then local _, _, b = ch:end_(); lo = b
+            elseif t == 'string_end' then local _, _, b = ch:start(); hi = b
+            elseif t == 'escape_sequence' then esc[#esc + 1] = ch
+            elseif ch:named() then scan(ch) end
+        end
+    end
+    scan(a)
+    if lo == s0 and hi == e0 then
+        if text:match('^["\']') then lo = lo + 1 end
+        if hi > lo and text:sub(-1):match('["\']') then hi = hi - 1 end
+    end
+    table.sort(esc, function (x, y) return select(3, x:start()) < select(3, y:start()) end)
+    local out, at = {}, lo
+    for _, e in ipairs(esc) do
+        local _, _, b = e:start()
+        local _, _, c = e:end_()
+        if b >= lo and c <= hi then
+            local ch = src:sub(b + 1, c):match('^\\(.)$')
+            local d = ch and COMMON_ESC[ch]
+            if not d then return nil end
+            out[#out + 1] = src:sub(at + 1, b)
+            out[#out + 1] = d
+            at = c
+        end
+    end
+    out[#out + 1] = src:sub(at + 1, hi)
+    return table.concat(out)
+end
 local STR_PARTS = { string_content = true, string_value = true,
     string_fragment = true, string_start = true, string_end = true,
     escape_sequence = true, heredoc_start = true, heredoc_end = true }
@@ -9299,14 +9349,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                                         argv[#argv + 1] = { k = 'expr' }
                                     end
                                 else
-                                    local v = node_text(a, src)
-                                        :gsub('^["\']', ''):gsub('["\']$', '')
-                                    -- ★ THE VALUE, NOT THE SPELLING (CART-2027): a string's escapes are source text —
-                                    -- `require('\102oo')` named a module `\102oo` and linked nothing. Decoded where the
-                                    -- spec can (`string_value`, lua); an escape whose meaning it cannot fix (the
-                                    -- version's: `\x`, `\u`) is no known value — an expression, never the raw text
-                                    local dv = v
-                                    if v:find('\\', 1, true) and spec.string_value then dv = spec.string_value(a, src) end
+                                    -- ★ THE VALUE, NOT THE SPELLING (CART-2027 lua, CART-2051 every grammar): the
+                                    -- delimiters the grammar marks off, its marked escapes decoded; an escape with no
+                                    -- fixed value here (`\u`, `\x`, a version's) is no known value — an expression
+                                    local dv = string_lit_value(a, src, spec)
                                     if dv then
                                         args[#args + 1] = dv
                                         argv[#argv + 1] = { k = 'lit', v = dv }

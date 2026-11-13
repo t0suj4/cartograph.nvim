@@ -6824,3 +6824,30 @@ test('treesitter: a Lua string argument is its decoded VALUE; a version-dependen
     for _, x in ipairs(seen) do ok(not x:find('\\', 1, true), 'no raw escape survives: ' .. x) end
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2051: a string argument's VALUE in every grammar — the delimiters the grammar marks off (python's prefix and
+-- triple quote), its marked one-character escapes decoded, any other marked escape (\x, \u, \e) no value: an
+-- expression. A raw string marks no escape and keeps its backslash; a lua long string is its content)
+test('treesitter: a string argument is its value - marked delimiters off, common escapes decoded (CART-2051)', function ()
+    local function vals(lang, name, text)
+        if not has_parser(lang) then return nil end
+        local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(text); fd:close()
+        local data = ts.extract(root)
+        vim.fn.delete(root, 'rf')
+        local out = {}
+        for _, c in ipairs(data.calls or {}) do
+            if #(c.argv or {}) > 1 then for _, a in ipairs(c.argv) do out[#out + 1] = a.k == 'lit' and a.v or ('<' .. a.k .. '>') end end
+        end
+        return out
+    end
+    local py = vals('python', 'm.py', 'f(r"\\w+", "a\\nb", """x""", b\'q\', \'it\\\'s\', "\\x41", u"z")\n')
+    if py then eq({ '\\w+', 'a\nb', 'x', 'q', "it's", '<expr>', 'z' }, py, 'python: prefixes and triple quotes off, \\n decoded, \\x unknown') end
+    local rb = vals('ruby', 'm.rb', 'f("a\\nb", \'a\\nb\', "\\e[0m", "plain")\n')
+    if rb then eq({ 'a\nb', 'a\\nb', '<expr>', 'plain' }, rb, 'ruby: a single-quoted \\n is two characters; \\e unknown') end
+    local js = vals('javascript', 'm.js', 'f("a\\nb", \'it\\\'s\', "\\u0041", "plain");\n')
+    if js then eq({ 'a\nb', "it's", '<expr>', 'plain' }, js, 'javascript: \\u unknown') end
+    local lu = vals('lua', 'm.lua', 'f([[long]], "a\\tb", \'q\')\n')
+    if lu then eq({ 'long', 'a\tb', 'q' }, lu, 'lua: a long string is its content') end
+    if not (py or rb or js or lu) then skip('no parser') end
+end)
