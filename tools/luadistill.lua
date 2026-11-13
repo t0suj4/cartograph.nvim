@@ -81,7 +81,7 @@ for k, v in pairs(_G) do
             namespaces[k] = true
             nsset[k] = true
             vocab[k] = true
-            local members = {}
+            local members, kinds = {}, {}
             local ok = pcall(function ()
                 for mk, mv in pairs(v) do
                     if type(mk) == 'string' then
@@ -94,11 +94,15 @@ for k, v in pairs(_G) do
                         -- signature GAP over-reports the gap by exactly those 18.
                         callable[k] = callable[k] or {}
                         callable[k][mk] = (type(mv) == 'function') or nil
+                        -- AND A NON-FUNCTION MEMBER'S RUNTIME TYPE (CART-2043): package.loaders and jit.opt are
+                        -- TABLES, io.stdout a userdata — measured here, where the meta only says `package.loaders = {}`
+                        -- and the profile kept the name alone, so flowtype gave them no object
+                        if type(mv) ~= 'function' then kinds[mk] = type(mv) end
                     end
                 end
             end)
-            if not ok then members = {} end -- a table that refuses iteration
-            types[k] = { members = members }
+            if not ok then members = {}; kinds = {} end -- a table that refuses iteration
+            types[k] = { members = members, kinds = next(kinds) and kinds or nil }
         end
     end
 end
@@ -140,6 +144,7 @@ local meta_names = {}       -- owner -> member -> true, as DECLARED
 local R = require('cartograph.metaread').new()
 local annot = require('cartograph.annot')
 local class_fields, n_cfield = {}, 0
+local ns_class = {} -- namespace -> the class whose block ends at its `ns = {}` (CART-2043)
 
 local meta_files = {}
 if META ~= '' and vim.fn.isdirectory(META) == 1 then
@@ -204,6 +209,10 @@ for _, path in ipairs(meta_files) do
         local cls
         for _, l in ipairs(lines) do
             local tag, body = l:match('^%-%-%-%s*@(%a+)%s*(.*)$')
+            -- (WHICH NAMESPACE A CLASS DESCRIBES, CART-2043: the class block ends at the namespace's own `io = {}` —
+            -- `---@class iolib` types io. Read where the meta says it, never by spelling ns .. 'lib')
+            local nsname = cls and not l:match('^%-%-%-') and l:match('^([%a_][%w_]*)%s*=%s*{%s*}%s*$')
+            if nsname then ns_class[nsname] = cls end
             if not l:match('^%-%-%-') or not live(nil, l) then cls = nil
             elseif tag == 'class' then
                 local r = annot.parse_body('class', body)
@@ -350,6 +359,8 @@ local prof = {
     sigs_absent = next(absent) and absent or nil,
     -- the fields a declared CLASS carries, by type (CART-1827): a host value of that type read by field name
     class_fields = next(class_fields) and class_fields or nil,
+    -- the class each library namespace IS (iolib types io), read off the meta (CART-2043)
+    ns_class = next(ns_class) and ns_class or nil,
     sig_root = (n_sig > 0) and META or nil,
     sig_kind = (n_sig > 0) and 'annotation' or nil,
     -- WHETHER A SOURCE WAS PRESENT AT ALL — so "this member has no signature" and

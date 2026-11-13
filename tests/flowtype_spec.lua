@@ -5304,3 +5304,43 @@ test('flowtype: a ---@meta declaration is the host\'s function, EXT, for a globa
         'each declaration\'s call returns unknown code; a METHOD\'s also hands it O as self, so O.meth itself reads partial')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2043, flowpath FLOW-0183 hunt0183: a library's VALUE members read nothing — jit.opt and package.loaders are
+-- TABLES, io.stdout a userdata, package.path a string. The luajit profile now carries each member's kind as LuaJIT
+-- measured it and the class each namespace is (iolib types io); a package table starts with the host's entries, EXT)
+test('flowtype: library value members have objects - tables, the class\'s host type, scalars (CART-2043)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local P = require('cartograph.spec.profile').load('luajit')
+    eq('iolib', P.ns_class and P.ns_class.io, 'the meta\'s class block ends at io = {}')
+    eq('table', P.types.package.kinds.loaders, 'measured: package.loaders is a table')
+    eq('userdata', P.types.io.kinds.stdout, 'and io.stdout a userdata')
+    local root = tree({ ['m.lua'] = table.concat({
+        'local A = {}',
+        'local function sinko(x) return x end', 'local function sinkf(x) return x end', 'local function sinkp(x) return x end',
+        'local function sinkl(x) return x end', 'local function sinkm(x) return x end',
+        'jit.opt.k = A', 'sinko(jit.opt.k)', 'sinkf(io.stdout)', 'sinkp(package.path)', 'sinkl(package.loaders[1])',
+        'sinkm(math.pi)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, argprobes = true })
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq({ sinko = 'tbl:m.lua:0:10', sinkf = 'type:file', sinkp = 'type:string', sinkl = 'external', sinkm = 'type:number' }, objs,
+        'jit.opt holds what was stored; io.stdout is a file; package.path a string; a host loader unknown code; math.pi a number')
+    vim.fn.delete(root, 'rf')
+    -- (explain: a host loader's unknown value traces to its root — the host filled the table)
+    -- (receivers are probed where a method name is ambiguous: two tree m's)
+    local r2 = tree({ ['m.lua'] = 'local A, B = {}, {}\nfunction A.m(self) return 1 end\nfunction B.m(self) return 2 end\n'
+        .. 'local L = package.loaders[1]\nlocal function u() return L:m() end\n' })
+    store.ingest(ts.extract(r2))
+    local X = flowtype.solve(store, { open = false, explain = true })
+    local callrec = require 'cartograph.callrec'
+    local c
+    for _, x in ipairs(store.data.calls) do if callrec.full(x) == 'L:m' then c = x end end
+    local u = c and X.unknown_of(c)
+    eq({ cause = 'host-table', root = 'host-table' }, u and { cause = u.cause, root = u.root }, 'unknown code the host put there')
+    eq(0, X.stats.xnosrc, 'and every such arrival has its root')
+    vim.fn.delete(r2, 'rf')
+end)

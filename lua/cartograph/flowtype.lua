@@ -2000,6 +2000,7 @@ local function build(store, opts)
     -- E-reading writes EXT into them; with a bare `table` as ONE shared object, 134 s. A named class (`lsp.Range`) is
     -- a table too, but its name does not say so
     G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC, G7.HFIELDS = {}, {}, {}, {}, {}
+    G7.NSCLASS, G7.NSKINDS = {}, {} -- (a library namespace's class, iolib for io; its members' measured kinds — CART-2043)
     G7.HOSTMODS, G7.HOSTUSED = {}, {} -- (the host models' module ports; the keys a call bound to a model, CART-1785)
     G7.FNSIZE, G7.WALKBYTES = {}, 0 -- (a walked function's id -> its byte length; the tree's walked bytes)
     do
@@ -2012,6 +2013,10 @@ local function build(store, opts)
             for t, v in pairs(pr and pr.types or NOTHING) do if type(v) == 'table' and v.kind and HKINDS[t] == nil then HKINDS[t] = v.kind end end
             for sk, c in pairs(pr and pr.creates or NOTHING) do if G7.CREATES[sk] == nil then G7.CREATES[sk] = c end end
             for t, m in pairs(pr and pr.class_fields or NOTHING) do if G7.HFIELDS[t] == nil then G7.HFIELDS[t] = m end end
+            for ns, c in pairs(pr and pr.ns_class or NOTHING) do if G7.NSCLASS[ns] == nil then G7.NSCLASS[ns] = c end end
+            for ns, t in pairs(pr and pr.types or NOTHING) do
+                if type(t) == 'table' and type(t.kinds) == 'table' and G7.NSKINDS[ns] == nil then G7.NSKINDS[ns] = t.kinds end
+            end
         end
         for t, k in pairs(opts.host_kinds or NOTHING) do HKINDS[t] = k end
         for sk, c in pairs(opts.creates or NOTHING) do G7.CREATES[sk] = c end
@@ -2528,6 +2533,22 @@ local function build(store, opts)
             G7.NATIVE[o], G7.NATOBJ[k], G7.NOESC[o] = k, o, true
         end
     end
+    -- ★ A LIBRARY'S VALUE MEMBERS HAVE OBJECTS (CART-2043, flowpath FLOW-0183 hunt0183): jit.opt is a TABLE, io.stdout a
+    -- userdata, package.path a string — and each read NOTHING, so `jit.opt.k = A; OBS = jit.opt.k` certified OBS empty and
+    -- `getmetatable(io.stdout)` lost the FILE* handle's. From the profile: each member's KIND as the interpreter measured it
+    -- (luadistill), and the namespace's class (iolib types io) for what a userdata IS. A string / number / boolean member
+    -- is that type; a userdata the class's declared host type (io.stdout: file — the host's own handle, never tree code);
+    -- a table an ordinary table site of its own. package's tables are G7.pkgloaded's: the host reads them
+    function G7.libfields(ns, lo)
+        local cf = G7.HFIELDS[G7.NSCLASS[ns] or ''] or NOTHING
+        for f, k in sorted(G7.NSKINDS[ns] or NOTHING) do
+            if k == 'string' or k == 'number' or k == 'boolean' then addobj(ofp(lo, f), typeobj(k))
+            elseif k == 'userdata' then
+                local one = onetype(cf[f])
+                if one and not SCALAR[one] then addobj(ofp(lo, f), typeobj(one)) end
+            elseif k == 'table' and ns ~= 'package' then addobj(ofp(lo, f), newobj('lib:' .. ns .. '.' .. f)) end
+        end
+    end
     function G7.natives_into() -- (the current environment's globals hold the natives; a library its own object)
         G7.ENV.LIBS = G7.ENV.LIBS or {}
         for _, k in ipairs(G7.NATKEYS) do
@@ -2553,6 +2574,7 @@ local function build(store, opts)
                 local lo = newobj('lib:' .. ns); G7.ENV.LIBS[ns] = lo; addobj(G7.gport(ns), lo)
             end
         end
+        for ns, lo in sorted(G7.ENV.LIBS) do G7.libfields(ns, lo) end
     end
     -- ★ package.loaded (CART-1797): it listed nothing, so `package.loaded._G.x = a` stored into nothing — a certified wrong
     -- whole answer. Per environment, `package.loaded` is a table whose `_G` is that environment's globals and whose
@@ -2580,10 +2602,17 @@ local function build(store, opts)
         -- `package.preload.k = A; package.preload.k` read nothing, untainted (flowpath's b15, CART-2030). Each is an
         -- ordinary table, NOT a library site: require reads it and calls the loaders stored there, so it is the
         -- host's — escaped after the solve, G7.PKGHOST)
-        for f, ty in sorted(G7.HFIELDS.packagelib or NOTHING) do
-            if ty == 'table' and f ~= 'loaded' then
+        -- (and every member the interpreter measured as a table — package.loaders, which require calls loader by loader,
+        -- CART-2043. Each STARTS with the host's own entries, unknown code: LuaJIT's 4 loaders, its 6 preloads (nvim: 27,
+        -- vim.filetype among them; 5.4: none) — EXT under `[]`, where an empty table had read nothing)
+        local tbl = {}
+        for f, ty in pairs(G7.HFIELDS[G7.NSCLASS.package or ''] or NOTHING) do if ty == 'table' then tbl[f] = true end end
+        for f, k in pairs(G7.NSKINDS.package or NOTHING) do if k == 'table' then tbl[f] = true end end
+        for f in sorted(tbl) do
+            if f ~= 'loaded' then
                 local o = newobj('lib:package.' .. f)
                 addobj(ofp(lp, f), o)
+                G7.eroot(ofp(o, '[]'), EXT, G7.XARR and { 'host-table' }) -- (its root for explain: the host filled it)
                 G7.PKGHOST[#G7.PKGHOST + 1] = o
             end
         end
@@ -6217,8 +6246,17 @@ local function build(store, opts)
     end
     -- (package's tables the HOST reads — package.preload: require calls the loaders stored there — escape, CART-2030.
     -- Only one code STORED into: an escape is not local — the first one hits `[]` for every object in a closed solve and
-    -- starts the outside's writes in an open one — and an untouched preload holds nothing require could run)
-    for _, o in ipairs(G7.PKGHOST) do if next(ofield[o] or NOTHING) then G7.escmore(o, 'package-host-table') end end
+    -- starts the outside's writes in an open one — and an untouched preload holds nothing require could run. Since
+    -- CART-2043 each starts with the host's own entries, EXT under `[]`: that seed is no store — escaping on it lost the
+    -- certificate of 22 of 361 flowpath fixtures that never touch package)
+    for _, o in ipairs(G7.PKGHOST) do
+        local stored = false
+        for _, fp in pairs(ofield[o] or NOTHING) do
+            if top[fp] then stored = true else for x in each(fp) do if x ~= EXT then stored = true; break end end end
+            if stored then break end
+        end
+        if stored then G7.escmore(o, 'package-host-table') end
+    end
     if G7.ANYLOAD and G7.EXP['loaded-globals'] then
         TCUR = 'code loaded at run time reads and writes every global by name (CART-1796)'
         for _, e in ipairs(G7.ENVL) do
@@ -7313,7 +7351,7 @@ local function build(store, opts)
                     return { cause = 'unknown-code', root = k, sites = l, all = G7.allsites(fo), at = at, dir = 'in' }
                 elseif k == 'proto' then return { cause = 'unknown-code', root = k, at = tostring(obinfo[w[2]] or w[2]), dir = 'in' }
                 elseif k == 'host-global' then return { cause = k, root = k, sites = w[2] and sitekeys(w[2], k), at = label(q), dir = 'in' }
-                elseif k == 'export' or k == 'placeholder' then return { cause = k, root = k, at = label(q), dir = 'in' }
+                elseif k == 'export' or k == 'placeholder' or k == 'host-table' then return { cause = k, root = k, at = label(q), dir = 'in' }
                 else return { cause = 'unknown-code', root = k, sites = sitekeys(w[2], k), at = label(q), dir = 'in' } end
             end
             local xs = {}

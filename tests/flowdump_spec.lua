@@ -3257,3 +3257,39 @@ test('flowdump: a ---@meta declaration of a global function is the host\'s funct
     local b = run('---@meta\nfunction hostmake() return {} end\n')
     eq({ A }, b, 'a ---@meta function with a BODY is code (the tag also silences diagnostics on real code)')
 end)
+
+-- (CART-2043, flowpath FLOW-0183 hunt0183: h34 `jit.opt.k = A; OBS = jit.opt.k` certified OBS empty — jit.opt had no
+-- object; now a table site of its own, read back and closed. io.stdout is the host's file. package.loaders is a table the
+-- host reads: a store into it escapes it (package-host-table), and it starts with the host's own loaders, EXT. ★ That
+-- seed is no store: a program that never touches package escapes nothing — the first cut escaped preload and loaders in
+-- EVERY solve and 22 of 361 flowpath fixtures lost their certificate)
+test('flowdump: jit.opt and package.loaders are tables, io.stdout a file; an untouched package escapes nothing (CART-2043)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function lab(D) local l = {}; for _, x in ipairs(D.sites) do l[x.id] = x.label end; return l end
+    local function stored(D, f)
+        local l, v, out = lab(D), {}, {}
+        for _, e in ipairs(D.solution.v) do v[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == f then for _, s in ipairs(v[i[4]] or {}) do out[#out + 1] = l[s] end end
+            end
+        end
+        table.sort(out)
+        return out
+    end
+    local J = dump('local Z = {}\nlocal A = {}\njit.opt.k = A\nZ.o = jit.opt.k\nZ.f = io.stdout\n')
+    eq({ 'tbl:m.lua:7:10' }, stored(J, 'o'), 'jit.opt holds what was stored')
+    eq({ 'type:file' }, stored(J, 'f'), 'io.stdout is the host\'s file')
+    eq({}, J.solution.taint.escaped_root, 'nothing escapes')
+    eq(0, flowcheck.check(J).failed, 'closed')
+    local L = dump('local Z = {}\nlocal A = {}\npackage.loaders.k = A\nZ.l = package.loaders[1]\n')
+    local roots = {}
+    for _, e in ipairs(L.solution.taint.escaped_root) do roots[#roots + 1] = e[2] end
+    eq({ 'escmore:package-host-table' }, vim.fn.uniq(vim.fn.sort(roots)), 'a store into loaders escapes it: the host calls what is there')
+    eq({ 'external' }, stored(L, 'l'), 'and its own entries are the host\'s, unknown code')
+    local nl = 0
+    for _, x in ipairs(L.sites) do if x.label == 'lib:package.loaders' then nl = nl + 1 end end
+    eq(1, nl, 'ONE loaders site: package\'s tables are pkgloaded\'s alone, not a second plain library table')
+    local N = dump('local Z = {}\nZ.n = 1\n')
+    eq({}, N.solution.taint.escaped_root, 'an untouched package escapes nothing: the host\'s seed is no store')
+end)
