@@ -23,7 +23,7 @@
 --     NOTHING and is counted as unknown, not as clean.
 --   · A language with no table is reported as uncovered, not as floor-free.
 
--- @langs javascript python ruby tsx typescript
+-- @langs javascript lua python ruby tsx typescript
 -- MY FIRST GUESS HERE WAS `python ruby` AND THE FENCE REFUSED IT IMMEDIATELY: the
 -- module also carries the ECMAScript ladder (`M.FEATURES.javascript/typescript/tsx
 -- = ES`), so it compares js node types too. Exactly the spec/javascript.lua
@@ -214,9 +214,145 @@ local ES = {
 }
 M.FEATURES.javascript, M.FEATURES.typescript, M.FEATURES.tsx = ES, ES, ES
 
+-- ── LUA: the DETECTORS are authored, the VERSIONS are ASKED (CART-0782) ─────
+-- tree-sitter-lua parses the UNION of Lua versions, so a tree alone cannot say which
+-- version a file needs. Every entry below names a syntax SHAPE and carries snippets of
+-- it; tools/luafloor.lua feeds each snippet to every installed interpreter (loadfile:
+-- compile only, the way a file is loaded) and writes spec/luafloor.lua. An entry's
+-- version comes from THAT artifact, never from this table — the luareserved precedent
+-- (CART-1012): the interpreter answers, nothing here is recalled.
+--   · The RULER is PUC Lua. A feature the newest refusing interpreter (5.2) and the
+--     oldest accepting one (5.4) bracket is stamped 5.3, the LOWEST version it can
+--     need, with `exact = false`: no 5.3 interpreter was asked. The floor stays a
+--     lower bound, so a project declaring 5.3 is never called broken by a guess.
+--   · LuaJIT IS NOT A POINT ON THAT RULER. Asked, it accepts goto, labels, \z, \u{}
+--     and nested [[ — 5.2+ syntax — and refuses a mid-block break, an empty `;`
+--     statement and a call split across lines — exactly as 5.1 does. Each fact
+--     carries `jit` (does LuaJIT accept it) so the report can say so beside the floor.
+--   · An entry the artifact has no version for (every PUC interpreter accepts it, or
+--     none does, or accept-then-refuse, or it was never distilled) is not in
+--     M.FEATURES.lua: undistilled is not floor-free. The spec pins which entries have
+--     no version and why. One does on 2026-11-13: `\u{..}` — 5.1 ACCEPTS it (an unknown
+--     escape reads as the bare letter, so the string means something else), 5.2 refuses
+--     it, 5.4 accepts it. Loading is not the question there; meaning is.
+local function lua_text(n, src) return vim.treesitter.get_node_text(n, src) or '' end
+-- the neighbouring STATEMENT: comments and a shebang line are not statements
+local LUA_NONSTMT = { comment = true, hash_bang_line = true }
+local function lua_sib(n, dir)
+    local s = n[dir](n)
+    while s and LUA_NONSTMT[s:type()] do s = s[dir](s) end
+    return s
+end
+local function lua_escape(prefix)
+    return function (n, src) return lua_text(n, src):sub(1, #prefix) == prefix end
+end
+M.LUA_SYNTAX = {
+    { id = 'goto', desc = 'goto statement', node = 'goto_statement',
+        snippets = { 'do goto l end ::l::' } },
+    { id = 'label', desc = '::label:: statement', node = 'label_statement',
+        snippets = { '::l::' } },
+    -- 5.1: `break` [';'] must END its block
+    { id = 'break-not-last', desc = 'break with statements after it', node = 'break_statement',
+        test = function (n)
+            local s = lua_sib(n, 'next_named_sibling')
+            -- @langs-ok inside LUA_SYNTAX — lua's optional `;` after a statement
+            if s and s:type() == 'empty_statement' then s = lua_sib(s, 'next_named_sibling') end
+            return s ~= nil
+        end,
+        snippets = { 'while true do break; local x = 1 end', 'while true do break local x = 1 end' } },
+    -- 5.1: chunk ::= {stat [';']} — a `;` is only the optional terminator of a statement
+    { id = 'empty-statement', desc = '; standing as a statement', node = 'empty_statement',
+        test = function (n)
+            local p = lua_sib(n, 'prev_named_sibling')
+            -- @langs-ok inside LUA_SYNTAX — a `;` after a `;`
+            return p == nil or p:type() == 'empty_statement'
+        end,
+        snippets = { ';', 'local x = 1;;', 'do ; end', '-- a comment is not a statement\n;' } },
+    { id = 'escape-z', desc = '\\z string escape', node = 'escape_sequence',
+        test = lua_escape('\\z'), snippets = { 'local s = "a\\z\n   b"' } },
+    { id = 'escape-u', desc = '\\u{XXX} string escape', node = 'escape_sequence',
+        test = lua_escape('\\u'), snippets = { 'local s = "\\u{48}"' } },
+    -- a hex numeral with a fraction or a SIGNED binary exponent (5.1 hands an unsigned
+    -- one to the C library's strtod, which reads 0x1p4 on glibc: the oracle accepts it)
+    { id = 'hex-float', desc = 'hex fraction / signed hex exponent', node = 'number',
+        test = function (n, src)
+            local t = lua_text(n, src)
+            return t:match('^0[xX]') ~= nil and (t:find('.', 1, true) ~= nil or t:match('[pP][+-]') ~= nil)
+        end,
+        snippets = { 'local x = 0x.8', 'local x = 0x1.8', 'local x = 0x1p-4' } },
+    -- 5.1 LUA_COMPAT_LSTR: `[[` inside a level-0 long bracket is an error, string or comment
+    { id = 'nested-long-string', desc = '[[ inside a [[ string ]]', node = 'string',
+        test = function (n, src)
+            local t = lua_text(n, src)
+            return t:sub(1, 2) == '[[' and t:find('[[', 3, true) ~= nil
+        end,
+        snippets = { 'local s = [[ [[ ]]' } },
+    -- ⚠ NO QUOTED STRING IN THIS FILE MAY HOLD THE BLOCK-COMMENT OPENER: tree-sitter-lua reads it as a comment
+    -- starting INSIDE the string and the rest of the file parses as ERROR (it did, lines 321-1160). Hence the
+    -- pattern and the concatenated snippet. (Such a phantom comment never reaches this test: its tree has an ERROR,
+    -- and M.scan refuses an ERROR tree whole.)
+    { id = 'nested-long-comment', desc = '[[ inside a long comment', node = 'comment',
+        test = function (n, src)
+            local t = lua_text(n, src)
+            return t:match('^%-%-%[%[') ~= nil and t:find('[[', 5, true) ~= nil
+        end,
+        snippets = { '-' .. '-[[ [[ ]]\nlocal x = 1' } },
+    -- 5.1: "ambiguous syntax (function call x new statement)" — a `(` argument list
+    -- on a later line than the expression it calls
+    { id = 'call-across-lines', desc = 'f\\n(args) call across a line break', node = 'function_call',
+        test = function (n, src)
+            local callee, args = n:field('name')[1], n:field('arguments')[1]
+            if not (callee and args) or lua_text(args, src):sub(1, 1) ~= '(' then return false end
+            local _, _, ce = callee:range()
+            return (args:range()) > ce
+        end,
+        snippets = { 'local f = print\n(f)(1)' } },
+    { id = 'int-div', desc = '// floor division', node = 'binary_expression',
+        test = function (n) return anon(n, '//') end, snippets = { 'local x = 7 // 2' } },
+    { id = 'bit-and', desc = '& bitwise and', node = 'binary_expression',
+        test = function (n) return anon(n, '&') end, snippets = { 'local x = 7 & 2' } },
+    { id = 'bit-or', desc = '| bitwise or', node = 'binary_expression',
+        test = function (n) return anon(n, '|') end, snippets = { 'local x = 7 | 2' } },
+    { id = 'bit-xor', desc = '~ bitwise xor', node = 'binary_expression',
+        test = function (n) return anon(n, '~') end, snippets = { 'local x = 7 ~ 2' } },
+    { id = 'shift-left', desc = '<< shift', node = 'binary_expression',
+        test = function (n) return anon(n, '<<') end, snippets = { 'local x = 1 << 2' } },
+    { id = 'shift-right', desc = '>> shift', node = 'binary_expression',
+        test = function (n) return anon(n, '>>') end, snippets = { 'local x = 8 >> 2' } },
+    { id = 'bit-not', desc = '~x bitwise not', node = 'unary_expression',
+        test = function (n) return anon(n, '~') end, snippets = { 'local x = ~7' } },
+    { id = 'attrib-const', desc = 'local x <const>', node = 'attribute',
+        test = function (n, src) return lua_text(n, src):match('^<%s*const%s*>$') ~= nil end,
+        snippets = { 'local x <const> = 1' } },
+    { id = 'attrib-close', desc = 'local x <close>', node = 'attribute',
+        test = function (n, src) return lua_text(n, src):match('^<%s*close%s*>$') ~= nil end,
+        snippets = { 'local x <close> = nil' } },
+}
+
+--- The Lua table: each detector joined with its DISTILLED version. Returns the
+--- feature list and the ids left out with why (exposed for the spec and the tool).
+function M.lua_features(dist)
+    local feats, dropped = {}, {}
+    for _, f in ipairs(M.LUA_SYNTAX) do
+        local d = dist and dist.features and dist.features[f.id]
+        if d and d.v then
+            feats[#feats + 1] = { id = f.id, v = d.v, exact = d.exact, jit = d.luajit,
+                desc = f.desc, node = f.node, test = f.test }
+        else
+            dropped[f.id] = not d and 'not distilled' or (d.why or 'no version')
+        end
+    end
+    return feats, dropped
+end
+do
+    local okd, dist = pcall(require, 'cartograph.spec.luafloor')
+    M.FEATURES.lua = M.lua_features(okd and dist or nil)
+end
+
 --- Version-scale name per language, for the header: an ECMAScript year is not a
---- language version number and should not read as one.
-M.SCALE = { javascript = 'ECMAScript', typescript = 'ECMAScript', tsx = 'ECMAScript' }
+--- language version number and should not read as one. Lua's ruler is PUC Lua's
+--- (LuaJIT is a sibling dialect, reported beside it — see M.LUA_SYNTAX).
+M.SCALE = { javascript = 'ECMAScript', typescript = 'ECMAScript', tsx = 'ECMAScript', lua = 'PUC-Lua' }
 
 --- WHICH SCALE a language's versions are measured in. Facts may only be compared
 --- inside one scale: ruby 3.1, python 3.8 and ECMAScript 2022 are three different
@@ -362,6 +498,12 @@ function M.scan(lang, src)
     local ok2, trees = pcall(function () return parser:parse() end)
     local root = ok2 and trees and trees[1] and trees[1]:root()
     if not root then return nil, 'unparsed' end
+    -- the header's promise, which nothing enforced until CART-0782: a tree with an ERROR is a MISPARSE, and facts read
+    -- off it are noise — wow_addons' invalid string escapes (`\H`, `\[`, legal in 5.1 only) turned the rest of
+    -- Carbonite.lua into ERROR and 3 detectors fired on the debris. Measured before the guard: of 5133 files over
+    -- django-oscar / ruby-lsp / rails activesupport / jquery / desynced / wow_addons, 31 had an ERROR and the only
+    -- facts in them were those 3 false ones. Such a file is UNKNOWN, never clean.
+    if root:has_error() then return nil, 'parse error (the tree has an ERROR node)' end
     local out = {}
     local function walk(n)
         local cands = bynode[n:type()]
@@ -976,6 +1118,29 @@ function M.report(store)
                     :format(d.source, d.raw)
             end
         end
+        -- LUA (CART-0782): the ruler is PUC Lua's, asked of interpreters, and LuaJIT is a sibling dialect beside it
+        if k == M.scale_key('lua') and #ids > 0 then
+            local meta = {}
+            for _, f in ipairs(M.FEATURES.lua or {}) do meta[f.id] = f end
+            local guess, jn, jfirst = {}, 0, nil
+            for _, id in ipairs(ids) do
+                local m = meta[id] or {}
+                if m.exact == false and not vim.tbl_contains(guess, by[id].v) then guess[#guess + 1] = by[id].v end
+                if m.jit == false then
+                    jn = jn + by[id].n
+                    jfirst = jfirst or ('%s at %s'):format(by[id].desc, by[id].site)
+                end
+            end
+            for _, v in ipairs(guess) do
+                L[#L + 1] = ('  %s is the LOWEST version these can need: no %s interpreter was asked'):format(v, v)
+            end
+            if jn > 0 then
+                L[#L + 1] = ('  LuaJIT (a sibling dialect, not on this ruler) REFUSES %d site(s) above, first %s')
+                    :format(jn, jfirst)
+            else
+                L[#L + 1] = '  LuaJIT (a sibling dialect, not on this ruler) accepts every site above'
+            end
+        end
         local hby, hids = M.group(hedged[k] or {})
         if #hids > 0 then
             local hfloor
@@ -1019,10 +1184,16 @@ function M.report(store)
             end
             L[#L + 1] = '    ~ name-matched like the tier above. A wrong removal makes the'
             L[#L + 1] = '    ceiling too LOW, never too high, so the range errs narrow.'
-        elseif M.REMOVED[scalelangs[k][1]] == nil then
+        elseif M.REMOVED[scalelangs[k][1]] == nil and k == 'ECMAScript' then
             L[#L + 1] = '  no ceiling table for this scale — ECMAScript does not remove'
             L[#L + 1] = '  features, so there is no upper bound to compute — which is'
             L[#L + 1] = '  not the same claim as "unbounded"'
+        elseif M.REMOVED[scalelangs[k][1]] == nil then
+            -- (this branch printed the ECMAScript sentence for every scale without a table — Lua's first, CART-0782 —
+            -- and Lua DOES remove: 5.2 refuses the unknown string escapes 5.1 reads as the bare letter)
+            L[#L + 1] = '  no ceiling table for this scale — removals are not modelled,'
+            L[#L + 1] = '  so no upper bound is claimed, which is not the same claim'
+            L[#L + 1] = '  as "unbounded"'
         else
             -- silence would be ambiguous: "we looked and found nothing" reads the
             -- same as "we never looked". Say which.

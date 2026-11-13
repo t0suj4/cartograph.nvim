@@ -635,3 +635,139 @@ test('versionfloor: syntax_facts supports all four entry shapes', function ()
     eq({ text = true, mod = true, test = true, bare = true }, shapes,
         'every shape is actually in use, so the scanner cannot regress unnoticed')
 end)
+
+-- ── LUA (CART-0782): detectors authored, versions ASKED of the interpreters ───
+-- The version of every Lua entry comes from spec/luafloor.lua, which tools/luafloor.lua distils by handing each
+-- detector's snippets to lua5.1 / lua5.2 / lua5.4 / luajit. So the spec pins three things: each detector fires on its
+-- own snippets, the near-misses do not (and the interpreters agree they are 5.1-clean), and the artifact is current.
+
+local function lua_ready() return pcall(vim.treesitter.get_string_parser, '', 'lua') end
+
+-- scan with EVERY detector live (an entry the artifact gives no version is not in FEATURES.lua, so its detector
+-- would otherwise go untested)
+local function scan_all(src)
+    local saved = vf.FEATURES.lua
+    local all = {}
+    for _, f in ipairs(vf.LUA_SYNTAX) do
+        all[#all + 1] = { id = f.id, v = '0', desc = f.desc, node = f.node, test = f.test }
+    end
+    vf.FEATURES.lua = all
+    local got, why = vf.scan('lua', src)
+    vf.FEATURES.lua = saved
+    return got, why
+end
+
+test('versionfloor lua: EVERY detector fires on each of its own snippets (CART-0782)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    local dead = {}
+    for _, f in ipairs(vf.LUA_SYNTAX) do
+        for _, s in ipairs(f.snippets) do
+            if not ids(scan_all(s))[f.id] then dead[#dead + 1] = f.id .. ' on ' .. s end
+        end
+    end
+    eq({}, dead, 'a detector whose node type or test is wrong detects nothing SILENTLY')
+end)
+
+-- each must stay silent; each is also asked of lua5.1, so "not a floor feature" is the interpreter's word too
+local LUA_NEAR = {
+    { 'local x = a ~= b', '~= is not bitwise xor' },
+    { 'local x = -a', 'unary minus is not bitwise not' },
+    { 'while true do break end', 'break as the last statement' },
+    { 'while true do local x = 1 break; end', 'break; with its optional semicolon, last' },
+    -- (a comment AFTER the last statement attaches outside the block; between break and its `;` it stays inside)
+    { 'while true do break -- done\n; end', 'break, a comment, then its optional ;' },
+    { '-' .. '-[[ a plain block comment ]]\nlocal x = 1', 'a long comment with no [[ inside' },
+    { 'local x = 1; local y = 2;', 'a ; terminating a statement' },
+    { 'local x = 1 -- set\n;', 'a ; terminating the statement before a comment' },
+    { 'local s = [[ a ]]', 'a long string with no [[ inside' },
+    { 'local s = "a // b & c"', 'operators inside a string' },
+    { '-- a // b, local x <const>\nlocal y = 1', 'operators inside a comment' },
+    { 'local s = [=[ [[ ]=]', '[[ inside a LEVEL-1 long string' },
+    { '--[==[ [[ ]==]\nlocal x = 1', '[[ inside a level-2 long comment' },
+    { 'local x = 0x1p4 + 0xFF', 'an unsigned hex exponent (5.1 reads it through strtod) and a plain hex' },
+    { 'local f = g(\n  1)', 'a ( on the callee\'s own line' },
+    { 'local t = f\n{ 1 }', 'a table argument on the next line (only ( is ambiguous)' },
+}
+
+test('versionfloor lua: the near-misses do not fire (CART-0782)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    for _, c in ipairs(LUA_NEAR) do
+        local got, why = scan_all(c[1])
+        ok(got, c[2] .. ': the snippet parses (' .. tostring(why) .. ')')
+        eq(0, #got, c[2] .. ': ' .. c[1])
+    end
+end)
+
+test('versionfloor lua: the near-misses ARE 5.1-clean, by lua5.1 itself (CART-0782)', function ()
+    if vim.fn.executable('lua5.1') ~= 1 then skip('lua5.1 is not installed') end
+    local COMPILE = 'local f, e = loadfile() if not f then io.stderr:write(tostring(e)) os.exit(1) end'
+    for _, c in ipairs(LUA_NEAR) do
+        local r = vim.system({ 'lua5.1', '-e', COMPILE }, { stdin = c[1] .. '\n', text = true }):wait()
+        eq(0, r.code, c[2] .. ' — lua5.1 refused it: ' .. tostring(r.stderr))
+    end
+end)
+
+test('versionfloor lua: the versions are the interpreters\' answers, LuaJIT kept apart (CART-0782)', function ()
+    local D = require 'cartograph.spec.luafloor'
+    local F = D.features
+    for _, id in ipairs { 'goto', 'label', 'break-not-last', 'empty-statement', 'escape-z', 'hex-float',
+        'nested-long-string', 'nested-long-comment', 'call-across-lines' } do
+        eq('5.2', F[id] and F[id].v, id .. ': 5.1 refuses, 5.2 accepts')
+        eq(true, F[id].exact, id .. ': and 5.2 was asked')
+    end
+    for _, id in ipairs { 'int-div', 'bit-and', 'bit-or', 'bit-xor', 'shift-left', 'shift-right', 'bit-not',
+        'attrib-const', 'attrib-close' } do
+        eq('5.3', F[id] and F[id].v, id .. ': the LOWEST it can need — 5.2 refuses, 5.4 accepts')
+        eq(false, F[id].exact, id .. ': no 5.3 interpreter was asked, and the artifact says so')
+    end
+    -- LuaJIT is a sibling dialect: 5.2 syntax it takes, 5.2 syntax it refuses
+    eq(true, F['goto'].luajit, 'LuaJIT accepts goto')
+    eq(false, F['break-not-last'].luajit, 'LuaJIT refuses a mid-block break, as 5.1 does')
+    eq(false, F['int-div'].luajit, 'LuaJIT refuses //')
+    -- the one entry with no version, and why: loading is not its question, meaning is
+    local feats, dropped = vf.lua_features(D)
+    eq({ ['escape-u'] = F['escape-u'].why }, dropped, 'only \\u{} goes without a version')
+    ok(F['escape-u'].why:find('removal', 1, true), '5.1 accepts it, 5.2 refuses it: ' .. F['escape-u'].why)
+    eq(#vf.LUA_SYNTAX - 1, #feats, 'every other detector is in the floor table')
+    eq(#vf.LUA_SYNTAX, D.detectors, 'the artifact was distilled from this detector set')
+end)
+
+test('versionfloor lua: re-distilling reproduces the artifact (CART-0782)', function ()
+    for _, b in ipairs { 'lua5.1', 'lua5.2', 'lua5.4', 'luajit' } do
+        if vim.fn.executable(b) ~= 1 then skip(b .. ' is not installed: the artifact cannot be re-derived here') end
+    end
+    local root = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
+    local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', root .. '/tools/luafloor.lua', '--check' },
+        { text = true, cwd = root }):wait()
+    eq(0, r.code, (r.stdout or '') .. (r.stderr or ''))
+end)
+
+test('versionfloor: a tree with an ERROR is UNKNOWN, its facts never read (CART-0782)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    -- wow_addons' Carbonite.lua: an escape 5.2+ refuses turns the rest of the file into ERROR, and detectors fired
+    -- on the debris. The same file without the error is read normally.
+    local got, why = vf.scan('lua', 'local s = "a\\Hb"\nlocal t = {\nlocal x = 7 // 2')
+    eq(nil, got, 'no facts from a misparse')
+    ok(why and why:find('parse error', 1, true), 'and the reason says so: ' .. tostring(why))
+    ok(ids(vf.scan('lua', 'local x = 7 // 2'))['int-div'], 'the clean file is read')
+end)
+
+test('versionfloor lua: the report names the PUC ruler, the guessed version and LuaJIT (CART-0782)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.lua', { 'local M = {}', 'function M.f(a) return a // 2 end', 'return M' })
+    write(root, 'b.lua', { 'local M = {}', 'function M.g() goto done ::done:: end', 'return M' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('version floor — lua: PUC-Lua 5.3', 1, true), 'the floor on the PUC ruler: ' .. text:sub(1, 80))
+    ok(text:find('5.3 is the LOWEST version these can need: no 5.3 interpreter was asked', 1, true),
+        'the inexact version is disclosed: ' .. text)
+    ok(text:find('LuaJIT (a sibling dialect, not on this ruler) REFUSES 1 site(s) above, first // floor division at a.lua:2',
+        1, true), 'LuaJIT is answered beside the ruler, not on it: ' .. text)
+    ok(text:find('removals are not modelled', 1, true), 'no ceiling table, said plainly')
+    ok(not text:find('ECMAScript does not remove', 1, true), 'and not ECMAScript\'s sentence')
+    vim.fn.delete(root, 'rf')
+end)
