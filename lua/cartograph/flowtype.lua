@@ -2008,6 +2008,7 @@ local function build(store, opts)
     -- a table too, but its name does not say so
     G7.HKINDS, G7.CREATES, G7.FRESH, G7.EROOTC, G7.HFIELDS = {}, {}, {}, {}, {}
     G7.NSCLASS, G7.NSKINDS = {}, {} -- (a library namespace's class, iolib for io; its members' measured kinds — CART-2043)
+    G7.NSDECL = {} -- (a namespace's table members ANOTHER version has, by the meta's `---@version`: package.searchers, CART-2034)
     G7.HOSTMODS, G7.HOSTUSED = {}, {} -- (the host models' module ports; the keys a call bound to a model, CART-1785)
     G7.FNSIZE, G7.WALKBYTES = {}, 0 -- (a walked function's id -> its byte length; the tree's walked bytes)
     do
@@ -2021,6 +2022,7 @@ local function build(store, opts)
             for sk, c in pairs(pr and pr.creates or NOTHING) do if G7.CREATES[sk] == nil then G7.CREATES[sk] = c end end
             for t, m in pairs(pr and pr.class_fields or NOTHING) do if G7.HFIELDS[t] == nil then G7.HFIELDS[t] = m end end
             for ns, c in pairs(pr and pr.ns_class or NOTHING) do if G7.NSCLASS[ns] == nil then G7.NSCLASS[ns] = c end end
+            for ns, m in pairs(pr and pr.declared_members or NOTHING) do if G7.NSDECL[ns] == nil then G7.NSDECL[ns] = m end end
             for ns, t in pairs(pr and pr.types or NOTHING) do
                 if type(t) == 'table' and type(t.kinds) == 'table' and G7.NSKINDS[ns] == nil then G7.NSKINDS[ns] = t.kinds end
             end
@@ -2693,6 +2695,20 @@ local function build(store, opts)
         local tbl = {}
         for f, ty in pairs(G7.HFIELDS[G7.NSCLASS.package or ''] or NOTHING) do if ty == 'table' then tbl[f] = true end end
         for f, k in pairs(G7.NSKINDS.package or NOTHING) do if k == 'table' then tbl[f] = true end end
+        -- (and a table member ANOTHER version has — package.searchers, `---@version >5.2` — where the analysed code may
+        -- run on that version: unstated (every version's behaviour) or stated in range, CART-2034. flowpath refused
+        -- `package.loaders or package.searchers` as host-member:package.searchers, its cell empty)
+        for f, d in pairs(G7.NSDECL.package or NOTHING) do
+            local v = type(d) == 'table' and d.kind == 'table' and tostring(d.version or '')
+            local ok
+            if not v then ok = false
+            elseif v:match('^>') then
+                local a, b = v:match('^>(%d)%.(%d)$'); ok = a == nil or G7.since(tonumber(a) * 10 + tonumber(b))
+            elseif v:match('^<') then
+                local a, b = v:match('^<(%d)%.(%d)$'); ok = a == nil or not (G7.LUAVSTATED and G7.LUAVER > tonumber(a) * 10 + tonumber(b))
+            else ok = true end
+            if ok then tbl[f] = true end
+        end
         for f in sorted(tbl) do
             if f ~= 'loaded' then
                 local o = newobj('lib:package.' .. f)

@@ -5448,3 +5448,30 @@ test('flowtype: a by-name signature applies only where the root IS the global, o
         'a local util / buffer / os is the tree\'s own; `local vim = vim` and the global os keep their signatures')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2034: package.searchers is a table on 5.2+ — LuaJIT, the profile's interpreter, has loaders instead, so it was
+-- never a member and read nothing: flowpath refused `package.loaders or package.searchers` as
+-- host-member:package.searchers. The meta declares it under `---@version >5.2`; luadistill keeps that as
+-- declared_members, and flowtype gives it package's host-table site where the code may run on 5.2+)
+test('flowtype: package.searchers is a host table where the code may be 5.2+, absent on a stated 5.1 (CART-2034)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local P = require 'cartograph.spec.profile'
+    eq('>5.2', P.load('luajit').declared_members.package.searchers.version, 'distilled from the meta\'s version tag')
+    local root = tree({ ['m.lua'] = 'local function sinks(x) return x end\nlocal A = {}\npackage.searchers.k = A\nsinks(package.searchers.k)\n' })
+    store.ingest(ts.extract(root))
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        P.load = function (nm, ...) if nm == 'stub' then return { lua_version = lv } end return old(nm, ...) end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        for _, c in ipairs(store.data.calls) do
+            if (c.to or ''):match('::sinks@') then local l, why = R.arg_objs(c, 1); return l and table.concat(vim.fn.sort(l), ' ') or why end
+        end
+    end
+    eq('partial', run(nil), 'unstated: a host table (a store escapes it, as preload / loaders)')
+    eq('partial', run('5.4'), '5.4: the same')
+    eq('', run('5.1'), '5.1: no such member — it reads nothing')
+    vim.fn.delete(root, 'rf')
+end)

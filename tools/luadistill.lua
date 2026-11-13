@@ -145,6 +145,9 @@ local R = require('cartograph.metaread').new()
 local annot = require('cartograph.annot')
 local class_fields, n_cfield = {}, 0
 local ns_class = {} -- namespace -> the class whose block ends at its `ns = {}` (CART-2043)
+-- namespace -> member -> { kind, version }: a TABLE member the meta declares (`package.searchers = {}`) under its
+-- `---@version` tag, where this interpreter has no such member — another version's (CART-2034)
+local declared_members = {}
 
 local meta_files = {}
 if META ~= '' and vim.fn.isdirectory(META) == 1 then
@@ -206,6 +209,24 @@ for _, path in ipairs(meta_files) do
     else
         -- A CLASS'S FIELDS (CART-1827): `---@class debuginfo` and the `---@field source string` lines under it, as
         -- declared — the claim in full; a consumer decides which it may believe (flowtype takes the primitive ones)
+        -- (a table MEMBER the meta declares with a version tag that this interpreter does not hold: package.searchers,
+        -- `---@version >5.2` — LuaJIT has loaders instead. Kept apart from `kinds`, which are measured, CART-2034)
+        do
+            local ver
+            for _, l in ipairs(lines) do
+                if l:match('^%-%-%-') then
+                    ver = l:match('^%-%-%-%s*@version%s+(%S+)') or ver
+                else
+                    local ns, m = l:match('^([%a_][%w_]*)%.([%a_][%w_]*)%s*=%s*{%s*}%s*$')
+                    local have = ns and types[ns] and types[ns].members
+                    if ns and NAMESPACES[ns] and not (have and have[m]) then
+                        declared_members[ns] = declared_members[ns] or {}
+                        declared_members[ns][m] = { kind = 'table', version = ver }
+                    end
+                    ver = nil
+                end
+            end
+        end
         local cls
         for _, l in ipairs(lines) do
             local tag, body = l:match('^%-%-%-%s*@(%a+)%s*(.*)$')
@@ -361,6 +382,8 @@ local prof = {
     class_fields = next(class_fields) and class_fields or nil,
     -- the class each library namespace IS (iolib types io), read off the meta (CART-2043)
     ns_class = next(ns_class) and ns_class or nil,
+    -- table members another version has, by the meta's `---@version` (CART-2034): package.searchers (>5.2)
+    declared_members = next(declared_members) and declared_members or nil,
     sig_root = (n_sig > 0) and META or nil,
     sig_kind = (n_sig > 0) and 'annotation' or nil,
     -- WHETHER A SOURCE WAS PRESENT AT ALL — so "this member has no signature" and
