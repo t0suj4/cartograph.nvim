@@ -3423,9 +3423,11 @@ test('flowdump: a constructor into the native setmetatable is one newmeta; hooks
 end)
 
 -- (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51 — experiment guard-filters: a type guard's then-block reads
--- a filtered variable, ["filterType", x, y, tag, positive]. What passes is the core's Guard.asite or more: `== "function"`
--- keeps a table (it may be a native function), `~= "function"` and `== "table"` drop a closure. Not for a heap path, a
--- reassigned local, a shadowed `type`, or a block holding a closure; off by default)
+-- a filtered variable, ["filterType", x, y, tag, positive]. What passes is the core's Guard.asite or more: `~= "function"`
+-- and `== "table"` drop a closure; since D52 (FLOW-0188) a TABLE SITE is surely a table, so `== "function"` and
+-- `~= "table"` drop it, and `~= "thread"` (which the core reads as `~= object`) gets no filter. x is written by the filter
+-- alone (D21's π-node: a `new x a` per literal of y made it non-fresh, FLOW-0189). Not for a heap path, a reassigned
+-- local, a shadowed `type`, or a block holding a closure; off by default)
 test('flowdump: a type guard\'s then-block reads a filtered variable under guard-filters (CART-1920)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local function run(guard, exp)
@@ -3448,10 +3450,27 @@ test('flowdump: a type guard\'s then-block reads a filtered variable under guard
     end
     local GF = { ['guard-filters'] = true }
     local o, n, D = run('type(v) == "function"', GF)
-    eq(1, n, 'one filter'); eq({ 'F', 'T' }, o, '== "function" keeps the table: it may be a native function')
+    eq(1, n, 'one filter'); eq({ 'F' }, o, '== "function" drops the table site: surely a table (D52)')
     eq(0, flowcheck.check(D).failed, 'closed')
     o = run('type(v) ~= "function"', GF); eq({ 'T' }, o, '~= "function" drops the closure')
     o = run('type(v) == "table"', GF); eq({ 'T' }, o, '== "table" drops the closure')
+    local Dn; o, _, Dn = run('type(v) ~= "table"', GF); eq({ 'F' }, o, '~= "table" drops the table site')
+    eq(0, flowcheck.check(Dn).failed, 'and flowcheck reads the table site as D52 does')
+    o, n = run('type(v) ~= "thread"', GF); eq(0, n, '~= "thread" gets no filter: the core reads it as ~= object'); eq({ 'F', 'T' }, o)
+    o, n = run('type(v) == "thread"', GF); eq(1, n, '== "thread" is a positive object filter'); eq({ 'T' }, o)
+    -- (x is FRESH: y's literals — a string, a closure, a table — reach x through the filter only, never a `new x`)
+    local Df = dump(table.concat({
+        'local Z = {}',
+        'local function F() end',
+        'local function g(k) local v = k == 1 and "" or k == 2 and F or {}; if type(v) == "function" then local w = v; Z.w = w end end',
+        'g(1); g(2); g(3)' }, '\n') .. '\n', GF)
+    local fxv, writers = nil, 0
+    for _, Fn in ipairs(Df.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then fxv = i[2] end end end
+    for _, Fn in ipairs(Df.functions) do for _, i in ipairs(Fn.body) do
+        if i[2] == fxv and i[1] ~= 'filterType' and i[1] ~= 'store' and i[1] ~= 'storeRaw' and i[1] ~= 'call' then writers = writers + 1 end
+    end end
+    ok(fxv ~= nil, 'the filter is emitted'); eq(0, writers, 'the filter alone writes its destination')
+    eq(0, flowcheck.check(Df).failed, 'closed')
     o, n = run('type(v) == "table"'); eq(0, n, 'off by default'); eq({ 'F', 'T' }, o)
     -- (a debug hook could change v under the guard: the filter passes everything — G7.tfiltfix)
     local Dh = dump('local Z, T = {}, {}\nlocal function F() end\ndebug.sethook(function () end, "c")\n'

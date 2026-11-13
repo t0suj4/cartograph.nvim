@@ -53,6 +53,7 @@ for _, s in ipairs(S.rin) do RIN[s] = true end
 for _, s in ipairs(S.rout) do ROUT[s] = true end
 local FNOF, HOST, GLOBALS = {}, {}, nil
 local UDATA = {} -- (proxy sites: the core's userdata, CART-1920)
+local TBLS = {} -- (table sites: tbl: constructors and newproxy's metatable — D52's Prog.tbl)
 local STRLIB = D.contracts and D.contracts.strlib_site ~= NULL and D.contracts.strlib_site or nil
 local STRSITE, EXTSITE
 local EXTCH = D.contracts and D.contracts.ext_channel ~= NULL and D.contracts.ext_channel or nil
@@ -63,6 +64,7 @@ for _, st in ipairs(D.sites) do
     if st.kind == 'globals' then GLOBALS = st.id end
     if st.kind == 'type' or st.kind == 'ext' then HOST[st.id] = true end -- (contract:host: no fields)
     if st.kind == 'proxy' then UDATA[st.id] = true end -- (newproxy's userdata: the core's udata site, CART-1920)
+    if st.kind == 'table' then TBLS[st.id] = true end -- (a table site is surely a table: CORE.md D52, FLOW-0188)
 end
 local CODE = {}
 for _, f in ipairs(D.functions) do CODE[f.id] = f end
@@ -274,10 +276,11 @@ for _, F in ipairs(D.functions) do
             if TOP[y] and not TOP[x] then fail('filter-top', x, 'y is top') end
             for a0 in pairs(v(y)) do
                 local pass
-                if not pos then pass = not ((tag == 'function' and FNOF[a0]) or (tag == 'userdata' and UDATA[a0]))
+                if not pos then pass = not ((tag == 'function' and FNOF[a0]) or (tag == 'userdata' and UDATA[a0]) or (tag == 'object' and TBLS[a0]))
                 elseif tag == 'nil' then pass = false
                 elseif FNOF[a0] then pass = tag == 'function'
                 elseif UDATA[a0] then pass = tag == 'userdata'
+                elseif TBLS[a0] then pass = tag == 'object'
                 else pass = tag ~= 'prim' end
                 if pass and not hasv(x, a0) then fail('filter', x, ('v lacks %d'):format(a0)) end
             end

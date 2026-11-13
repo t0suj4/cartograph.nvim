@@ -2080,6 +2080,10 @@ local function build(store, opts)
     -- a native, unknown code) for any tag but nil, any other object for function / userdata / object; a negative one
     -- drops only what surely has the tag (a closure for ~= "function", a proxy for ~= "userdata"). Where the tree has a
     -- debug hook or a getlocal / setlocal, a frame could change y under the guard: every filter passes all (G7.tfiltfix)
+    -- ★ A TABLE SITE IS SURELY A TABLE (flowpath FLOW-0188, CORE.md D52): a constructor's object (`tbl:`) or newproxy's
+    -- metatable (`proxymt:`) — the dump's sites of kind `table` — passes a positive guard only for object and a negative
+    -- one never for object. So `~= "thread"` / `~= "cdata"`, which the core reads as `~= object` too, would drop a table
+    -- Lua keeps: those guards get no filter (G7.typeguard)
     G7.GTAG = { ['nil'] = 'nil', string = 'prim', number = 'prim', boolean = 'prim', ['function'] = 'function',
         userdata = 'userdata', table = 'object', thread = 'object', cdata = 'object' } -- (a G7 field: build is at 200 locals)
     function G7.tagpass(o, tag, pos)
@@ -2088,14 +2092,17 @@ local function build(store, opts)
         if not pos then
             if tag == 'function' then return not code end
             if tag == 'userdata' then return not ud end
+            if tag == 'object' then return not G7.tblsite(o) end
             return true
         end
         if tag == 'nil' then return false end
         if code then return tag == 'function' end
         if ud then return tag == 'userdata' end
+        if G7.tblsite(o) then return tag == 'object' end
         if TNAME[o] or G7.NATIVE[o] or o == G7.EXT or G7.XC[o] then return true end
         return tag ~= 'prim'
     end
+    function G7.tblsite(o) local i = tostring(obinfo[o] or ''); return i:find('^tbl:') ~= nil or i:find('^proxymt:') ~= nil end
     G7.TFILT = {}
     function G7.typeguard(c, lookup, reasg, txt, strval)
         if not c or c:type() ~= 'binary_expression' then return nil end
@@ -2115,7 +2122,7 @@ local function build(store, opts)
         if glob or not p or reasg()[nm] then return nil end
         local lit = strval(r)
         local tag = lit and G7.GTAG[lit]
-        if not tag then return nil end
+        if not tag or (op == '~=' and tag == 'object' and lit ~= 'table') then return nil end
         return { nm = nm, y = p, tag = tag, pos = op == '==' }
     end
     -- (does the block hold a function — a closure that could CAPTURE the filtered variable? flowpath boxes captured
@@ -5153,7 +5160,9 @@ local function build(store, opts)
                     if cq and x:id() == cq:id() then
                         local xp = new()
                         local tag, pos = g.tag, g.pos
-                        filter(g.y, xp, function (o) return G7.tagpass(o, tag, pos) end)
+                        -- (MUTED: what y holds now reaches x through the filter alone — a `new x a` per passing literal made x
+                        -- non-fresh, D21's π-node condition, and a closure's second creation; flowpath FLOW-0189)
+                        G7.mu(function () filter(g.y, xp, function (o) return G7.tagpass(o, tag, pos) end) end)
                         G7.TFILT[#G7.TFILT + 1] = { g.y, xp }
                         G7.ins({ 'filterType', xp, g.y, tag, pos })
                         scopes[#scopes + 1] = { [g.nm] = xp }
