@@ -5331,6 +5331,7 @@ local function build(store, opts)
     local S = { new = new, newobj = newobj, addobj = addobj, edge = edge, ofp = ofp, field = field, storec = storec,
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
         filter = filter, proto = proto, gfilter = gfilter, each = each, fields = function (o) return ofield[o] end,
+        gfwide = function () G7.GFWIDE = true end, -- (instanceof may be redefined in this tree: every guard keeps all, CART-1914)
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
     -- (opts.dump: the walker's primitives RECORD — a primitive the walker calls is an instruction, what it does inside,
@@ -5591,27 +5592,48 @@ local function build(store, opts)
         if more then solve() end
     end
     -- (the instanceof GUARDS to a fixpoint: admit what the solved prototypes allow, solve again — sets only grow)
-    for _ = 1, 20 do
-        local grew = false
-        for _, gf in ipairs(gfilters) do
-            local gp = {}
-            for g in each(gf[3]) do gp[g] = true end
-            if next(gp) then
-                local function chain(o, seen)
-                    if gp[o] then return true end
-                    if seen[o] then return false end
-                    seen[o] = true
-                    for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end
-                    return false
-                end
-                for o in each(gf[1]) do
-                    if not gf[4][o] and chain(o, {}) then gf[4][o] = true; addobj(gf[2], o); grew = true end
+    -- ★ AND NEVER UNDER THE GUARD (CART-1914, flowpath's reading of the source): the loop stopped at 20 rounds with
+    -- what was still passing left out, and a guard whose prototype set was EMPTY admitted nothing. Now a guard WIDENS —
+    -- a permanent copy src -> dst, so what arrives later flows too — where its prototype is unknown (empty, top, unknown
+    -- code's), where the JS tree may redefine instanceof (Symbol.hasInstance) or the chain it walks (a Proxy:
+    -- G7.GFWIDE), and every guard still growing at the cap. Run again before the taint phase (G7.gfix): later phases add
+    -- objects and prototype links the first run never saw
+    function G7.gfunk(gport) -- (a guard that KNOWS NOTHING: its prototype unknown, empty, or the tree's instanceof redefinable)
+        local u, any = G7.GFWIDE or top[gport], false
+        for g in each(gport) do any = true; if g == G7.EXT or G7.XC[g] then u = true end end
+        return u or not any
+    end
+    function G7.gfix()
+        for _ = 1, opts.gf_rounds or 20 do -- (opts.gf_rounds: a test's lower cap)
+            local grew = false
+            for _, gf in ipairs(gfilters) do
+                if not gf.wide then
+                    local gp = {}
+                    for g in each(gf[3]) do gp[g] = true end
+                    if G7.gfunk(gf[3]) then
+                        gf.wide = true; edge(gf[1], gf[2]); grew = true
+                    else
+                        local function chain(o, seen)
+                            if gp[o] then return true end
+                            if seen[o] then return false end
+                            seen[o] = true
+                            for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end
+                            return false
+                        end
+                        for o in each(gf[1]) do
+                            if not gf[4][o] and chain(o, {}) then gf[4][o] = true; addobj(gf[2], o); grew = true end
+                        end
+                    end
                 end
             end
+            if not grew then return end
+            solve()
         end
-        if not grew then break end
+        G7.GFCAP = (G7.GFCAP or 0) + 1 -- (the cap: every guard still narrowing widens)
+        for _, gf in ipairs(gfilters) do if not gf.wide then gf.wide = true; edge(gf[1], gf[2]) end end
         solve()
     end
+    G7.gfix()
     -- (THE STRING METATABLE, DEFERRED (CART-1811): getmetatable(y) / debug.setmetatable(y, mt) touch every string's
     -- metatable where y holds strings only — G7.strmt_into)
     if #G7.STRPEND > 0 then
@@ -6305,6 +6327,7 @@ local function build(store, opts)
         if fpp.err then l[#l + 1] = fpp.err end
         return l
     end
+    if gfilters[1] then G7.gfix() end -- (the later phases' arrivals and prototype links, CART-1914)
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
     -- (an escaped object's fields and prototypes escaped WITH it: the solve no longer follows it, so a load through a
@@ -7165,9 +7188,10 @@ local function build(store, opts)
         if not unknown then
             local out = {}
             -- (a GUARD — `x instanceof C` around the call — keeps only the objects whose prototype chain holds one of
-            -- C's prototypes: a runtime type check, decided after the solve, when the sets are whole)
+            -- C's prototypes: a runtime type check, decided after the solve, when the sets are whole) — none where the
+            -- guard knows nothing (G7.gfunk, CART-1914): an empty guard had kept nothing, a verdict of no target
             local keep
-            if pr.guard then
+            if pr.guard and not G7.gfunk(pr.guard) then
                 keep = {}
                 local gp = {}
                 for g in each(pr.guard) do gp[g] = true end

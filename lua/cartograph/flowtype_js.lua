@@ -101,6 +101,22 @@ function M.walker(S, files)
         local tree = parser:parse()[1]:root()
         local fnmap = S.fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
+        -- ★ instanceof MAY NOT BE THE PROTOTYPE WALK (CART-1914): `C[Symbol.hasInstance]` is an arbitrary predicate, and a
+        -- Proxy's getPrototypeOf trap returns any chain. Where a file names `Symbol.hasInstance` or constructs a `Proxy`,
+        -- every instanceof guard of the solve keeps its whole source (S.gfwide). From the tree, never the text; a shadowed
+        -- Symbol / Proxy is counted too — conservative
+        if S.gfwide then
+            local okq, q = pcall(vim.treesitter.query.parse, lang,
+                '(member_expression object: (identifier) @o property: (property_identifier) @p) (new_expression constructor: (identifier) @c)')
+            if okq then
+                for id, nd in q:iter_captures(tree, src) do
+                    local nm, t = q.captures[id], txt(nd)
+                    if (nm == 'p' and t == 'hasInstance' and txt(nd:parent():field('object')[1]) == 'Symbol') or (nm == 'c' and t == 'Proxy') then
+                        S.gfwide(); break
+                    end
+                end
+            end
+        end
         local mod = module_of(file)
         -- (where `export` writes: the module object, or a NAMESPACE's while its body is walked)
         local exportto = { mod }

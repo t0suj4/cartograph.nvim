@@ -1286,6 +1286,51 @@ test('flowtype (ts): inside `if (x instanceof B)` and `x instanceof B ? …` x h
     one('name@8:44', 'Node2%.name', 'and the callback it hands Node2.visit holds only Node2s')
 end)
 
+-- ★ AN instanceof GUARD NEVER NARROWS PAST WHAT IT KNOWS (CART-1914): a class the solve does not see (an unresolved
+-- import: its prototype is empty or unknown code's), a tree that names `Symbol.hasInstance` (instanceof runs any
+-- predicate) or builds a `Proxy` (getPrototypeOf returns any chain), and a guard still growing at the round cap — each
+-- keeps the WHOLE source in the branch, where it had kept nothing or a partial set
+test('flowtype (ts): an instanceof guard with an unknown class, a hasInstance or Proxy tree, or at the cap keeps all', function ()
+    if not parser_available('typescript') then skip 'no typescript parser' end
+    local base = {
+        'class Leaf { name(): string { return "leaf"; } }',
+        'class Node2 { name(): string { return "node"; } }',
+        'function pick(k: number) { return k > 0 ? new Leaf() : new Node2(); }',
+        'const v = pick(1);',
+    }
+    local function run(extra, opts)
+        local lines = vim.list_extend(vim.deepcopy(base), extra)
+        local root = tree({ ['src/m.ts'] = table.concat(lines, '\n') })
+        store.ingest(ts.extract(root))
+        local R = flowtype.of(store, vim.tbl_extend('force', { open = false }, opts or {}))
+        vim.fn.delete(root, 'rf')
+        local got = {}
+        for _, p in ipairs(R.probes) do
+            if p.member == 'name' and p.line >= #base then
+                for _, t in ipairs(p.targets) do got[#got + 1] = t:match('(%w+)%.name@') end
+            end
+        end
+        table.sort(got)
+        return table.concat(got, ' ')
+    end
+    eq('Leaf', run({ 'if (v instanceof Leaf) { v.name(); }' }), 'the control: a known class narrows')
+    eq('Leaf Node2', run({ 'import { Ext } from "nowhere";', 'if (v instanceof Ext) { v.name(); }' }, { open = true }),
+        'an unresolved class keeps the whole source')
+    eq('Leaf Node2', run({ 'export function g(C: any) { if (v instanceof C) { v.name(); } }' }, { open = true }),
+        'a class an exported function is handed keeps the whole source (empty today, unknown code\'s once CART-2052 seeds it)')
+    eq('Leaf Node2', run({ 'if (v instanceof Leaf) { v.name(); }', 'const s = Symbol.hasInstance;' }),
+        'a tree naming Symbol.hasInstance: instanceof may be any predicate')
+    eq('Leaf Node2', run({ 'if (v instanceof Leaf) { v.name(); }', 'const p = new Proxy({}, {});' }),
+        'a tree building a Proxy: the chain may be any')
+    -- (the cap: the verdict at the guarded call is still filtered — over whole sets — but the FLOW out of the branch is
+    -- the guard's port: a callback handed on inside it sees what the widened guard let through)
+    local cb = { 'if (v instanceof Leaf) { v.visit(x => x.name()); }' }
+    base[1] = 'class Leaf { visit(f: (x: Leaf) => void): void { f(this); } name(): string { return "leaf"; } }'
+    base[2] = 'class Node2 { visit(f: (x: Node2) => void): void { f(this); } name(): string { return "node"; } }'
+    eq('Leaf', run(cb), 'the control: the callback sees only the Leaf')
+    eq('Leaf Node2', run(cb, { gf_rounds = 0 }), 'a guard still growing at the round cap widens')
+end)
+
 -- ★ a TS NAMESPACE is an object of its exports, a barrel's `export * from` / `export { a as b } from` re-exports,
 -- and a bare specifier resolves through tsconfig `paths` (typebox-codegen, scored: `Formatter.Format(…)` from
 -- `export namespace Formatter`, reached via `export * from './formatter'` and `@sinclair/typebox-codegen` → src/index.ts:
