@@ -1398,6 +1398,9 @@ local function build(store, opts)
         local args, rets = {}, {}
         for k = 1, multi do args[k] = gresarg(); rets[k] = gyield() end
         args.spread = multi
+        -- (and EVERY return, past the fourth too: `return A, B, C, D, E` — the out-channel's last port collects the rest,
+        -- CART-1948's marker; it held four, so a resumer's fifth value had nothing, flowpath FLOW-0186 rest c2 / c6, CART-2050)
+        rets.rest = multi
         G7.callc(field(co, '\1co', true), args, rets, nil, G7.cerrch()) -- (G7.callc: callc is defined below)
     end
     idxcall = function (g, o, f, dst)

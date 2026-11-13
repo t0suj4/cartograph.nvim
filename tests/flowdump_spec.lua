@@ -3322,3 +3322,30 @@ test('flowdump: a store into a debug.getinfo result is the table\'s own; its sca
     local F = dump('local Z = {}\nlocal function g() for k, v in pairs(debug.getinfo(1, "f")) do Z.v = v end end\ng()\n')
     for _, x in ipairs(stored(F, 'v')) do ok(not x:match('^type:'), 'no scalar field under what "f": ' .. x) end
 end)
+
+-- (CART-2050, flowpath FLOW-0186 rest c2 / c6: a coroutine RETURNING five values — the out-channel `rout` held the first
+-- four, so `local ok, a, b, c, d, e = coroutine.resume(co)` had nothing in e, where Lua delivers E. The channel's call now
+-- carries CART-1948's rest marker: its last port collects every return past it)
+test('flowdump: a coroutine\'s fifth return value reaches its resumer through the out-channel (CART-2050)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function lab(D) local l = {}; for _, x in ipairs(D.sites) do l[x.id] = x.label end; return l end
+    local function stored(D, f)
+        local l, v, out = lab(D), {}, {}
+        for _, e in ipairs(D.solution.v) do v[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == f then for _, s in ipairs(v[i[4]] or {}) do out[#out + 1] = l[s] end end
+            end
+        end
+        table.sort(out)
+        return out
+    end
+    local D = dump('local Z = {}\nlocal A, B, C, D0, E = {}, {}, {}, {}, {}\n'
+        .. 'local co = coroutine.create(function () return A, B, C, D0, E end)\n'
+        .. 'local ok, a, b, c, d, e = coroutine.resume(co)\nZ.e = e\n')
+    local rout = {}
+    for _, s in ipairs(D.solution.rout) do rout[lab(D)[s]] = true end
+    ok(rout['tbl:m.lua:7:39'], 'E (the fifth) is in the out-channel: ' .. vim.inspect(rout))
+    ok(vim.tbl_contains(stored(D, 'e'), 'tbl:m.lua:7:39'), 'and reaches the resumer\'s e: ' .. vim.inspect(stored(D, 'e')))
+    eq(0, flowcheck.check(D).failed, 'closed')
+end)
