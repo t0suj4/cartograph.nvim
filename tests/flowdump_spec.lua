@@ -3598,6 +3598,39 @@ test('flowdump: a type guard\'s then-block reads a filtered variable, by default
     ok(flowcheck.check(D3).failed > 0, 'a filter that lost a passing site fails')
 end)
 
+-- (CART-2058: a LIBRARY table — the clause libraries-never-escape's sites, contracts.library_sites — is a table: the dump
+-- gives it kind `table`, so flowpath's tblS reads it as D52 reads a constructor's object, and the guard filters treat it
+-- so: `== "function"` / `~= "table"` drop it. On the self tree the last escaped cell holding library tables was
+-- self_oracle's `fn = val` under `t == 'function'`. `_G` keeps its own kind, `globals`; under the experiment libs-escape
+-- the libraries are ordinary objects of kind `other` again)
+test('flowdump: a library table is a table site: a function guard drops it (CART-2058)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(guard, exp)
+        local D = dump(table.concat({
+            'local Z = {}',
+            'local function F() end',
+            'local function g(v) if ' .. guard .. ' then local w = v; Z.w = w end end',
+            'g(string); g(os); g(F); g(_G)' }, '\n') .. '\n', exp)
+        local lab, kind, vv, out = {}, {}, {}, {}
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label; kind[x.label] = x.kind end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        for _, Fn in ipairs(D.functions) do for _, i in ipairs(Fn.body) do
+            if i[1] == 'store' and D.names.fields[i[3] + 1] == 'w' then for _, s in ipairs(vv[i[4]] or {}) do out[#out + 1] = lab[s]:match('^cartograph') and 'F' or lab[s]:match('^[^:]*%.lua::') and 'F' or lab[s] end end
+        end end
+        table.sort(out)
+        return out, kind, D
+    end
+    local o, kind, D = run('type(v) == "function"')
+    eq('table', kind['lib:string'], 'a library table is of kind table'); eq('table', kind['lib:os']); eq('table', kind['stringlib'])
+    eq('globals', kind['_G'], '_G keeps its kind')
+    eq({ 'F', '_G' }, o, '== "function" drops the library tables (_G is no table site)')
+    eq(0, flowcheck.check(D).failed, 'flowcheck reads the library tables as table sites too')
+    local Dn; o, _, Dn = run('type(v) ~= "table"'); eq({ 'F', '_G' }, o, '~= "table" drops them'); eq(0, flowcheck.check(Dn).failed)
+    o = run('type(v) == "table"'); eq({ '_G', 'lib:os', 'lib:string', 'stringlib' }, o, '== "table" keeps them')
+    o, kind = run('type(v) == "function"', { ['libs-escape'] = true })
+    eq('other', kind['lib:string'], 'libs-escape: an ordinary object again'); eq({ 'F', '_G', 'lib:os', 'lib:string', 'stringlib' }, o, 'and kept')
+end)
+
 -- (CART-2056: the guard through a `local t = type(v)` ALIAS, and an `or` of positive guards on one variable with one tag —
 -- self_oracle.to_data's `if t == 'string' or t == 'number' or t == 'boolean' then return val end` let every library table
 -- package.loaded[k] read reach its return: 537 of 551 field cells holding lib:coroutine on cartograph's own tree)

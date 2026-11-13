@@ -791,6 +791,7 @@ function M.build(rec, X, sink)
         local kind, fn = 'other', 'null'
         if X.fnports[o] then kind = 'function'; fn = X.fnports[o].id and tostring(FN(X.fnports[o].id)) or 'null'
         elseif info:find('^tbl:') then kind = 'table'
+        elseif X.LIBSITES and X.LIBSITES[o] then kind = 'table' -- (a library table is a table: D52's table site, CART-2058)
         elseif X.TNAME[o] then kind = 'type'
         elseif X.NATIVE and X.NATIVE[o] then kind = 'type' -- (a builtin's function value: a FIXED host site, CART-1791)
         elseif o == X.EXT then kind = 'ext'

@@ -2082,8 +2082,8 @@ local function build(store, opts)
     -- drops only what surely has the tag (a closure for ~= "function", a proxy for ~= "userdata"). Where the tree has a
     -- getlocal / setlocal, a setupvalue or an upvaluejoin, y could change under the guard: every filter passes all
     -- (G7.tfiltfix); a debug hook alone does not (CART-2056)
-    -- ★ A TABLE SITE IS SURELY A TABLE (flowpath FLOW-0188, CORE.md D52): a constructor's object (`tbl:`) or newproxy's
-    -- metatable (`proxymt:`) — the dump's sites of kind `table` — passes a positive guard only for object and a negative
+    -- ★ A TABLE SITE IS SURELY A TABLE (flowpath FLOW-0188, CORE.md D52): a constructor's object (`tbl:`), newproxy's
+    -- metatable (`proxymt:`) or a library table (G7.LIBSITES, CART-2058) — the dump's sites of kind `table` — passes a positive guard only for object and a negative
     -- one never for object. So `~= "thread"` / `~= "cdata"`, which the core reads as `~= object` too, would drop a table
     -- Lua keeps: those guards get no filter (G7.typeguard)
     G7.GTAG = { ['nil'] = 'nil', string = 'prim', number = 'prim', boolean = 'prim', ['function'] = 'function',
@@ -2104,7 +2104,12 @@ local function build(store, opts)
         if TNAME[o] or G7.NATIVE[o] or o == G7.EXT or G7.XC[o] then return true end
         return tag ~= 'prim'
     end
-    function G7.tblsite(o) local i = tostring(obinfo[o] or ''); return i:find('^tbl:') ~= nil or i:find('^proxymt:') ~= nil end
+    -- (a constructor's object, newproxy's metatable, and a LIBRARY table — G7.LIBSITES, the clause libraries-never-escape's
+    -- sites, which the dump gives kind `table` so flowpath's tblS agrees: CART-2058. `_G` is no table site: kind `globals`)
+    function G7.tblsite(o)
+        if G7.LIBSITES and G7.LIBSITES[o] then return true end
+        local i = tostring(obinfo[o] or ''); return i:find('^tbl:') ~= nil or i:find('^proxymt:') ~= nil
+    end
     G7.TFILT = {}
     -- ★ METATABLE GUARDS (CART-1920 filterMeta, flowpath D21 mtEq / D51 passB): `if getmetatable(y) == c then … y …` —
     -- the block reads x = filter(y), ["filterMeta", x, y, c, "__metatable"]. Conditions (D21's translation): `getmetatable`
