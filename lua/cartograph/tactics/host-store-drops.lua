@@ -9,6 +9,9 @@
 -- WHY IT MATTERS: a dropped store is a read that later reads nothing of it — `local T = hostmake(); T.k = A; T.k`
 -- reads nothing when T is a `members` host object. Sound only if the type really refuses the field; a host type the
 -- profile marks too narrowly drops a store the runtime keeps, so a row here is the place to check that.
+-- FIELDS are flowtype's: a name, `[]` (a dynamic key's value), `{k}` (the KEY SET a dynamic store adds to), `#` (the
+-- length a table builtin's model writes). MEASURED 2026-11-13 on desynced (110 files, 3.3 s): 467 refused stores over 139
+-- fields, all `prim` — number / boolean / string ports that also hold tables (flow-insensitive mixing), refused soundly.
 -- Runs the solve with explain on (closed by default). params: mode = closed | open, top = rows in the value (default 30).
 -- CLAIM: the solve ran; the value lists the drops.
 
