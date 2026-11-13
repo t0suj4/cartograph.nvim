@@ -339,7 +339,7 @@ end
 M._jstr = jstr
 local function jarr(t)
     local o = {}
-    for i, x in ipairs(t) do o[i] = type(x) == 'number' and tostring(x) or (type(x) == 'string' and jstr(x)) or (type(x) == 'table' and jarr(x)) or 'null' end
+    for i, x in ipairs(t) do o[i] = type(x) == 'number' and tostring(x) or (type(x) == 'string' and jstr(x)) or (type(x) == 'table' and jarr(x)) or (type(x) == 'boolean' and tostring(x)) or 'null' end -- (a boolean: filterType's positive flag, CART-1920)
     return '[' .. table.concat(o, ',') .. ']'
 end
 
@@ -593,6 +593,8 @@ function M.build(rec, X, sink)
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
         -- (a constructor born with its metatable, the core's newmeta — CORE.md D50, CART-1908)
         elseif op == 'newmeta' then return { 'newmeta', V(ins[2]), ins[3], V(ins[4]) }
+        -- (a guard's π-node, the core's filter — CORE.md D21 / D51, CART-1920)
+        elseif op == 'filterType' then return { 'filterType', V(ins[2]), V(ins[3]), ins[4], ins[5] and true or false }
         elseif op == 'cocreate' then return { 'cocreate', V(ins[2]), ins[3], V(ins[4]) }
         elseif op == 'resume' then return { 'resume', pvars(ins[2]), V(ins[3]), pvars(ins[4]) }
         elseif op == 'yield' then return { 'yield', pvars(ins[2]), pvars(ins[3]) }

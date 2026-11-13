@@ -52,6 +52,7 @@ for _, s in ipairs(S.err.cerr) do CERR[s] = true end
 for _, s in ipairs(S.rin) do RIN[s] = true end
 for _, s in ipairs(S.rout) do ROUT[s] = true end
 local FNOF, HOST, GLOBALS = {}, {}, nil
+local UDATA = {} -- (proxy sites: the core's userdata, CART-1920)
 local STRLIB = D.contracts and D.contracts.strlib_site ~= NULL and D.contracts.strlib_site or nil
 local STRSITE, EXTSITE
 local EXTCH = D.contracts and D.contracts.ext_channel ~= NULL and D.contracts.ext_channel or nil
@@ -61,6 +62,7 @@ for _, st in ipairs(D.sites) do
     if st.fn ~= NULL then FNOF[st.id] = st.fn end
     if st.kind == 'globals' then GLOBALS = st.id end
     if st.kind == 'type' or st.kind == 'ext' then HOST[st.id] = true end -- (contract:host: no fields)
+    if st.kind == 'proxy' then UDATA[st.id] = true end -- (newproxy's userdata: the core's udata site, CART-1920)
 end
 local CODE = {}
 for _, f in ipairs(D.functions) do CODE[f.id] = f end
@@ -266,6 +268,19 @@ for _, F in ipairs(D.functions) do
                     failh(FNOF[a] and 'meta-on-function(model)' or 'meta', a, META, ('h(%d,META) lacks %d'):format(a, b)); break
                 end
             end end end
+        elseif op == 'filterType' then
+            -- (a guard's π-node, CORE.md D21 / D51, CART-1920: every site of y that may pass is in v(x); a top y, a top x)
+            local x, y, tag, pos = ins[2], ins[3], ins[4], ins[5]
+            if TOP[y] and not TOP[x] then fail('filter-top', x, 'y is top') end
+            for a0 in pairs(v(y)) do
+                local pass
+                if not pos then pass = not ((tag == 'function' and FNOF[a0]) or (tag == 'userdata' and UDATA[a0]))
+                elseif tag == 'nil' then pass = false
+                elseif FNOF[a0] then pass = tag == 'function'
+                elseif UDATA[a0] then pass = tag == 'userdata'
+                else pass = tag ~= 'prim' end
+                if pass and not hasv(x, a0) then fail('filter', x, ('v lacks %d'):format(a0)) end
+            end
         elseif op == 'newmeta' then
             -- (`new x a` + `setmeta x m` at site a — flowpath CORE.md D50, CART-1908: x holds a, a's META cell holds m's sites)
             local x, a0, m = ins[2], ins[3], ins[4]
@@ -316,7 +331,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'newmeta' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
+        if op == 'new' or op == 'newmeta' or op == 'filterType' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end

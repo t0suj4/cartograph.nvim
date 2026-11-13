@@ -3421,3 +3421,58 @@ test('flowdump: a constructor into the native setmetatable is one newmeta; hooks
     for _, e in ipairs(D.solution.h) do if e[1] == nm[3] and e[2] == 100 then e[3] = {} end end
     ok(flowcheck.check(D).failed > 0, 'a newmeta whose site lacks the metatable fails')
 end)
+
+-- (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51 — experiment guard-filters: a type guard's then-block reads
+-- a filtered variable, ["filterType", x, y, tag, positive]. What passes is the core's Guard.asite or more: `== "function"`
+-- keeps a table (it may be a native function), `~= "function"` and `== "table"` drop a closure. Not for a heap path, a
+-- reassigned local, a shadowed `type`, or a block holding a closure; off by default)
+test('flowdump: a type guard\'s then-block reads a filtered variable under guard-filters (CART-1920)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(guard, exp)
+        local D = dump(table.concat({
+            'local Z, T = {}, {}',
+            'local function F() end',
+            'local function g(v) if ' .. guard .. ' then local w = v; Z.w = w end end',
+            'g(T); g(F)' }, '\n') .. '\n', exp)
+        local lab, vv, out, nf = {}, {}, {}, 0
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        for _, Fn in ipairs(D.functions) do
+            for _, i in ipairs(Fn.body) do
+                if i[1] == 'filterType' then nf = nf + 1 end
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == 'w' then for _, s in ipairs(vv[i[4]] or {}) do out[#out + 1] = lab[s]:match('^tbl') and 'T' or 'F' end end
+            end
+        end
+        table.sort(out)
+        return out, nf, D
+    end
+    local GF = { ['guard-filters'] = true }
+    local o, n, D = run('type(v) == "function"', GF)
+    eq(1, n, 'one filter'); eq({ 'F', 'T' }, o, '== "function" keeps the table: it may be a native function')
+    eq(0, flowcheck.check(D).failed, 'closed')
+    o = run('type(v) ~= "function"', GF); eq({ 'T' }, o, '~= "function" drops the closure')
+    o = run('type(v) == "table"', GF); eq({ 'T' }, o, '== "table" drops the closure')
+    o, n = run('type(v) == "table"'); eq(0, n, 'off by default'); eq({ 'F', 'T' }, o)
+    -- (a debug hook could change v under the guard: the filter passes everything — G7.tfiltfix)
+    local Dh = dump('local Z, T = {}, {}\nlocal function F() end\ndebug.sethook(function () end, "c")\n'
+        .. 'local function g(v) if type(v) == "table" then local w = v; Z.w = w end end\ng(T); g(F)\n', GF)
+    local labh, vh, oh = {}, {}, {}
+    for _, x in ipairs(Dh.sites) do labh[x.id] = x.label end
+    for _, e in ipairs(Dh.solution.v) do vh[e[1]] = e[2] end
+    for _, Fn in ipairs(Dh.functions) do for _, i in ipairs(Fn.body) do
+        if i[1] == 'store' and Dh.names.fields[i[3] + 1] == 'w' then for _, s in ipairs(vh[i[4]] or {}) do oh[#oh + 1] = labh[s]:match('^tbl') and 'T' or 'F' end end
+    end end
+    table.sort(oh)
+    eq({ 'F', 'T' }, oh, 'a hook in the tree: the filter passes all')
+    local function nfilt(src) local _, k = (function () local D2 = dump(src, GF); local c = 0; for _, Fn in ipairs(D2.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then c = c + 1 end end end; return D2, c end)(); return k end
+    eq(0, nfilt('local Z = {}\nlocal function g(t) if type(t.f) == "table" then Z.w = t.f end end\ng({})\n'), 'a heap path is never refined')
+    eq(0, nfilt('local Z = {}\nlocal function g(v) v = v or {}; if type(v) == "table" then Z.w = v end end\ng({})\n'), 'a reassigned local is not')
+    eq(0, nfilt('local Z = {}\nlocal type = function () return "table" end\nlocal function g(v) if type(v) == "table" then Z.w = v end end\ng({})\n'), 'nor through a shadowed type')
+    eq(0, nfilt('local Z = {}\nlocal function g(v) if type(v) == "table" then Z.f = function () return v end end end\ng({})\n'), 'nor a block holding a closure')
+    -- (flowcheck checks it: a filter missing a site that may pass fails)
+    local _, _, D3 = run('type(v) == "function"', GF)
+    local fx
+    for _, Fn in ipairs(D3.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then fx = i[2] end end end
+    for _, e in ipairs(D3.solution.v) do if e[1] == fx then e[2] = {} end end
+    ok(flowcheck.check(D3).failed > 0, 'a filter that lost a passing site fails')
+end)

@@ -79,6 +79,7 @@ M.EXPERIMENTS = {
     ['fhit-all'] = "the `.f` rule as it was before CART-1697's rule dialog: a call through a tainted load of `.f` taints the parameters of EVERY function stored as `.f`, not only _G's (for comparison)",
     ['strict-records'] = "a NAMED load on a RECORD skips `[]`; a MAP keeps it. A map site is a table constructor bound to a name its file indexes by computed key (`by_id = {}` with `b.by_id[id] = …`), decided before the solve (CART-1697)",
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
+    ['guard-filters'] = 'a type guard\'s then-block reads a FILTERED variable — `if type(y) == "table" then … y …` emits ["filterType", x, y, tag, positive] and the block reads x (CART-1920, flowpath D21 / D51). OPT-IN: flowpath\'s probes certify with it (filter f1, hunt0180b q09; 402 fixtures unchanged), but vimruntime (b48h root) went from CERTIFIED to refused — certE `storeRaw unhandled` x7 in vim/diagnostic.lua::M.open_float@2425 (#513-517, #537-538), 73 filters; not reproduced in a small fixture, filed for FLOW',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
 --- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
@@ -2067,6 +2068,70 @@ local function build(store, opts)
         end
         G7.NEWMETAS = n
         return n
+    end
+    -- ★ GUARD FILTERS (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51): `if type(y) == "table" then … y …`
+    -- reads, in its then-block, only what passes the guard — a π-node: a FRESH variable `x = filter(y)` the block reads in
+    -- y's place (`["filterType", x, y, tag, positive]`). Only where y is a LOCAL the file never assigns after declaring it
+    -- (so x and y name one value for the whole block, closures in it included) and `type` is the global, unshadowed and
+    -- never assigned. A heap path (`type(t.f)`) is never refined. Tags as the core's: nil, prim (string / number /
+    -- boolean), function, userdata, object (table / thread / cdata).
+    -- What passes is the core's Guard.asite exactly or MORE (an extra site is always accepted, a missing one refused): a
+    -- positive guard passes a closure only for function, a proxy userdata only for userdata, a host value (a typed one,
+    -- a native, unknown code) for any tag but nil, any other object for function / userdata / object; a negative one
+    -- drops only what surely has the tag (a closure for ~= "function", a proxy for ~= "userdata"). Where the tree has a
+    -- debug hook or a getlocal / setlocal, a frame could change y under the guard: every filter passes all (G7.tfiltfix)
+    G7.GTAG = { ['nil'] = 'nil', string = 'prim', number = 'prim', boolean = 'prim', ['function'] = 'function',
+        userdata = 'userdata', table = 'object', thread = 'object', cdata = 'object' } -- (a G7 field: build is at 200 locals)
+    function G7.tagpass(o, tag, pos)
+        local code = fnports[o] ~= nil
+        local ud = not code and tostring(obinfo[o] or ''):match('^proxy:') ~= nil
+        if not pos then
+            if tag == 'function' then return not code end
+            if tag == 'userdata' then return not ud end
+            return true
+        end
+        if tag == 'nil' then return false end
+        if code then return tag == 'function' end
+        if ud then return tag == 'userdata' end
+        if TNAME[o] or G7.NATIVE[o] or o == G7.EXT or G7.XC[o] then return true end
+        return tag ~= 'prim'
+    end
+    G7.TFILT = {}
+    function G7.typeguard(c, lookup, reasg, txt, strval)
+        if not c or c:type() ~= 'binary_expression' then return nil end
+        local op, l, r
+        for _, x in tsutil.inext, c, -1 do if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end end
+        if op ~= '==' and op ~= '~=' then return nil end
+        if l and l:type() == 'string' then l, r = r, l end
+        if not (l and r and l:type() == 'function_call' and r:type() == 'string') then return nil end
+        local f, args = l:field('name')[1], l:field('arguments')[1]
+        if not (f and f:type() == 'identifier' and txt(f) == 'type' and args and args:named_child_count() == 1) then return nil end
+        local _, tg = lookup('type')
+        if not tg or reasg()['type'] then return nil end
+        local a = args:named_child(0)
+        if a:type() ~= 'identifier' then return nil end
+        local nm = txt(a)
+        local p, glob = lookup(nm)
+        if glob or not p or reasg()[nm] then return nil end
+        local lit = strval(r)
+        local tag = lit and G7.GTAG[lit]
+        if not tag then return nil end
+        return { nm = nm, y = p, tag = tag, pos = op == '==' }
+    end
+    -- (does the block hold a function — a closure that could CAPTURE the filtered variable? flowpath boxes captured
+    -- variables, D32, and a filter writing a BOX is untested there: such a block is not refined — a precaution)
+    function G7.hasfn(b)
+        if not b then return false end
+        local t = b:type()
+        if t == 'function_definition' or t == 'function_declaration' then return true end
+        for _, x in tsutil.inamed, b, -1 do if G7.hasfn(x) then return true end end
+        return false
+    end
+    function G7.tfiltfix()
+        if G7.ANYHOOK or (G7.LOCCALLS and #G7.LOCCALLS > 0) or (G7.ANYFRAME and G7.ANYFRAME[1]) then
+            for _, f in ipairs(G7.TFILT) do edge(f[1], f[2]) end
+        end
+        G7.TFILT = {}
     end
     function G7.eqable(o)
         if fnports[o] or G7.NATIVE[o] then return false end
@@ -5078,6 +5143,24 @@ local function build(store, opts)
                 scopes[#scopes + 1] = {}
                 for _, x in tsutil.inamed, n, -1 do stmt(x); if raises(x) then break end end
                 scopes[#scopes] = nil
+            elseif t == 'if_statement' and G7.EXP['guard-filters'] and G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
+                and not G7.hasfn(n:field('consequence')[1]) then
+                -- (a TYPE GUARD: its then-block reads a filtered y, CART-1920 — G7.tagpass)
+                local g = G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
+                local cq = n:field('consequence')[1]
+                for _, x in tsutil.inamed, n, -1 do
+                    local xt = x:type()
+                    if cq and x:id() == cq:id() then
+                        local xp = new()
+                        local tag, pos = g.tag, g.pos
+                        filter(g.y, xp, function (o) return G7.tagpass(o, tag, pos) end)
+                        G7.TFILT[#G7.TFILT + 1] = { g.y, xp }
+                        G7.ins({ 'filterType', xp, g.y, tag, pos })
+                        scopes[#scopes + 1] = { [g.nm] = xp }
+                        stmt(x)
+                        scopes[#scopes] = nil
+                    elseif xt == 'block' or xt:find('statement', 1, true) then stmt(x) else expr(x) end
+                end
             elseif t == 'function_call' then callv(n)
             else
                 for _, x in tsutil.inamed, n, -1 do
@@ -5467,6 +5550,7 @@ local function build(store, opts)
             end
         end
     end
+    G7.tfiltfix() -- (guard filters pass all where a frame could change their variable, CART-1920)
     -- (the walks are done: the solve's own reads of the current environment — a string's library for a load recorded
     -- before a second program existed — are the DEFAULT program's, never the last walked file's, CART-1737)
     if G7.ENVL[1] then G7.useenv(G7.ENVL[1]) end
