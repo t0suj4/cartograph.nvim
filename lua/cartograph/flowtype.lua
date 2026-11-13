@@ -1553,8 +1553,14 @@ local function build(store, opts)
         local hc = field(G7.mtport(hs, '__call'), '__call')
         METAH[hc] = '__call'
         edge(hc, hs)
-        for _, ap in ipairs(a2) do edge(ap, va) end
-        edge(hs, va)
+        -- (the spread va is FED only once hc may hold a handler — the first object reaching it: fed at once, one port per
+        -- call site held every argument and the callee, saturated past CAP and escaped them all, a chain no metatable
+        -- could start — self_oracle.to_data's `seen` table, the self tree's last E-closure offender, CART-2059)
+        local fed = false
+        filter(hc, new(), function ()
+            if not fed then fed = true; for _, ap in ipairs(a2) do edge(ap, va) end; edge(hs, va) end
+            return false
+        end)
         callc(hc, { hs, va, spread = 2 }, res, site, cerr)
     end
     -- (a value a BUILTIN calls — pcall's and xpcall's function, xpcall's handler, a generic for's iterator — is called as

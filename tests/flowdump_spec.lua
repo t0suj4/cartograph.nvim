@@ -3598,6 +3598,43 @@ test('flowdump: a type guard\'s then-block reads a filtered variable, by default
     ok(flowcheck.check(D3).failed > 0, 'a filter that lost a passing site fails')
 end)
 
+-- (CART-2059: the 5.4 `__call` chain's spread port, one per call site, is fed only once a deep `__call` handler may be
+-- there: fed always, it held EVERY argument of the call, saturated past CAP and escaped them all — self_oracle.to_data's
+-- `seen` table, passed beside `pairs`' keys, was the self tree's last E-closure offender. A real chain still runs)
+test('flowdump: a call\'s arguments do not escape through the __call chain\'s spread port (CART-2059)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local off = select(2, CLASSES:gsub('\n', '')) -- (the src's first line, 0-based, as the site labels count)
+    local function L(line, col) return ('tbl:m.lua:%d:%d'):format(off + line, col) end
+    local cap = flowtype.CAP
+    flowtype.CAP = 2
+    local ok_, D = pcall(dump, table.concat({
+        'local A, B, S = {}, {}, {}',
+        'local function f(x, s) s[x] = true end',
+        'local function g(x) f(x, S) end',
+        'g(A); g(B)' }, '\n') .. '\n')
+    flowtype.CAP = cap
+    assert(ok_, D)
+    local lab, e = {}, {}
+    for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+    for _, o in ipairs(D.solution.taint.escaped) do e[lab[o]] = true end
+    -- (each argument holds at most CAP objects, their union more: only a port pooling them saturates)
+    ok(not e[L(0, 16)] and not e[L(0, 20)], 'A and B, at CAP, do not escape: ' .. vim.inspect(e))
+    ok(not e[L(0, 24)], 'nor S, beside them at the call: ' .. vim.inspect(e))
+    -- (a 5.4 chain three deep — T's __call a table, its __call a table, ITS __call a function: the spread port is fed
+    -- once that handler arrives, and the handler gets the argument)
+    local D2 = dump(table.concat({
+        'local R = {}',
+        'local t2 = setmetatable({}, { __call = function (self, a, b, c, d) R.got = d end })',
+        'local t1 = setmetatable({}, { __call = t2 })',
+        'local P = {}',
+        'local T = setmetatable({}, { __call = t1 })',
+        'T(P)' }, '\n') .. '\n')
+    local lab2, got = {}, {}
+    for _, x in ipairs(D2.sites) do lab2[x.id] = x.label end
+    for _, c in ipairs(D2.solution.h) do if D2.names.fields[c[2] + 1] == 'got' then for _, s in ipairs(c[3]) do got[#got + 1] = lab2[s] end end end
+    ok(vim.tbl_contains(got, L(3, 10)), 'the deep __call handler gets the argument: ' .. vim.inspect(got))
+end)
+
 -- (CART-2058: a LIBRARY table — the clause libraries-never-escape's sites, contracts.library_sites — is a table: the dump
 -- gives it kind `table`, so flowpath's tblS reads it as D52 reads a constructor's object, and the guard filters treat it
 -- so: `== "function"` / `~= "table"` drop it. On the self tree the last escaped cell holding library tables was
