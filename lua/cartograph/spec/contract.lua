@@ -81,7 +81,9 @@ M.SLOTS = {
     -- declaration(def, src) -> bool: the def only DECLARES a function implemented elsewhere (a LuaLS `---@meta` stub,
     -- CART-1615) — its body is not the callee's effects
     declaration = 'SCOPE&KEY',
-    -- compiles(text) -> ok, why: the language's own compiler accepts the text (planguards' parses guard, CART-1559)
+    -- compiles(text, profile, root) -> true | false, why | nil, why: the language's own compiler accepts the text, judged
+    -- under the code's language VERSION (the profile, the project's declaration); nil = no compiler for that version
+    -- here, said as no-claim (planguards' parses guard, CART-1559, CART-2000)
     compiles = 'SCOPE&KEY',
     -- reserved_uses(text, profile) -> { version, n, words, unknown? }: identifiers spelled with a word the profile's
     -- language VERSION reserves (planguards' parses guard, CART-1012)

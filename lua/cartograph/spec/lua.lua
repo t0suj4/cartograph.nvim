@@ -1081,6 +1081,50 @@ local function lua_reserved_uses(text, prof)
     return out
 end
 
+-- ★ COMPILING IS A FACT ABOUT THE LUA *VERSION* (CART-2000), the reserved words' rule (CART-1012) for the compiler: nvim's
+-- loadstring is LuaJIT, which refuses `1 // 2`, `1 & 2`, `local x <const> = 1` — valid 5.3 / 5.4 — so an edit to a 5.4
+-- project read "no longer COMPILES". The version: the profile's `lua_version`; else a LuaJIT runtime's profile (luajit,
+-- nvim); else what the project declares (luadialect.resolve: .luarc / .luacheckrc / a Neovim plugin's layout). Then:
+--   LuaJIT ('jit')                  -> nvim's own loadstring answers (CART-1559's 61 upvalues stays refused)
+--   a PUC version, interpreter here -> that interpreter compiles it (`lua5.x`, loadfile from stdin: compile only)
+--   otherwise                       -> LuaJIT's YES stands (the parse passed too); its NO is no answer for that version:
+--                                      nil + why, which the parses guard reports as no-claim, never a refusal
+-- A shebang line is the interpreter's, not the chunk's (loadfile skips it; loadstring does not).
+local LUA_BIN = {}
+local function lua_bin(v)
+    if LUA_BIN[v] == nil then
+        local b = 'lua' .. v
+        LUA_BIN[v] = vim.fn.executable(b) == 1 and b or false
+    end
+    return LUA_BIN[v] or nil
+end
+local function lua_version_of(prof, root)
+    local lv = prof and tonumber(prof.lua_version)
+    if lv then return ('%.1f'):format(lv), 'the profile\'s lua_version' end
+    if prof and (prof.runtime == 'luajit' or prof.runtime == 'nvim') then return 'jit', 'the ' .. prof.runtime .. ' profile' end
+    if root then
+        local ok, ld = pcall(require, 'cartograph.luadialect')
+        if ok then local v, src = ld.resolve(root); if v then return v, src end end
+    end
+    return nil, nil
+end
+local LUA_COMPILE = 'local f, e = loadfile() if not f then io.stderr:write(tostring(e)) os.exit(1) end'
+local function lua_compiles(text, prof, root)
+    local f, err = loadstring((text:gsub('^#![^\n]*', '')))
+    local v, src = lua_version_of(prof, root)
+    if v == 'jit' then return f ~= nil, err end
+    local bin = v and lua_bin(v)
+    if bin then
+        local r = vim.system({ bin, '-e', LUA_COMPILE }, { stdin = text, text = true }):wait()
+        if r.code == 0 then return true end
+        return false, ('%s (%s: Lua %s, from %s)'):format(vim.trim((r.stderr or ''):gsub('^stdin:', 'line ')), bin, v, src)
+    end
+    if f then return true end
+    return nil, ('LuaJIT refuses it (%s), but %s, and LuaJIT is no compiler for that'):format(tostring(err),
+        v and ('the code is Lua %s (from %s) and no lua%s is installed'):format(v, src, v)
+            or 'the code states no Lua version (no profile lua_version, no .luarc / .luacheckrc)')
+end
+
 local function lua_declaration(defn, src)
     return type(src) == 'string' and defn:field('body')[1] == nil and lua_meta_file(src) or false
 end
@@ -1750,12 +1794,9 @@ return {
     colon_calls_pass_self = true,
     -- a function that only DECLARES (an empty body in a `---@meta` file): its effects are the native implementation's
     declaration = lua_declaration,
-    -- does the text COMPILE under the running LuaJIT (CART-1559): a parse accepts 61 upvalues, the compiler does not.
-    -- A shebang line is the interpreter's, not the chunk's
-    compiles = function (text)
-        local f, err = loadstring((text:gsub('^#![^\n]*', '')))
-        return f ~= nil, err
-    end,
+    -- does the text COMPILE (CART-1559: a parse accepts 61 upvalues, the compiler does not) — under the analysed code's
+    -- OWN Lua version (CART-2000), lua_compiles: true | false, why | nil, why (no oracle for that version)
+    compiles = lua_compiles,
     -- the identifiers spelled with a word the profile's Lua version reserves (CART-1012: version-sensitive, distilled)
     reserved_uses = lua_reserved_uses,
     -- a table whose __index requires `<prefix> .. key` is a module namespace (CART-1619)

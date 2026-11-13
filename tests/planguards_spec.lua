@@ -40,10 +40,12 @@ test('planguards: an edit that PARSES but no longer COMPILES fails — and the g
         return ('local %s = %s\nreturn function () return %s end\n')
             :format(table.concat(names, ', '), table.concat(names, ', '), table.concat(uses, ' + '))
     end
-    local rows = pg.GUARDS.parses(nil, nil, { ['m.lua'] = upv(59) }, { ['m.lua'] = upv(61) })
+    -- (under a LuaJIT reading — the nvim profile, as this repo is: since CART-2000 LuaJIT answers only for LuaJIT code)
+    local NV = { data = { profile = 'nvim' } }
+    local rows = pg.GUARDS.parses(NV, nil, { ['m.lua'] = upv(59) }, { ['m.lua'] = upv(61) })
     eq(pg.FAIL, rows[1].verdict, tostring(rows[1].why))
     ok(tostring(rows[1].why):find('COMPILES', 1, true), 'it says the compiler refused: ' .. tostring(rows[1].why))
-    rows = pg.GUARDS.parses(nil, nil, { ['m.lua'] = upv(61) }, { ['m.lua'] = upv(62) })
+    rows = pg.GUARDS.parses(NV, nil, { ['m.lua'] = upv(61) }, { ['m.lua'] = upv(62) })
     eq(pg.PASS, rows[1].verdict, 'a file that did not compile before is no regression of the edit')
     -- the provider unloadable: the guard still answers (a repairing edit must get through)
     local saved = package.loaded['cartograph.providers.treesitter']
@@ -333,4 +335,37 @@ test('dryrun: unmentioned files still come from the disk', function ()
     local b = txn.dryrun(st, plan, nil, { before = { ['sub/u.lua'] = false } })
     ok(b['m.lua'] and b['m.lua']:find('M.f', 1, true),
         'the unmentioned source is still read from disk')
+end)
+
+-- ★ COMPILING IS A FACT ABOUT THE VERSION TOO (CART-2000): spec.compiles was nvim's LuaJIT loadstring whatever the code's
+-- Lua version, so a 5.4 project's `//`, `&`, `<const>` read "no longer COMPILES". Now: LuaJIT answers for LuaJIT code
+-- (above), a stated PUC version's own interpreter for that version, and nothing else refuses — a LuaJIT NO for code of
+-- another or an unknown version is no-claim, said with why
+test('planguards: compiling is judged under the code\'s Lua version - its interpreter, or no claim (CART-2000)', function ()
+    if not ready() then skip('no lua parser') end
+    local B = { ['a.lua'] = 'local x = 1\n' }
+    local NEW = { ['a.lua'] = 'local x = 7 // 2\nlocal y = x & 1\nlocal z <const> = 3\nreturn x, y, z\n' }
+    if vim.fn.executable('lua5.4') == 1 then
+        with_profile('5.4', function (st)
+            eq(pg.PASS, pg.GUARDS.parses(st, nil, B, NEW)[1].verdict, 'lua5.4 compiles // & <const>')
+            -- and lua5.4's own NO is a refusal: 201 locals in one function parse, 5.4 refuses them
+            local names = {}
+            for i = 1, 201 do names[i] = 'v' .. i end
+            local r = pg.GUARDS.parses(st, nil, B, { ['a.lua'] = 'local ' .. table.concat(names, ', ') .. '\n' })[1]
+            eq(pg.FAIL, r.verdict, tostring(r.why))
+            ok(r.why:find('lua5.4', 1, true) and r.why:find('COMPILES', 1, true), r.why)
+        end)
+    end
+    if vim.fn.executable('lua5.3') ~= 1 then
+        with_profile('5.3', function (st)
+            local r = pg.GUARDS.parses(st, nil, B, NEW)[1]
+            eq(pg.NO_CLAIM, r.verdict, 'no lua5.3 here: LuaJIT\'s refusal is no answer for 5.3')
+            ok(r.why:find('no lua5.3 is installed', 1, true), r.why)
+        end)
+    end
+    local r = pg.GUARDS.parses(nil, nil, B, NEW)[1]
+    eq(pg.NO_CLAIM, r.verdict, 'unstated version: said, not refused')
+    ok(r.why:find('states no Lua version', 1, true), r.why)
+    -- what LuaJIT accepts still passes with no version known (the parse passed too)
+    eq(pg.PASS, pg.GUARDS.parses(nil, nil, B, { ['a.lua'] = 'local x = 2\n' })[1].verdict)
 end)

@@ -92,12 +92,13 @@ local function lang_of_path(rel)
     local ft = vim.filetype.match({ filename = rel })
     return ft and vim.treesitter.language.get_lang(ft) or nil
 end
--- does `text` COMPILE, where the language's spec can say (`spec.compiles`: Lua's loadstring) -> true | false, why | nil
--- (a tree-sitter parse accepts what the compiler refuses: 61 upvalues, a goto into a local's scope — CART-1559)
-local function compiles(text, lang)
+-- does `text` COMPILE, where the language's spec can say (`spec.compiles`) -> true | false, why | nil[, why]
+-- (a tree-sitter parse accepts what the compiler refuses: 61 upvalues, a goto into a local's scope — CART-1559). Judged
+-- under the code's own language VERSION (the profile, the project's declaration — CART-2000): nil + why = no oracle here
+local function compiles(text, lang, prof, root)
     local oks, spec = pcall(require, 'cartograph.spec.' .. lang)
     if not (oks and type(spec) == 'table' and spec.compiles) then return nil end
-    return spec.compiles(text)
+    return spec.compiles(text, prof, root)
 end
 -- the identifiers in `text` spelled with a word the profile's language VERSION reserves (`spec.reserved_uses`, CART-1012)
 -- -> { version, n, words, unknown? } | nil (the language's spec cannot say)
@@ -146,10 +147,22 @@ M.GUARDS.parses = function (store, _, before, after)
                         why = ('the %s parser is unavailable here'):format(lang) }
                 else
                     -- (a file that compiled before must still compile: the parse is not the compiler)
-                    local cpost, cwhy = compiles(after[rel] or '', lang)
-                    if cpost == false and (pre == false or pre == nil or compiles(pre, lang) ~= false) then
+                    local root = store and store.data and store.data.root
+                    local cpost, cwhy = compiles(after[rel] or '', lang, prof, root)
+                    local cpre
+                    if cpost ~= true and pre and pre ~= false then cpre = compiles(pre, lang, prof, root) end
+                    -- (a reserved identifier the edit introduced is the more specific reason a version refuses it:
+                    -- `local goto` under 5.4 — said by the reserved-word check below, CART-1012, not as a bare compile error)
+                    local ra0 = cpost == false and reserved_uses(after[rel] or '', lang, prof)
+                    local rb0 = ra0 and ra0.n > 0 and pre and reserved_uses(pre, lang, prof) or nil
+                    local byword = ra0 and not ra0.unknown and ra0.n > (rb0 and rb0.n or 0)
+                    if cpost == false and not byword and (pre == false or pre == nil or cpre ~= false) then
                         rows[#rows + 1] = { verdict = M.FAIL, file = rel,
                             why = ('the edited file parses but no longer COMPILES as %s: %s'):format(lang, tostring(cwhy)) }
+                    elseif cpost == nil and cwhy and (pre == false or pre == nil or cpre == true) then
+                        -- (no compiler for the code's version here: SAID, not guessed into a refusal — CART-2000)
+                        rows[#rows + 1] = { verdict = M.NO_CLAIM, file = rel,
+                            why = ('the edited file parses; whether it compiles cannot be checked here: %s'):format(cwhy) }
                     else
                         -- ★★★ A RESERVED WORD IS A FACT ABOUT THE LANGUAGE *VERSION* (CART-1012, the user's condition):
                         -- `local goto = 1` parses, and nvim's LuaJIT compiles it, and Lua 5.2+ refuses it. Judged under
