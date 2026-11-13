@@ -673,13 +673,20 @@ function M.requires(store)
     end
     local vf = require 'cartograph.versionfloor'
     r.features = vf.facts(store)
+    -- ★ ONE FLOOR PER SCALE (CART-2040): ruby 3.1, python 3.8, ECMAScript 2022 and PUC-Lua 5.3 are different rulers —
+    -- a max() across them was a meaningless number (a lua + js tree read "ECMAScript 5.3"), and `scale` was whichever
+    -- language pairs() yielded last. versionfloor.report partitions by scale for the same reason. `floors[scale]` is
+    -- each one; `floor` / `scale` are set only when ONE scale has facts, so no reader compares across rulers
+    r.floors = {}
+    local named = {} -- (a scale's printable name: ECMAScript, PUC-Lua — none for ruby / python, whose versions are plain)
     for _, f in ipairs(r.features) do
-        if not r.floor or vf.older(r.floor, f.v) then r.floor = f.v end
+        local k = vf.scale_key(f.lang)
+        named[k] = vf.SCALE[f.lang]
+        if not r.floors[k] or vf.older(r.floors[k], f.v) then r.floors[k] = f.v end
     end
-    r.scale = nil
-    for l in pairs(r.langs) do
-        if vf.SCALE[l] then r.scale = vf.SCALE[l] end
-    end
+    r.floor, r.scale = nil, nil
+    local only = next(r.floors)
+    if only and next(r.floors, only) == nil then r.floor, r.scale = r.floors[only], named[only] end
     return r
 end
 
@@ -3910,10 +3917,14 @@ function M.requires_report(store)
     for l in pairs(req.langs) do langs[#langs + 1] = l end
     table.sort(langs)
     local L = {}
+    -- (one floor per scale, never a max across them — CART-2040)
+    local fl = {}
+    for k, v in pairs(req.floors or {}) do fl[#fl + 1] = k .. ' ' .. v end -- ('ruby 3.1', 'ECMAScript 2020', 'PUC-Lua 5.3')
+    table.sort(fl)
     L[#L + 1] = ("this code REQUIRES — %s: %d external name(s)%s"):format(
         table.concat(langs, '/'), req.total,
-        req.floor and (', version floor ' .. (req.scale and (req.scale .. ' ') or '')
-            .. req.floor) or '')
+        req.floor and (', version floor ' .. (req.scale and (req.scale .. ' ') or '') .. req.floor)
+            or (#fl > 1 and (', version floors (one per scale, never maxed) ' .. table.concat(fl, ', ')) or ''))
     L[#L + 1] = '  the inverse of an environment profile: the same currency, other'
     L[#L + 1] = '  direction, so the questions below are set algebra over the two.'
     L[#L + 1] = ''

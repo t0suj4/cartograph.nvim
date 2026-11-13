@@ -2874,3 +2874,36 @@ test('portability (CART-0648): T the VALUES of a same-file array, iterated with 
     eq(nil, g.furnace)
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2040: requires() took ONE floor as a max over every language's facts — ruby 3.1 against ECMAScript 2020 against
+-- PUC-Lua 5.3 — and its scale from whichever language pairs() yielded last. One floor per scale now; `floor` / `scale`
+-- only when one scale has facts, as before for a single-language tree)
+test('portability: requires() keeps one version floor PER SCALE, never a max across rulers (CART-2040)', function ()
+    if not ready() then skip('no ruby parser') end
+    if not pcall(vim.treesitter.get_string_parser, '', 'javascript') then skip('no javascript parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(name, text) local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(text); fd:close() end
+    put('a.rb', 'class A\n  def opts(x) = {x:}\nend\n')
+    put('b.js', 'export const f = (a) => a?.b ?? 0\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local P = require 'cartograph.portability'
+    local req = P.requires(store)
+    eq({ ruby = '3.1', ECMAScript = '2020' }, req.floors, 'each ruler its own floor')
+    eq(nil, req.floor, 'no single floor across two rulers')
+    eq(nil, req.scale)
+    local head = P.requires_report(store)[1]
+    ok(head:find('version floors (one per scale, never maxed) ECMAScript 2020, ruby 3.1', 1, true), head)
+    vim.fn.delete(root, 'rf')
+    -- one scale: its floor and its NAME, as before (a js-only tree reads "ECMAScript 2020", not a bare 2020)
+    local r2 = vim.fn.tempname(); vim.fn.mkdir(r2, 'p')
+    local fd = assert(io.open(r2 .. '/b.js', 'w')); fd:write('export const f = (a) => a?.b ?? 0\n'); fd:close()
+    local d2 = ts.extract(r2); d2.root = r2
+    store.ingest(d2)
+    local q = P.requires(store)
+    eq('2020', q.floor)
+    eq('ECMAScript', q.scale, 'the one scale keeps its name')
+    vim.fn.delete(r2, 'rf')
+end)
