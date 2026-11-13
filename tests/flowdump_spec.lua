@@ -3221,3 +3221,39 @@ test('flowdump: table builtins by value read through __index and take __len (CAR
     local cu = flowcheck.check(U)
     for k in pairs(cu.counts) do eq('untagged loadDyn:field*META(model)', k, 'only the metatable slot: ' .. vim.inspect(cu.fails)) end
 end)
+
+-- (CART-2044, flowpath FLOW-0183 h41: in a ---@meta file an EMPTY-bodied function only DECLARES what the host
+-- implements — `function hostmake() end` beside `---@return HostThing`. It was walked as an empty closure stored in _G:
+-- its call returned nothing, and the store and load back certified OBS empty where the host's table holds A. Now its
+-- value is unknown code, EXT, as a load's result is. Both sides pinned: the same text outside a ---@meta file, and a
+-- ---@meta function WITH a body, stay ordinary closures)
+test('flowdump: a ---@meta declaration of a global function is the host\'s function, EXT (CART-2044)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(meta)
+        local root = tree({ ['meta.lua'] = meta, ['use.lua'] = 'local A = {}\nlocal T = hostmake()\nT.k = A\nOBS = T.k\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, dump = true })
+        vim.fn.delete(root, 'rf')
+        local D = vim.json.decode(R.dump)
+        local lab, v, out = {}, {}, {}
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do v[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            for _, i in ipairs(F.body) do
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == 'OBS' then for _, s in ipairs(v[i[4]] or {}) do out[#out + 1] = lab[s] end end
+            end
+        end
+        table.sort(out)
+        local fns = {}
+        for _, F in ipairs(D.functions) do fns[#fns + 1] = F.name end
+        return out, table.concat(fns, ' ')
+    end
+    local A = 'tbl:use.lua:0:10'
+    local o, fns = run('---@meta\n---@class HostThing\n---@return HostThing\nfunction hostmake() end\n')
+    eq({ 'external', A }, o, 'the host\'s result is unknown code, and A is stored into it and read back')
+    ok(not fns:find('hostmake', 1, true), 'no closure for a declaration: ' .. fns)
+    local c = run('function hostmake() end\n')
+    eq({}, c, 'outside a ---@meta file an empty function is the tree\'s own: its call returns nothing')
+    local b = run('---@meta\nfunction hostmake() return {} end\n')
+    eq({ A }, b, 'a ---@meta function with a BODY is code (the tag also silences diagnostics on real code)')
+end)

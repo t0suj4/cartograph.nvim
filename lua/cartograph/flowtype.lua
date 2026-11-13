@@ -2910,6 +2910,18 @@ local function build(store, opts)
     -- file's `...` is unknown host values: tainted in the taint phase (G7.CHUNKVA), as a lost caller's arguments
     G7.CHUNKINIT, G7.PKGTBL, G7.CHUNKPOS, G7.LOADERP, G7.LOADNAME = {}, {}, {}, {}, {} -- (LOADNAME: local port -> the loader's name; G7.LOADK is a dynamic load's key port)
     G7.LOADERA, G7.ECOF = {}, {}
+    -- ★ A LuaLS DECLARATION IS THE HOST'S FUNCTION, NOT A CLOSURE (CART-2044, flowpath FLOW-0183 h41): in a `---@meta`
+    -- file an EMPTY-bodied function only declares what the host implements (spec/lua.lua's `declaration`, CART-1615) —
+    -- `function hostmake() end` beside `---@return HostThing`. Walked as code it was an empty closure stored in _G, its
+    -- call returned NOTHING, and `local T = hostmake(); T.k = A; OBS = T.k` certified OBS empty where the host's table
+    -- holds A. Its value is UNKNOWN CODE instead — EXT, as a load's result is: a call returns EXT and hands its arguments
+    -- out. (vim/_meta/*.lua opens with `error(...)`, so the walk never reached those: only a stub without it was hit.)
+    function G7.declfn(n, src)
+        local okL, L = pcall(require, 'cartograph.spec.lua')
+        if not (okL and L.declaration and L.declaration(n, src)) then return nil end
+        local p = new(); addobj(p, EXT)
+        return p
+    end
     function G7.ecoof(file) -- (the ecosystem spec of this file's package and the package, or false; memoized)
         local m = G7.ECOF[file]
         if m == nil then
@@ -4718,11 +4730,12 @@ local function build(store, opts)
                 G7.KBASE = nil
             elseif t == 'function_declaration' then
                 local nm = n:field('name')[1]
+                local dfp = G7.declfn(n, src) -- (a ---@meta declaration: the host's function, EXT — CART-2044)
                 if nm and txt(n):match('^local%s') then
                     local target = declare(txt(nm))
-                    edge(func(n), target)
+                    edge(dfp or func(n), target)
                 else
-                    local fp = func(n)
+                    local fp = dfp or func(n)
                     if nm then
                         if nm:type() == 'identifier' then gstore(txt(nm), fp, nm)
                         else
@@ -4737,7 +4750,7 @@ local function build(store, opts)
                                 local s0 = at(last)
                                 metastore(base, txt(last), kp, fp, curerr())
                                 G7.WSITE = s0
-                                if G7.MSELF and not clone and nm:type() == 'method_index_expression' then
+                                if G7.MSELF and not clone and not dfp and nm:type() == 'method_index_expression' then
                                     G7.MSELF[#G7.MSELF + 1] = { G7.LASTFP.params[1], base, G7.LASTFP.id }
                                 end
                             end

@@ -5281,3 +5281,26 @@ test('flowtype: table builtins by value run __len (5.2+) and __index / __newinde
     eq({ sinku = '', sinkr = '', sinks = '', sinkl = N, sinkw = '', sinkx = S2, sinky = S3, sinkv = U2, sinkz = '' }, o, '5.2: __len alone (sort\'s, by name too)')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2044: the solve's side of a ---@meta declaration — a local or a field function declared there is EXT too, and a
+-- call of it hands its arguments to unknown code)
+test('flowtype: a ---@meta declaration is the host\'s function, EXT, for a global, a field and a local (CART-2044)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['meta.lua'] = table.concat({ '---@meta', 'H, O = {}, {}', 'function hostmake() end', 'function H.make() end',
+            'local function lmake() end', 'sinkl(lmake())', 'function O:meth() end' }, '\n') .. '\n',
+        ['use.lua'] = table.concat({ 'function sinkg(x) return x end', 'function sinkf(x) return x end',
+            'function sinkl(x) return x end', 'function sinkm(x) return x end', 'sinkg(hostmake())', 'sinkf(H.make())',
+            'sinkm(O:meth())' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    -- (selfseed: a method declared there must not seed some other closure's self — the walk's last one, CART-1715)
+    local R = flowtype.solve(store, { open = false, argprobes = true, selfseed = true })
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq({ sinkg = 'external', sinkf = 'external', sinkl = 'external', sinkm = 'partial' }, objs,
+        'each declaration\'s call returns unknown code; a METHOD\'s also hands it O as self, so O.meth itself reads partial')
+    vim.fn.delete(root, 'rf')
+end)
