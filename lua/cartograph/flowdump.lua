@@ -595,6 +595,7 @@ function M.build(rec, X, sink)
         elseif op == 'newmeta' then return { 'newmeta', V(ins[2]), ins[3], V(ins[4]) }
         -- (a guard's π-node, the core's filter — CORE.md D21 / D51, CART-1920)
         elseif op == 'filterType' then return { 'filterType', V(ins[2]), V(ins[3]), ins[4], ins[5] and true or false }
+        elseif op == 'filterMeta' then return { 'filterMeta', V(ins[2]), V(ins[3]), V(ins[4]), F(ins[5]) }
         elseif op == 'cocreate' then return { 'cocreate', V(ins[2]), ins[3], V(ins[4]) }
         elseif op == 'resume' then return { 'resume', pvars(ins[2]), V(ins[3]), pvars(ins[4]) }
         elseif op == 'yield' then return { 'yield', pvars(ins[2]), pvars(ins[3]) }

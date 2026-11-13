@@ -268,6 +268,7 @@ function M.compute(D)
     RULE.prim = RULE.new
     RULE.copy = function (_, ins) setv(ins[2], lv(ins[3])) end
     RULE.filterType = RULE.copy -- (a guard's π-node passes a subset of y's values: y's labels, CART-1920)
+    RULE.filterMeta = RULE.copy
     -- (an instruction's SEEDS go to everything it writes — a handler's parameters too: the slice applies the seeds of
     -- every instruction it reaches, a handler's entry among them)
     RULE.load = function (_, ins)

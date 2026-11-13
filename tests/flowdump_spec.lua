@@ -3422,6 +3422,84 @@ test('flowdump: a constructor into the native setmetatable is one newmeta; hooks
     ok(flowcheck.check(D).failed > 0, 'a newmeta whose site lacks the metatable fails')
 end)
 
+-- (CART-1920 filterMeta, flowpath D21 mtEq / D51 passB: `if getmetatable(y) == c then` reads x = filter(y), decided after
+-- the solve. x keeps an object whose metatable — or that table's __metatable — is c's; widens where c has a metatable (an
+-- __eq), at the round cap; is TAINTED where a dropped object escapes (unknown code may set its metatable). Only `==`, a
+-- native unshadowed getmetatable, a never-assigned y, and c a never-assigned local declared with a table constructor)
+test('flowdump: a metatable guard\'s then-block reads a filtered variable (CART-1920 filterMeta)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(lines, opts)
+        local root = tree({ ['m.lua'] = CLASSES .. table.concat(lines, '\n') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, vim.tbl_extend('force', { open = false, dump = true }, opts or {}))
+        vim.fn.delete(root, 'rf')
+        local D = vim.json.decode(R.dump)
+        local lab, vv, out, fm = {}, {}, {}, nil
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        for _, Fn in ipairs(D.functions) do
+            for _, i in ipairs(Fn.body) do
+                if i[1] == 'filterMeta' then fm = i end
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == 'w' then
+                    for _, s0 in ipairs(vv[i[4]] or {}) do out[#out + 1] = lab[s0]:match(':(%d+):%d+$') end
+                end
+            end
+        end
+        table.sort(out)
+        local tp = {}
+        for _, x in ipairs(D.solution.taint.ports or {}) do tp[x] = true end
+        return table.concat(out, ' '), fm, D, fm and tp[fm[2]] or false
+    end
+    -- (the lines: 0 Z, 1 A plain, 2 mt, 3 E with mt; the guard's block stores w)
+    local head = { 'local Z = {}', 'local A = {}', 'local mt = {}', 'local E = setmetatable({}, mt)' }
+    local function with(guard, extra)
+        local l = vim.deepcopy(head)
+        for _, x in ipairs(extra or {}) do l[#l + 1] = x end
+        l[#l + 1] = 'local function g(v) if ' .. guard .. ' then local w = v; Z.w = w end end'
+        l[#l + 1] = 'g(A); g(E)'
+        return l
+    end
+    local o, fm, D = run(with('getmetatable(v) == mt'))
+    local n0 = #vim.split(CLASSES, '\n') - 1
+    eq(tostring(n0 + 3), o, 'only E — the object whose metatable is mt')
+    ok(fm and D.names.fields[fm[5] + 1] == '__metatable', 'filterMeta x y c __metatable: ' .. vim.inspect(fm))
+    eq(0, flowcheck.check(D).failed, 'closed')
+    o = run(with('mt == getmetatable(v)')); eq(tostring(n0 + 3), o, 'either side')
+    for _, e in ipairs(D.solution.v) do if e[1] == fm[2] then e[2] = {} end end
+    ok(flowcheck.check(D).failed > 0, 'flowcheck: a metatable filter that lost its passing site fails')
+    -- (__metatable: getmetatable returns the override)
+    local l3 = { 'local Z = {}', 'local A = {}', 'local K = {}', 'local mt = { __metatable = K }', 'local E = setmetatable({}, mt)',
+        'local function g(v) if getmetatable(v) == K then local w = v; Z.w = w end end', 'g(A); g(E)' }
+    local D3; o, _, D3 = run(l3); eq(tostring(n0 + 4), o, 'through __metatable: only E'); eq(0, flowcheck.check(D3).failed, 'closed')
+    -- (no filter: ~=, c not surely a table, c or y reassigned, getmetatable shadowed)
+    local both = n0 + 1 .. ' ' .. n0 + 3
+    for _, c in ipairs({
+        { with('getmetatable(v) ~= mt'), '~= is not a metatable guard' },
+        { with('getmetatable(v) == M2', { 'local function mk() return {} end', 'local M2 = mk()' }), 'c not declared with a constructor' },
+        { with('getmetatable(v) == mt', { 'mt = {}' }), 'c reassigned' },
+        { with('getmetatable(v) == mt', { 'local getmetatable = function () return mt end' }), 'a shadowed getmetatable' },
+    }) do
+        local oo, f = run(c[1]); eq(nil, f, c[2]); ok(oo ~= '', c[2] .. ': ' .. oo)
+    end
+    -- (c with a metatable: an __eq may make the tables equal — every object passes)
+    o = run(with('getmetatable(v) == mt', { 'setmetatable(mt, { __eq = function () return true end })' }))
+    eq(both, o, 'c with a metatable: all pass')
+    -- (an object whose metatable has a metatable: its own __eq — it passes)
+    o = run(with('getmetatable(v) == mt', { 'local mt2 = setmetatable({}, { __eq = function () return true end })', 'setmetatable(A, mt2)' }))
+    eq(both, o, 'a metatable with a metatable: it passes')
+    -- (a dropped object that escapes: unknown code may set its metatable — x is tainted)
+    local _, _, Dx, tx = run(with('getmetatable(v) == mt', { 'local f = load(("return ..."):lower())', 'f(A)' }))
+    ok(tx, 'a dropped object handed to unknown code: x tainted'); eq(0, flowcheck.check(Dx).failed, 'closed')
+    local _, _, _, t0 = run(with('getmetatable(v) == mt', { 'local f = load(("return ..."):lower())', 'f(Z)' }))
+    eq(false, t0, 'and not when unknown code gets something else')
+    local ly = with('getmetatable(v) == mt'); ly[#ly + 1] = 'local f = load(("return ..."):lower()); f(g)'
+    local _, _, Dy, ty = run(ly)
+    ok(ty, 'y tainted (g handed to unknown code): x tainted with it'); eq(0, flowcheck.check(Dy).failed, 'closed')
+    -- (the cap)
+    o = run(with('getmetatable(v) == mt'), { gf_rounds = 0 }); eq(both, o, 'a guard still growing at the round cap widens')
+    o = run(with('getmetatable(v) == mt'), { exp = { ['no-guard-filters'] = true } }); eq(both, o, 'no-guard-filters: off')
+end)
+
 -- (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51 — on by default, no-guard-filters off: a type guard's then-block reads
 -- a filtered variable, ["filterType", x, y, tag, positive]. What passes is the core's Guard.asite or more: `~= "function"`
 -- and `== "table"` drop a closure; since D52 (FLOW-0188) a TABLE SITE is surely a table, so `== "function"` and

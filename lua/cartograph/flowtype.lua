@@ -2105,6 +2105,55 @@ local function build(store, opts)
     end
     function G7.tblsite(o) local i = tostring(obinfo[o] or ''); return i:find('^tbl:') ~= nil or i:find('^proxymt:') ~= nil end
     G7.TFILT = {}
+    -- ★ METATABLE GUARDS (CART-1920 filterMeta, flowpath D21 mtEq / D51 passB): `if getmetatable(y) == c then … y …` —
+    -- the block reads x = filter(y), ["filterMeta", x, y, c, "__metatable"]. Conditions (D21's translation): `getmetatable`
+    -- the native global, unshadowed and never assigned; y as for a type guard; c a local never assigned, DECLARED with a
+    -- table constructor (it surely holds a table: a nil c would make the guard "y has no metatable"); `==` only. What
+    -- passes is decided AFTER the solve (G7.gfix: the metatable slots and c's sites grow during it) and is passB or more:
+    -- an object whose metatable slot, or that table's __metatable field, holds one of c's sites — or is saturated or
+    -- unknown code's — a host value, unknown code's object, and an object whose metatable has a metatable of its own
+    -- (an __eq could make the tables compare equal: rawequal is the condition). c with a metatable, or saturated: all
+    G7.MFILT, G7.TBLDECL = {}, {}
+    function G7.metaguard(c, lookup, reasg, txt)
+        if not c or c:type() ~= 'binary_expression' then return nil end
+        local op, l, r
+        for _, x in tsutil.inext, c, -1 do if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end end
+        if op ~= '==' then return nil end
+        local function gm(n)
+            if not (n and n:type() == 'function_call') then return false end
+            local f, args = n:field('name')[1], n:field('arguments')[1]
+            return f and f:type() == 'identifier' and txt(f) == 'getmetatable' and args and args:named_child_count() == 1
+                and args:named_child(0):type() == 'identifier'
+        end
+        if not gm(l) then l, r = r, l end
+        if not (gm(l) and r and r:type() == 'identifier') then return nil end
+        local _, gg = lookup('getmetatable')
+        if not gg or reasg()['getmetatable'] then return nil end
+        local nm, cn = txt(l:field('arguments')[1]:named_child(0)), txt(r)
+        if nm == cn then return nil end
+        local yp, yg = lookup(nm)
+        if yg or not yp or reasg()[nm] then return nil end
+        local cp, cg = lookup(cn)
+        if cg or not cp or reasg()[cn] or not G7.TBLDECL[cp] then return nil end
+        return { nm = nm, y = yp, c = cp }
+    end
+    function G7.some(p) if not p then return false end; if top[p] then return true end; for _ in each(p) do return true end; return false end
+    function G7.mpass(o, cs)
+        if o == G7.EXT or G7.XC[o] or TNAME[o] or G7.NATIVE[o] then return true end
+        local mp = ofield[o] and ofield[o]['\1mt']
+        if not mp then return false end
+        if top[mp] then return true end
+        for m in each(mp) do
+            if cs[m] or m == G7.EXT or G7.XC[m] or TNAME[m] or G7.NATIVE[m] then return true end
+            if G7.some(ofield[m] and ofield[m]['\1mt']) then return true end -- (an __eq may run)
+            local mm = ofield[m] and ofield[m]['__metatable']
+            if mm then
+                if top[mm] then return true end
+                for k in each(mm) do if cs[k] or k == G7.EXT or G7.XC[k] then return true end end
+            end
+        end
+        return false
+    end
     function G7.typeguard(c, lookup, reasg, txt, strval)
         if not c or c:type() ~= 'binary_expression' then return nil end
         local op, l, r
@@ -4982,6 +5031,7 @@ local function build(store, opts)
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
                         -- (declared from a GLOBAL by name: an alias, for a builtin called through it — CART-1991)
                         if gnames[i] then G7.GALIAS[p] = gnames[i] end
+                        if el and el:named_child(i - 1) and el:named_child(i - 1):type() == 'table_constructor' then G7.TBLDECL[p] = true end
                         if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADNAME[p] = G7.LOADERP[vals[i]] end
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
@@ -5151,21 +5201,27 @@ local function build(store, opts)
                 scopes[#scopes + 1] = {}
                 for _, x in tsutil.inamed, n, -1 do stmt(x); if raises(x) then break end end
                 scopes[#scopes] = nil
-            elseif t == 'if_statement' and not G7.EXP['no-guard-filters'] and G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
-                and not G7.hasfn(n:field('consequence')[1]) then
-                -- (a TYPE GUARD: its then-block reads a filtered y, CART-1920 — G7.tagpass)
-                local g = G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
+            elseif t == 'if_statement' and not G7.EXP['no-guard-filters'] and (G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
+                or G7.metaguard(n:field('condition')[1], lookup, reasg, txt)) and not G7.hasfn(n:field('consequence')[1]) then
+                -- (a TYPE GUARD: its then-block reads a filtered y, CART-1920 — G7.tagpass; or a METATABLE guard, G7.metaguard)
+                local g = G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval) or G7.metaguard(n:field('condition')[1], lookup, reasg, txt)
                 local cq = n:field('consequence')[1]
                 for _, x in tsutil.inamed, n, -1 do
                     local xt = x:type()
                     if cq and x:id() == cq:id() then
                         local xp = new()
                         local tag, pos = g.tag, g.pos
+                        if g.c then -- (a metatable guard: nothing passes until the solve is done — G7.gfix)
+                            G7.MFILT[#G7.MFILT + 1] = { g.y, xp, g.c, {} }
+                            G7.TFILT[#G7.TFILT + 1] = { g.y, xp }
+                            G7.ins({ 'filterMeta', xp, g.y, g.c, '__metatable' })
+                        else
                         -- (MUTED: what y holds now reaches x through the filter alone — a `new x a` per passing literal made x
                         -- non-fresh, D21's π-node condition, and a closure's second creation; flowpath FLOW-0189)
                         G7.mu(function () filter(g.y, xp, function (o) return G7.tagpass(o, tag, pos) end) end)
                         G7.TFILT[#G7.TFILT + 1] = { g.y, xp }
                         G7.ins({ 'filterType', xp, g.y, tag, pos })
+                        end
                         scopes[#scopes + 1] = { [g.nm] = xp }
                         stmt(x)
                         scopes[#scopes] = nil
@@ -5648,11 +5704,24 @@ local function build(store, opts)
                     end
                 end
             end
+            for _, mf in ipairs(G7.MFILT) do -- (the metatable guards, G7.mpass)
+                if not mf.wide then
+                    local cs, cu = {}, top[mf[3]]
+                    for k in each(mf[3]) do cs[k] = true; if k == G7.EXT or G7.XC[k] or G7.some(ofield[k] and ofield[k]['\1mt']) then cu = true end end
+                    if cu or not next(cs) then mf.wide = true; edge(mf[1], mf[2]); grew = true
+                    else
+                        for o in each(mf[1]) do
+                            if not mf[4][o] and G7.mpass(o, cs) then mf[4][o] = true; addobj(mf[2], o); grew = true end
+                        end
+                    end
+                end
+            end
             if not grew then return end
             solve()
         end
         G7.GFCAP = (G7.GFCAP or 0) + 1 -- (the cap: every guard still narrowing widens)
         for _, gf in ipairs(gfilters) do if not gf.wide then gf.wide = true; edge(gf[1], gf[2]) end end
+        for _, mf in ipairs(G7.MFILT) do if not mf.wide then mf.wide = true; edge(mf[1], mf[2]) end end
         solve()
     end
     G7.gfix()
@@ -6349,9 +6418,10 @@ local function build(store, opts)
         if fpp.err then l[#l + 1] = fpp.err end
         return l
     end
-    if gfilters[1] then G7.gfix() end -- (the later phases' arrivals and prototype links, CART-1914)
+    if gfilters[1] or G7.MFILT[1] then G7.gfix() end -- (the later phases' arrivals and prototype links, CART-1914)
     local gf_of = {}
     for _, gf in ipairs(gfilters) do local l = gf_of[gf[1]] or {}; gf_of[gf[1]] = l; l[#l + 1] = gf[2] end
+    for _, mf in ipairs(G7.MFILT) do local l = gf_of[mf[1]] or {}; gf_of[mf[1]] = l; l[#l + 1] = mf[2] end
     -- (an escaped object's fields and prototypes escaped WITH it: the solve no longer follows it, so a load through a
     -- tainted base misses what its fields hold — a method of its metatable — and a call through that load binds none of
     -- them. Closed transitively)
@@ -7015,6 +7085,25 @@ local function build(store, opts)
                 end
             end
             G7.HSKIP = keep
+        end
+        -- (a metatable guard's DROPPED object whose metatable slot unknown code may reach — the object or a metatable of it
+        -- escaped, or the slot / its __metatable field tainted — may pass: the E-reading's ⊤ cell, passB. x is tainted)
+        for _, mf in ipairs(G7.MFILT) do
+            if not tainted[mf[2]] and not mf.wide then
+                for o in each(mf[1]) do
+                    if not mf[4][o] then
+                        local mp = ofield[o] and ofield[o]['\1mt']
+                        local hit = escaped[o] or (mp and tainted[mp])
+                        if not hit and mp then
+                            for m in each(mp) do
+                                local mm = ofield[m] and ofield[m]['__metatable']
+                                if escaped[m] or (mm and tainted[mm]) then hit = true; break end
+                            end
+                        end
+                        if hit then TCUR = 'a metatable guard over an object whose metatable unknown code may set (filterMeta)'; taint(mf[2]); released = true; break end
+                    end
+                end
+            end
         end
         for nm, ports in pairs(METAPEND) do
             if not ALLOW[nm] and meta_possible(nm) then

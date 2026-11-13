@@ -284,6 +284,23 @@ for _, F in ipairs(D.functions) do
                 else pass = tag ~= 'prim' end
                 if pass and not hasv(x, a0) then fail('filter', x, ('v lacks %d'):format(a0)) end
             end
+        elseif op == 'filterMeta' then
+            -- (`getmetatable(y) == c`, D21 mtEq / D51 passB: every site of y whose META cell — or that table's field f, the
+            -- __metatable override — holds one of c's sites, or is top, is in v(x); a top y, a top x)
+            local x, y, c, f = ins[2], ins[3], ins[4], ins[5]
+            if TOP[y] and not TOP[x] then fail('filter-top', x, 'y is top') end
+            local cv = v(c)
+            for a0 in pairs(v(y)) do
+                local pass = HTOP[a0 .. ':' .. META] ~= nil
+                if not pass then
+                    for m in pairs(h(a0, META)) do
+                        if cv[m] or HTOP[m .. ':' .. f] then pass = true; break end
+                        for k in pairs(h(m, f)) do if cv[k] then pass = true; break end end
+                        if pass then break end
+                    end
+                end
+                if pass and not hasv(x, a0) then fail('filter', x, ('v lacks %d'):format(a0)) end
+            end
         elseif op == 'newmeta' then
             -- (`new x a` + `setmeta x m` at site a — flowpath CORE.md D50, CART-1908: x holds a, a's META cell holds m's sites)
             local x, a0, m = ins[2], ins[3], ins[4]
@@ -334,7 +351,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'newmeta' or op == 'filterType' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
+        if op == 'new' or op == 'newmeta' or op == 'filterType' or op == 'filterMeta' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end
