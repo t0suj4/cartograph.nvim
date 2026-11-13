@@ -1890,7 +1890,7 @@ local function build(store, opts)
         -- copies nor a gap, its route unchecked, CART-2018 / flowpath FLOW-0049 u5 / l6)
         local function dbgcall(list, key, a, rl) if G7.REC and G7.NATFN then list[#list + 1] = { fn = G7.NATFN, op = key, args = a, res = rl } end end
         M0['debug#setupvalue'] = function (a, rl)
-            dbgcall(G7.UPVCALLS, 'debug#setupvalue', a, rl)
+            dbgcall(G7.UPVCALLS, 'debug#setupvalue', a, rl); G7.LOCALW = true
             if a[1] and a[3] then upvs(a[1], function (up) edge(a[3], up) end) end
             addobj(rl[1], STR)
         end
@@ -1921,7 +1921,7 @@ local function build(store, opts)
             return not (ctx and ctx.lvl == 1 and ctx.nargs == nplain)
         end
         M0['debug#setlocal'] = function (a, rl)
-            dbgcall(G7.LOCCALLS, 'debug#setlocal', a, rl)
+            dbgcall(G7.LOCCALLS, 'debug#setlocal', a, rl); G7.LOCALW = true
             local vs = { a[3], a[4] } -- (the value: 3rd without a thread, 4th with one)
             for _, q in ipairs(frame_locals(rl, 3)) do for _, v in pairs(vs) do edge(v, q) end end
             if anyframe(rl, 3) then for _, v in pairs(vs) do G7.ANYFRAME[#G7.ANYFRAME + 1] = { v, true } end end
@@ -1934,7 +1934,7 @@ local function build(store, opts)
             if rl[2] and anyframe(rl, 2) then G7.ANYFRAME[#G7.ANYFRAME + 1] = { rl[2], false } end
         end
         M0['debug#upvaluejoin'] = function (a, rl)
-            dbgcall(G7.UPVCALLS, 'debug#upvaluejoin', a, rl)
+            dbgcall(G7.UPVCALLS, 'debug#upvaluejoin', a, rl); G7.LOCALW = true
             if not (a[1] and a[3]) then return end
             -- (f1's upvalue becomes f2's cell: values flow both ways between their upvalues from now on)
             local u1, u3 = {}, {}
@@ -2080,7 +2080,8 @@ local function build(store, opts)
     -- positive guard passes a closure only for function, a proxy userdata only for userdata, a host value (a typed one,
     -- a native, unknown code) for any tag but nil, any other object for function / userdata / object; a negative one
     -- drops only what surely has the tag (a closure for ~= "function", a proxy for ~= "userdata"). Where the tree has a
-    -- debug hook or a getlocal / setlocal, a frame could change y under the guard: every filter passes all (G7.tfiltfix)
+    -- getlocal / setlocal, a setupvalue or an upvaluejoin, y could change under the guard: every filter passes all
+    -- (G7.tfiltfix); a debug hook alone does not (CART-2056)
     -- ★ A TABLE SITE IS SURELY A TABLE (flowpath FLOW-0188, CORE.md D52): a constructor's object (`tbl:`) or newproxy's
     -- metatable (`proxymt:`) — the dump's sites of kind `table` — passes a positive guard only for object and a negative
     -- one never for object. So `~= "thread"` / `~= "cdata"`, which the core reads as `~= object` too, would drop a table
@@ -2154,12 +2155,35 @@ local function build(store, opts)
         end
         return false
     end
+    -- (CART-2056: also through an ALIAS — `local t = type(y)`, one name and one value, t and y never assigned in the file and
+    -- y still the same variable at the guard: G7.TYPEALIAS[t's port] = { nm, y } — and an `or` of POSITIVE guards on one y
+    -- with one tag, which is that guard: self_oracle.to_data's `t == 'string' or t == 'number' or t == 'boolean'`)
+    G7.TYPEALIAS = {}
     function G7.typeguard(c, lookup, reasg, txt, strval)
+        if c and c:type() == 'parenthesized_expression' and c:named_child_count() == 1 then return G7.typeguard(c:named_child(0), lookup, reasg, txt, strval) end
         if not c or c:type() ~= 'binary_expression' then return nil end
         local op, l, r
         for _, x in tsutil.inext, c, -1 do if not x:named() then op = txt(x) elseif not l then l = x elseif not r then r = x end end
+        if op == 'or' then
+            local a = G7.typeguard(l, lookup, reasg, txt, strval)
+            local b = a and a.pos and G7.typeguard(r, lookup, reasg, txt, strval)
+            if b and b.pos and a.y == b.y and a.tag == b.tag then return a end
+            return nil
+        end
         if op ~= '==' and op ~= '~=' then return nil end
         if l and l:type() == 'string' then l, r = r, l end
+        if l and r and l:type() == 'identifier' and r:type() == 'string' then
+            local tn = txt(l)
+            local tp, tglob = lookup(tn)
+            local al = not tglob and tp and G7.TYPEALIAS[tp]
+            if not al or reasg()[tn] or reasg()[al.nm] or reasg()['type'] then return nil end
+            local yp, yglob = lookup(al.nm)
+            if yglob or yp ~= al.y then return nil end
+            local lit = strval(r)
+            local tag = lit and G7.GTAG[lit]
+            if not tag or (op == '~=' and tag == 'object' and lit ~= 'table') then return nil end
+            return { nm = al.nm, y = al.y, tag = tag, pos = op == '==' }
+        end
         if not (l and r and l:type() == 'function_call' and r:type() == 'string') then return nil end
         local f, args = l:field('name')[1], l:field('arguments')[1]
         if not (f and f:type() == 'identifier' and txt(f) == 'type' and args and args:named_child_count() == 1) then return nil end
@@ -2184,11 +2208,21 @@ local function build(store, opts)
         for _, x in tsutil.inamed, b, -1 do if G7.hasfn(x) then return true end end
         return false
     end
+    -- (a filter passes everything where a local or an upvalue may be rewritten UNSEEN — debug.setlocal / setupvalue /
+    -- upvaluejoin anywhere, by name or by identity: G7.LOCALW, set by their models whether or not a dump records — or
+    -- a frame call is listed. A debug HOOK alone does not: it changes y only through those (CART-2056 — the tree's two
+    -- budget hooks, `debug.sethook(function () error(...) end, '', n)`, had turned every filter of the tree off; unknown
+    -- code, as a hook or called, uses no debug function: flowtype's standing reading, flowpath D39 HO (3))
+    -- (asked at the end of every solve(): a model reached BY VALUE runs during one — the first yes is kept, G7.TFILTW,
+    -- and a filter walked later passes all at once. -> whether it widened now)
     function G7.tfiltfix()
-        if G7.ANYHOOK or (G7.LOCCALLS and #G7.LOCCALLS > 0) or (G7.ANYFRAME and G7.ANYFRAME[1]) then
-            for _, f in ipairs(G7.TFILT) do edge(f[1], f[2]) end
+        if G7.TFILTW then return false end
+        if G7.LOCALW or (G7.LOCCALLS and #G7.LOCCALLS > 0) or (G7.ANYFRAME and G7.ANYFRAME[1]) then
+            G7.TFILTW = true
+            G7.mu(function () for _, f in ipairs(G7.TFILT) do edge(f[1], f[2]) end end) -- (no IR: x stays the filter's alone)
+            return true
         end
-        G7.TFILT = {}
+        return false
     end
     function G7.eqable(o)
         if fnports[o] or G7.NATIVE[o] then return false end
@@ -2641,6 +2675,9 @@ local function build(store, opts)
             end
         end
         G7.ESRC = nil
+        -- (a frame write seen — at a walk, or by a model this drain reached by value: every guard filter passes all from
+        -- now on, and the drain goes on, CART-2056. Asked at the end of EVERY solve, so no phase can miss it)
+        if not G7.TFILTW and G7.tfiltfix() then return solve() end
     end
     local named = {}
     local function port(key)
@@ -2718,6 +2755,7 @@ local function build(store, opts)
     G7.SETFENVS = {} -- (every setfenv / debug.setfenv call: { fn, port | level } — the dump's fixed-env decision, CART-1813)
     G7.UPVCALLS = {} -- (debug.setupvalue / getupvalue / upvaluejoin calls by name, for the dump: CART-1813)
     G7.LOCCALLS = {} -- (debug.setlocal / getlocal calls by name, for the dump: CART-1956)
+    G7.LOCALW = nil -- (a setlocal / setupvalue / upvaluejoin model ran: G7.tfiltfix, CART-2056)
     if G7.EXP['refl-nocap'] then G7.PORTFILE, G7.REFLFILE = {}, {} else G7.PORTFILE, G7.REFLFILE = nil, nil end
     -- (refl-scope, CART-1817: the region flag — set before a port saturates, it makes the port a region top; set after,
     -- the port stays an ordinary saturation, counted in G7.RGLATE)
@@ -5026,12 +5064,25 @@ local function build(store, opts)
                             end
                         end
                     end
+                    -- (`local t = type(y)`: a type guard's alias, G7.typeguard — y resolved BEFORE t exists)
+                    local talias
+                    if vl:named_child_count() == 1 and el and el:named_child_count() == 1 and el:named_child(0):type() == 'function_call' then
+                        local fc = el:named_child(0)
+                        local f, args = fc:field('name')[1], fc:field('arguments')[1]
+                        if f and f:type() == 'identifier' and txt(f) == 'type' and args and args:named_child_count() == 1
+                            and args:named_child(0):type() == 'identifier' then -- (`local v = type(v)`: y is no longer v at the guard)
+                            local _, tg = lookup('type')
+                            local yp, yg = lookup(txt(args:named_child(0)))
+                            if tg and yp and not yg then talias = { nm = txt(args:named_child(0)), y = yp } end
+                        end
+                    end
                     local i = 0
                     for _, v in tsutil.inamed, vl, -1 do
                         i = i + 1; local p = declare(txt(v)); if vals[i] then edge(vals[i], p) end
                         -- (declared from a GLOBAL by name: an alias, for a builtin called through it — CART-1991)
                         if gnames[i] then G7.GALIAS[p] = gnames[i] end
                         if el and el:named_child(i - 1) and el:named_child(i - 1):type() == 'table_constructor' then G7.TBLDECL[p] = true end
+                        if talias and v:type() == 'identifier' then G7.TYPEALIAS[p] = talias end
                         if vals[i] and G7.LOADERP[vals[i]] and not G7.REASG[txt(v)] then G7.LOADNAME[p] = G7.LOADERP[vals[i]] end
                         G7.markmap(v, el and el:named_child(i - 1), vals[i])
                         local ev = G7.LITKEYS and el and el:named_child(i - 1)
@@ -5222,6 +5273,9 @@ local function build(store, opts)
                         G7.TFILT[#G7.TFILT + 1] = { g.y, xp }
                         G7.ins({ 'filterType', xp, g.y, tag, pos })
                         end
+                        -- (walked after a frame write was seen — a closed function's instance, during the solve: it passes
+                        -- all at once; MUTED, x's only writer stays the filter, D53)
+                        if G7.TFILTW then G7.mu(function () edge(g.y, xp) end) end
                         scopes[#scopes + 1] = { [g.nm] = xp }
                         stmt(x)
                         scopes[#scopes] = nil
@@ -5619,7 +5673,6 @@ local function build(store, opts)
             end
         end
     end
-    G7.tfiltfix() -- (guard filters pass all where a frame could change their variable, CART-1920)
     -- (the walks are done: the solve's own reads of the current environment — a string's library for a load recorded
     -- before a second program existed — are the DEFAULT program's, never the last walked file's, CART-1737)
     if G7.ENVL[1] then G7.useenv(G7.ENVL[1]) end

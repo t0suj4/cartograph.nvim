@@ -3551,17 +3551,40 @@ test('flowdump: a type guard\'s then-block reads a filtered variable, by default
     eq(0, flowcheck.check(Df).failed, 'closed')
     o, n = run('type(v) == "table"'); eq(1, n, 'on by default'); eq({ 'T' }, o)
     o, n = run('type(v) == "table"', { ['no-guard-filters'] = true }); eq(0, n, 'no-guard-filters turns it off'); eq({ 'F', 'T' }, o)
-    -- (a debug hook could change v under the guard: the filter passes everything — G7.tfiltfix)
-    local Dh = dump('local Z, T = {}, {}\nlocal function F() end\ndebug.sethook(function () end, "c")\n'
-        .. 'local function g(v) if type(v) == "table" then local w = v; Z.w = w end end\ng(T); g(F)\n', GF)
-    local labh, vh, oh = {}, {}, {}
-    for _, x in ipairs(Dh.sites) do labh[x.id] = x.label end
-    for _, e in ipairs(Dh.solution.v) do vh[e[1]] = e[2] end
-    for _, Fn in ipairs(Dh.functions) do for _, i in ipairs(Fn.body) do
-        if i[1] == 'store' and Dh.names.fields[i[3] + 1] == 'w' then for _, s in ipairs(vh[i[4]] or {}) do oh[#oh + 1] = labh[s]:match('^tbl') and 'T' or 'F' end end
+    -- (a local rewritten unseen — debug.setlocal / setupvalue / upvaluejoin, by name or by value — could change v under
+    -- the guard: the filter passes everything, G7.tfiltfix. A hook alone does not (CART-2056))
+    local function hooked(pre)
+        local Dh = dump('local Z, T = {}, {}\nlocal function F() end\n' .. pre .. '\n'
+            .. 'local function g(v) if type(v) == "table" then local w = v; Z.w = w end end\ng(T); g(F)\n', GF)
+        local labh, vh, oh = {}, {}, {}
+        for _, x in ipairs(Dh.sites) do labh[x.id] = x.label end
+        for _, e in ipairs(Dh.solution.v) do vh[e[1]] = e[2] end
+        for _, Fn in ipairs(Dh.functions) do for _, i in ipairs(Fn.body) do
+            if i[1] == 'store' and Dh.names.fields[i[3] + 1] == 'w' then for _, s in ipairs(vh[i[4]] or {}) do oh[#oh + 1] = labh[s]:match('^tbl') and 'T' or 'F' end end
+        end end
+        table.sort(oh)
+        local fx, wr = nil, 0 -- (widened, x is still written by the filter alone: D53)
+        for _, Fn in ipairs(Dh.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then fx = i[2] end end end
+        for _, Fn in ipairs(Dh.functions) do for _, i in ipairs(Fn.body) do
+            if i[2] == fx and i[1] ~= 'filterType' and i[1] ~= 'store' and i[1] ~= 'storeRaw' and i[1] ~= 'call' then wr = wr + 1 end
+        end end
+        eq(0, wr, 'the filter alone writes x: ' .. pre)
+        return oh
+    end
+    eq({ 'T' }, hooked('debug.sethook(function () error("budget") end, "", 100)'), 'a hook alone: the filter narrows')
+    eq({ 'F', 'T' }, hooked('debug.sethook(function () debug.setlocal(2, 1, F) end, "c")'), 'a hook that sets a local: passes all')
+    eq({ 'F', 'T' }, hooked('local function h() return Z end\ndebug.setupvalue(h, 1, F)'), 'a setupvalue anywhere: passes all')
+    eq({ 'F', 'T' }, hooked('local D = { s = debug.setlocal }\nlocal function k() D.s(1, 1, F) end\nk()'), 'a setlocal reached by value, during the solve: passes all')
+    -- (a closed function's INSTANCE, walked during the solve after the setlocal was seen: still no writer of x but the filter)
+    local Dc = dump('local T = {}\nlocal function F() end\nlocal function k() debug.setlocal(1, 1, F) end\nk()\n'
+        .. 'local function g(v) if type(v) == "table" then return v end end\nW = g(T); W = g(F)\n', GF)
+    local fxs, wc = {}, 0
+    for _, Fn in ipairs(Dc.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then fxs[i[2]] = true end end end
+    for _, Fn in ipairs(Dc.functions) do for _, i in ipairs(Fn.body) do
+        if fxs[i[2]] and i[1] ~= 'filterType' and i[1] ~= 'store' and i[1] ~= 'storeRaw' and i[1] ~= 'call' then wc = wc + 1 end
     end end
-    table.sort(oh)
-    eq({ 'F', 'T' }, oh, 'a hook in the tree: the filter passes all')
+    ok(next(fxs) ~= nil, 'filters emitted'); eq(0, wc, 'an instance walked after the setlocal: the filter alone writes x')
+    eq(0, flowcheck.check(Dc).failed, 'closed')
     local function nfilt(src) local _, k = (function () local D2 = dump(src, GF); local c = 0; for _, Fn in ipairs(D2.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then c = c + 1 end end end; return D2, c end)(); return k end
     eq(0, nfilt('local Z = {}\nlocal function g(t) if type(t.f) == "table" then Z.w = t.f end end\ng({})\n'), 'a heap path is never refined')
     eq(0, nfilt('local Z = {}\nlocal function g(v) v = v or {}; if type(v) == "table" then Z.w = v end end\ng({})\n'), 'a reassigned local is not')
@@ -3573,4 +3596,54 @@ test('flowdump: a type guard\'s then-block reads a filtered variable, by default
     for _, Fn in ipairs(D3.functions) do for _, i in ipairs(Fn.body) do if i[1] == 'filterType' then fx = i[2] end end end
     for _, e in ipairs(D3.solution.v) do if e[1] == fx then e[2] = {} end end
     ok(flowcheck.check(D3).failed > 0, 'a filter that lost a passing site fails')
+end)
+
+-- (CART-2056: the guard through a `local t = type(v)` ALIAS, and an `or` of positive guards on one variable with one tag —
+-- self_oracle.to_data's `if t == 'string' or t == 'number' or t == 'boolean' then return val end` let every library table
+-- package.loaded[k] read reach its return: 537 of 551 field cells holding lib:coroutine on cartograph's own tree)
+test('flowdump: a type guard through a local alias of type(v), and a same-tag disjunction (CART-2056)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(pre, guard, post)
+        local D = dump(table.concat({
+            'local Z, T = {}, {}',
+            'local function F() end',
+            'local function g(v) ' .. (pre or '') .. ' if ' .. guard .. ' then local w = v; Z.w = w end end',
+            'g(T); g(F); g("s"); g(1)', post or '' }, '\n') .. '\n')
+        local lab, vv, out, nf = {}, {}, {}, 0
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        for _, Fn in ipairs(D.functions) do
+            for _, i in ipairs(Fn.body) do
+                if i[1] == 'filterType' then nf = nf + 1 end
+                if i[1] == 'store' and D.names.fields[i[3] + 1] == 'w' then
+                    for _, s in ipairs(vv[i[4]] or {}) do local l = lab[s]; out[#out + 1] = l:match('^tbl') and 'T' or l:match('^type:') and l:sub(6) or 'F' end
+                end
+            end
+        end
+        table.sort(out)
+        return out, nf, D
+    end
+    local all = { 'F', 'T', 'number', 'string' }
+    -- (a type site passes an object filter — G7.tagpass is conservative for host types: compare with the direct guard)
+    local o, n, D = run('local t = type(v);', 't == "table"')
+    eq(1, n, 'an alias guard: one filter'); eq(run(nil, 'type(v) == "table"'), o, 'the alias narrows as type(v) does')
+    ok(not vim.deep_equal(all, o), 'and it narrows'); eq(0, flowcheck.check(D).failed, 'closed')
+    o = run('local t = type(v);', '"function" == t'); eq(run(nil, 'type(v) == "function"'), o, 'either side'); ok(not vim.deep_equal(all, o))
+    o = run('local t = type(v);', 't ~= "table"'); eq({ 'F', 'number', 'string' }, o, 'negative')
+    o, n, D = run(nil, 'type(v) == "string" or type(v) == "number"')
+    eq(1, n, 'a same-tag disjunction: one filter'); eq({ 'number', 'string' }, o, 'tables and closures dropped'); eq(0, flowcheck.check(D).failed, 'closed')
+    o, n = run('local t = type(v);', 't == "string" or (t == "number" or t == "boolean")')
+    eq(1, n, 'alias and disjunction, parenthesized'); eq({ 'number', 'string' }, o, 'the to_data shape')
+    -- (refused: no filter, everything reaches w)
+    o, n = run('local t = type(v);', 't == "string" or t == "table"'); eq(0, n, 'mixed tags: no filter'); eq(all, o)
+    o, n = run(nil, 'type(v) == "string" or type(v) ~= "number"'); eq(0, n, 'a negative right disjunct: no filter'); eq(all, o)
+    o, n = run(nil, 'type(v) ~= "number" or type(v) == "string"'); eq(0, n, 'a negative left disjunct: no filter'); eq(all, o)
+    o, n = run('local u = v; local t = type(u);', 't == "string" or type(v) == "number"'); eq(0, n, 'two variables: no filter'); eq(all, o)
+    o, n = run('local t = type(v);', 't == "table"', 'local function h() t = "table" end'); eq(0, n, 'a reassigned alias'); eq(all, o)
+    o, n = run('local t = type(v); v = v;', 't == "table"'); eq(0, n, 'a reassigned y'); eq(all, o)
+    o, n = run('local t = type(v); local v = v;', 't == "table"'); eq(0, n, 'y shadowed since the alias'); eq(all, o)
+    o, n = run('local t = type(v.x);', 't == "table"'); eq(0, n, 'an alias of a heap path'); eq(all, o)
+    o, n = run('local t, u = type(v), 1;', 't == "table"'); eq(0, n, 'a multiple declaration'); eq(all, o)
+    o, n = run('local type = function () return "table" end; local t = type(v);', 't == "table"'); eq(0, n, 'a shadowed type'); eq(all, o)
+    o, n = run('local t = type(v);', 't == "table" and t == "table"'); eq(0, n, 'a conjunction is not a disjunction'); eq(all, o)
 end)

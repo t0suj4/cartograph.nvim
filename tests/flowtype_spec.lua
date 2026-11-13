@@ -3253,6 +3253,27 @@ test('flowtype: the left operand of `and` reaches the result only as false, neve
     ok(v and #v.targets == 2 and not vim.tbl_contains(v.targets, 'm.lua::C.m@4'), 'x itself never flows: {A.m, B.m}: ' .. vim.inspect(v))
 end)
 
+-- (CART-2056: a type guard's filter passes everything where a local may be rewritten unseen — debug.setlocal, by name or
+-- by value — also in a solve with no dump, whose frame calls are not listed; a debug hook alone keeps it narrowing)
+test('flowtype: a guard filter widens for setlocal without a dump; a hook alone does not widen it (CART-2056)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local function run(pre, body)
+        local root = tree({ ['m.lua'] = 'local T = {}\nlocal function F() end\n' .. pre
+            .. '\n' .. (body or 'local function g(v) if type(v) == "table" then W = v end end\ng(T); g(F)') .. '\n' })
+        store.ingest(ts.extract(root))
+        local R = flowtype.solve(store, { open = false, ctx = false, explain = true })
+        vim.fn.delete(root, 'rf')
+        return #R.objs_of(R.port('g:W'))
+    end
+    eq(1, run('debug.sethook(function () error("budget") end, "", 100)'), 'a hook alone: the closure is dropped')
+    eq(2, run('debug.sethook(function () debug.setlocal(2, 1, F) end, "c")'), 'a hook that sets a local: both')
+    eq(2, run('local D = { s = debug.setlocal }\nlocal function k() D.s(1, 1, F) end\nk()'), 'setlocal by value: both')
+    -- (a small closed function's INSTANCE is walked during the solve, after the frame write was seen: its filter passes all)
+    local closed = 'local function g(v) if type(v) == "table" then return v end end\nW = g(T); W = g(F)'
+    eq(1, run('', closed), 'a closed function: narrows')
+    eq(2, run('local function k() debug.setlocal(1, 1, F) end\nk()', closed), 'its instance walked after a setlocal: both')
+end)
+
 -- (CART-1813: `(a and b) or c` is b where truthy, else c — the and's falsy part, a's, never reaches it. The or had read
 -- the and's port, so `flag and t or u` held flag's boolean, and an escaped a tainted it)
 test('flowtype: `a and b or c` holds b and c, never a (CART-1813)', function ()
