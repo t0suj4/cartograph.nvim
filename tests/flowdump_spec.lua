@@ -1451,6 +1451,9 @@ test('flowdump: a hook\'s error is every function\'s, and init\'s unknown-code c
         'local g',
         'local function h(ev) if debug.getinfo(2, "f").func == g then error(b) end end',
         'g = function () return a end',
+        -- (g HANDED to unknown code, so init's unknown-code call holds it: until CART-2023 the `getinfo(…).func == g`
+        -- comparison handed it over through a phantom __eq — Lua compares functions raw)
+        'require("notintree").keep(g)',
         'debug.sethook(h, "c")',
         'local ok, e = pcall(g)',
         'debug.sethook()',
@@ -3348,4 +3351,38 @@ test('flowdump: a coroutine\'s fifth return value reaches its resumer through th
     ok(rout['tbl:m.lua:7:39'], 'E (the fifth) is in the out-channel: ' .. vim.inspect(rout))
     ok(vim.tbl_contains(stored(D, 'e'), 'tbl:m.lua:7:39'), 'and reaches the resumer\'s e: ' .. vim.inspect(stored(D, 'e')))
     eq(0, flowcheck.check(D).failed, 'closed')
+end)
+
+-- (CART-2023, flowpath debuglib h1: `debug.getinfo(2, 'f').func == g` handed the plain local function g to unknown code —
+-- the left operand may be any function, so unknown code's __eq ran with both operands. Lua hands __eq two tables or two
+-- userdata only: a function is compared raw. g stays unescaped; a TABLE compared against unknown code's value still
+-- reaches its __eq)
+test('flowtype: == hands __eq only tables / userdata — a compared function does not escape (CART-2023)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local g',
+        'local function h(ev) if debug.getinfo(2, "f").func == g then error("x") end end',
+        'g = function () return 1 end',
+        'local T = {}',
+        'local ext = require("notintree")',
+        'if ext.v == T then end',
+        'return h, g' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local R = flowtype.solve(store, { open = false, explain = true })
+    local gesc = R.escape_of(R.object('m.lua::g@2'))
+    eq('<- not escaped', gesc[#gesc], 'g compared with any function stays unescaped: ' .. vim.inspect(gesc))
+    local tesc = R.escape_of(R.object('tbl:m.lua:3:10'))
+    ok(tesc[#tesc] ~= '<- not escaped', 'T compared with unknown code\'s value reaches its __eq: ' .. vim.inspect(tesc))
+    -- (a profile stating 5.2+ keeps the whole binding: flowpath's core runs any operand's comparison handler with the
+    -- operands whole there, and the dump must stay certifiable)
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    P.load = function (nm, ...) if nm == 'stub' then return { lua_version = '5.2' } end return old(nm, ...) end
+    store.data.profile = 'stub'
+    local ok5, R5 = pcall(flowtype.solve, store, { open = false, explain = true })
+    P.load, store.data.profile = old, oldp
+    if not ok5 then error(R5, 0) end
+    local g5 = R5.escape_of(R5.object('m.lua::g@2'))
+    ok(g5[#g5] ~= '<- not escaped', '5.2+: the core\'s reading, g handed whole: ' .. vim.inspect(g5))
+    vim.fn.delete(root, 'rf')
 end)

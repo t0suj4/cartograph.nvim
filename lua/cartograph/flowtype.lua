@@ -2035,6 +2035,14 @@ local function build(store, opts)
     end
     -- (a host-typed FUNCTION: `function`, or a signature `fun(…): …` — a profile's declared function, CART-2021)
     function G7.isfnty(tn) return tn == 'function' or tn:match('^%(?fun%(') ~= nil end
+    -- (what Lua can hand an __eq handler: a table or a userdata — an ordinary table, a host object of a non-scalar,
+    -- non-function type, unknown code (EXT: it may be a table). Never a function, a native, a scalar or a thread, CART-2023)
+    function G7.eqable(o)
+        if fnports[o] or G7.NATIVE[o] then return false end
+        local tn = TNAME[o]
+        if tn and (SCALAR[tn] or G7.isfnty(tn)) then return false end
+        return not tostring(obinfo[o] or ''):match('^thread:')
+    end
     -- (a store the host kind refused, under explain: counted per type and field, its sites kept — CART-2045)
     function G7.hdrop(tn, f, site, si)
         local key = tn .. '\0' .. f
@@ -4797,7 +4805,24 @@ local function build(store, opts)
                         or ((op == '==' or op == '~=') and ty == 'string') end
                     if lit(l) or lit(r) then mm = nil end
                 end
-                if mm then
+                if mm == '__eq' and not G7.LUA52 then
+                    -- ★ __eq SEES ONLY TWO TABLES OR TWO USERDATA (CART-2023; 5.1, LuaJIT and 5.4 alike): a function, a
+                    -- string, a number, a boolean or a thread is compared raw and is never handed to a handler. Passing the
+                    -- operands whole handed flowpath h1's `getinfo(2, 'f').func == g` — func any function, unknown code's
+                    -- __eq — the plain local g to unknown code: it escaped ("reached port …"). The IR keeps its operands;
+                    -- the solve binds the handler to what Lua can pass it (G7.eqable). Under the dump's ver 51 only: there
+                    -- flowpath's core runs a comparison handler only when EVERY operand is an object with one (Sem.lean
+                    -- CmpRun); its 5.2+ reading runs any operand's handler with the operands whole, so a profile stating
+                    -- 5.2+ keeps the whole binding — certifiable, the same over-approximation as the core's
+                    local hr = new()
+                    if G7.REC and G7.W and G7.M == 0 then G7.ins({ 'op', hr, { a, b }, mm }); G7.ins({ 'op', hr, { a, b }, mm }) end
+                    local fa, fb = new(), new()
+                    filter(a, fa, G7.eqable); filter(b, fb, G7.eqable)
+                    local s0 = at(opn)
+                    local ce = curerr()
+                    G7.mu(function () metacall(fa, mm, { fa, fb }, hr, ce); metacall(fb, mm, { fa, fb }, hr, ce) end)
+                    G7.WSITE = s0
+                elseif mm then
                     local args = (op == '>' or op == '>=') and { b, a } or { a, b }
                     local hr = new()
                     local s0 = at(opn)
