@@ -2241,6 +2241,13 @@ local function build(store, opts)
         if g then return g, gf end
         return nil
     end
+    -- (does a by-name callee's ROOT name the global — unshadowed, or a local declared from that global? CART-2048)
+    function G7.sigroot(fname, lookup)
+        local root = fname:match('^([%a_][%w_]*)')
+        if not root then return false end
+        local p, glob = lookup(root)
+        return glob or (p ~= nil and G7.GALIAS[p] == root) or false
+    end
     -- (a generic PART of a union return, CART-2035: the parameter it binds, as genarg binds a one-type generic — the
     -- argument, its elements `[]`, its keys `{k}`, from a vararg on `...` — or nil: unbound, `any`)
     function G7.genbind(key, rt)
@@ -4329,7 +4336,12 @@ local function build(store, opts)
                 -- (os.date: its literal format decides, CART-2030 — not its `string|osdate` union's parts, CART-2035)
                 or ((fname == 'os.date' and select(2, lookup('os'))) or isbuiltin('os.date'))
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
-            if f and f:type() ~= 'method_index_expression' then
+            -- ★ ONLY THE LIBRARY'S OWN NAME IS ITS SIGNATURE (CART-2048): the key is the callee's SPELLING, and module-meta
+            -- signatures are keyed by the meta file's LOCAL table (jit.util's `util#funcinfo`, string.buffer's `buffer#new`,
+            -- jit.profile's `profile#start`) — so a tree's own `local util = {}; util.funcinfo()` took LuaJIT's declared
+            -- return (since CART-2035 its union's parts), and `local buffer = {}; buffer.new()` a type:string.buffer. The
+            -- root must be the GLOBAL — unshadowed, or a local declared from it (`local vim = vim`, G7.GALIAS)
+            if f and f:type() ~= 'method_index_expression' and G7.sigroot(fname, lookup) then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
                 local key = owner and (owner .. '#' .. mm) or fname
                 local hm = G7.hostmodel(key)

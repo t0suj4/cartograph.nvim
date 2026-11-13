@@ -5413,3 +5413,38 @@ test('flowtype: a union return is each of its parts; literals scalar, a bound ge
     eq('type:boolean type:table<string, integer|string>', got, 'two parts, the table one whole')
     vim.fn.delete(r2, 'rf')
 end)
+
+-- (CART-2048: a by-name call took the profile signature its SPELLING named — module-meta signatures are keyed by the
+-- meta file's LOCAL table (jit.util's `util#funcinfo`, string.buffer's `buffer#new`), so a tree's own `local util = {}`
+-- borrowed LuaJIT's declared returns and `local buffer = {}` a type:string.buffer; flowpath's r02 (`local debug =
+-- { getinfo = wrap }`) a debuginfo. The root must be the global: unshadowed, or a local declared from it)
+test('flowtype: a by-name signature applies only where the root IS the global, or a local alias of it (CART-2048)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function sinku(x) return x end', 'local function sinkb(x) return x end', 'local function sinkd(x) return x end',
+        'local function sinkt(x) return x end', 'local function sinko(x) return x end',
+        'local util, buffer = {}, {}',
+        'function util.funcinfo() return {} end',
+        'function buffer.new() return {} end',
+        'sinku(util.funcinfo())',
+        'sinkb(buffer.new())',
+        'local vim = vim',
+        'sinkd(vim.diff("a", "b"))',
+        'sinkt(os.time())',
+        'do local os = { time = function () return {} end }; sinko(os.time()) end' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local oldp = store.data.profile
+    store.data.profile = 'nvim'
+    local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+    store.data.profile = oldp
+    if not okr then error(R, 0) end
+    local objs = {}
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq({ sinku = 'tbl:m.lua:6:32', sinkb = 'tbl:m.lua:7:29', sinkd = 'type:integer[][] type:string', sinkt = 'type:integer',
+        sinko = 'tbl:m.lua:13:42' }, objs,
+        'a local util / buffer / os is the tree\'s own; `local vim = vim` and the global os keep their signatures')
+    vim.fn.delete(root, 'rf')
+end)
