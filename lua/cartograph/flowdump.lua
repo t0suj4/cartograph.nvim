@@ -591,6 +591,8 @@ function M.build(rec, X, sink)
         elseif op == 'copyKeyed' then return { 'copyKeyed', V(ins[2]), V(ins[3]), V(ins[4]), V(ins[5]) }
         elseif op == 'op' then return { 'op', V(ins[2]), vars(ins[3]), F(ins[4]) }
         elseif op == 'setmeta' then return { 'setmeta', V(ins[2]), V(ins[3]) }
+        -- (a constructor born with its metatable, the core's newmeta — CORE.md D50, CART-1908)
+        elseif op == 'newmeta' then return { 'newmeta', V(ins[2]), ins[3], V(ins[4]) }
         elseif op == 'cocreate' then return { 'cocreate', V(ins[2]), ins[3], V(ins[4]) }
         elseif op == 'resume' then return { 'resume', pvars(ins[2]), V(ins[3]), pvars(ins[4]) }
         elseif op == 'yield' then return { 'yield', pvars(ins[2]), pvars(ins[3]) }

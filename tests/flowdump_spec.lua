@@ -41,9 +41,9 @@ end
 -- (each route: the opcode its translation must produce, and the divergence its check may name)
 local ROUTES = {
     { 'errorval', 'local ok, e = pcall(function () error(b) end)\nprint(use(e))\n', { 'pcall', 'error' } },
-    { 'callmeta', 'local function h(self, p) return p:m() end\nh(nil, a)\nlocal c = setmetatable({}, { __call = h })\nprint(c(b))\n', { 'call', 'setmeta' } },
+    { 'callmeta', 'local function h(self, p) return p:m() end\nh(nil, a)\nlocal c = setmetatable({}, { __call = h })\nprint(c(b))\n', { 'call', 'newmeta' } }, -- (a constructor into the native setmetatable: newmeta, CART-1908)
     { 'opmeta', 'local function add(x, p) return p:m() end\nadd(nil, a)\nlocal box = setmetatable({}, { __add = add })\nprint(box + b)\n', { 'op' } },
-    { 'indexfn', 'local lazy = setmetatable({}, { __index = function (t, k) return b end })\nprint(use(lazy.anything))\n', { 'load', 'setmeta' } },
+    { 'indexfn', 'local lazy = setmetatable({}, { __index = function (t, k) return b end })\nprint(use(lazy.anything))\n', { 'load', 'newmeta' } },
     { 'dynamic', 'local t = {}\nlocal k = ("q"):upper()\nt[k] = b\nprint(use(t[k]))\n', { 'storeDyn', 'loadDyn' } },
     { 'coroutine', 'local function f(p) return p:m() end\nlocal co = coroutine.create(f)\nprint(coroutine.resume(co, b))\n', { 'cocreate', 'resume' }, 'divergence:coroutine' },
     { 'yield', 'local co = coroutine.create(function () coroutine.yield(b) end)\nlocal ok, v = coroutine.resume(co)\nprint(use(v))\n', { 'yield', 'resume' }, 'divergence:coroutine' },
@@ -1127,7 +1127,7 @@ test('flowdump: debug upvalue calls are copies, not gaps; debug.getmetatable is 
     for _, F in ipairs(D2.functions) do
         for _, ins in ipairs(F.body) do
             if ins[1] == 'getmeta' and D2.names.fields[ins[4] + 1] == '\1raw' then raw = true end
-            if ins[1] == 'setmeta' then setm = setm + 1 end
+            if ins[1] == 'setmeta' or ins[1] == 'newmeta' then setm = setm + 1 end -- (a constructor's: newmeta, CART-1908)
         end
     end
     ok(raw, 'debug.getmetatable: a getmeta naming no written field')
@@ -3385,4 +3385,39 @@ test('flowtype: == hands __eq only tables / userdata — a compared function doe
     local g5 = R5.escape_of(R5.object('m.lua::g@2'))
     ok(g5[#g5] ~= '<- not escaped', '5.2+: the core\'s reading, g handed whole: ' .. vim.inspect(g5))
     vim.fn.delete(root, 'rf')
+end)
+
+-- (CART-1908, flowpath FLOW-0037 / FLOW-0134, CORE.md D50: `setmetatable({…}, mt)` with the NATIVE setmetatable is one step —
+-- `newmeta x a m` in place of the constructor's `new x a`, its `setmeta x m` a `copy x x` (flowpath's tested rewrite,
+-- probes/newmeta/nm.py). Not where a debug hook or a frame read could observe the bare table, nor through a
+-- setmetatable the tree rebinds)
+test('flowdump: a constructor into the native setmetatable is one newmeta; hooks and a rebound setmetatable keep setmeta (CART-1908)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- (this test's own lines only: the shared CLASSES prefix holds two setmetatable({}, …) of its own, lines 0-5)
+    local function count(D, op)
+        local lab, n = {}, 0
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do
+            local l = i[1] == op and tonumber((lab[i[3]] or ''):match('^tbl:m%.lua:(%d+):'))
+            if l and l >= 6 then n = n + 1 end
+        end end
+        return n
+    end
+    local D = dump('local mt = { __index = { v = a } }\nlocal o = setmetatable({ x = b }, mt)\nprint(use(o.v))\n')
+    eq(1, count(D, 'newmeta'), 'one newmeta')
+    local nm
+    for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do if i[1] == 'newmeta' then nm = i end end end
+    local lab = {}
+    for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+    ok(lab[nm[3]] and lab[nm[3]]:match('^tbl:m%.lua:7:'), 'its site is the constructor\'s: ' .. tostring(lab[nm[3]]))
+    eq(0, flowcheck.check(D).failed, 'closed')
+    -- (a debug hook could observe the temporary: no newmeta in that tree)
+    local H = dump('debug.sethook(function () end, "c")\nlocal o = setmetatable({}, { __index = a })\nprint(o.v)\n')
+    eq(0, count(H, 'newmeta'), 'a hook in the tree: the plain pair')
+    -- (a REBOUND setmetatable is not the native)
+    local R = dump('local setmetatable = function (t, m) return t end\nlocal o = setmetatable({}, { __index = a })\nprint(o.v)\n')
+    eq(0, count(R, 'newmeta'), 'a local setmetatable: no newmeta')
+    -- (flowcheck checks it: a META cell missing m's site fails)
+    for _, e in ipairs(D.solution.h) do if e[1] == nm[3] and e[2] == 100 then e[3] = {} end end
+    ok(flowcheck.check(D).failed > 0, 'a newmeta whose site lacks the metatable fails')
 end)

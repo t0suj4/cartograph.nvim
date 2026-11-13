@@ -384,6 +384,11 @@ function M.compute(D)
         local m = bor(lv(x), lv(y))
         for _, a in ipairs(V[x] or {}) do seth(a, META, m); setd(a, m); orinto(Lk, a, m) end
     end
+    -- (newmeta x a m: `new x a` + `setmeta x m` at the one site a — CORE.md D50, CART-1908)
+    RULE.newmeta = function (_, ins)
+        local a, m = ins[3], bor(lv(ins[2]), lv(ins[4]))
+        seth(a, META, m); setd(a, m); orinto(Lk, a, m)
+    end
     RULE.error = function (g, ins) orinto(Lerr, g, lv(ins[2])) end
     RULE.ret = function (g, ins)
         local m = 0

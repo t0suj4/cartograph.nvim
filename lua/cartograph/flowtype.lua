@@ -1854,7 +1854,7 @@ local function build(store, opts)
                     local ev, ln = new(), new(); primv(ev, 'string'); primv(ln, 'number')
                     local hr = new()
                     G7.callc(a[j], { ev, ln }, hr, nil, cerr); G7.emit({ 'call', { hr }, a[j], { ev, ln } }, 'host:sethook')
-                    G7.HOOKFNS[#G7.HOOKFNS + 1] = a[j]
+                    G7.HOOKFNS[#G7.HOOKFNS + 1] = a[j]; G7.ANYHOOK = true
                 end
             end
         end
@@ -2037,6 +2037,37 @@ local function build(store, opts)
     function G7.isfnty(tn) return tn == 'function' or tn:match('^%(?fun%(') ~= nil end
     -- (what Lua can hand an __eq handler: a table or a userdata — an ordinary table, a host object of a non-scalar,
     -- non-function type, unknown code (EXT: it may be a table). Never a function, a native, a scalar or a thread, CART-2023)
+    -- ★ newmeta (CART-1908, flowpath FLOW-0037 / FLOW-0134 / CORE.md D50): `setmetatable({…}, mt)` with the NATIVE
+    -- setmetatable is ONE step — the fresh table born with its metatable. As `new t a; setmeta t m` a flow-insensitive
+    -- body lets the setmeta re-run on anything t may hold, killing "getmetatable(o) is mt" for every site-a object;
+    -- `newmeta x a m` writes only its own fresh row. The rewrite is the one flowpath's certificates were tested on
+    -- (probes/newmeta/nm.py): the constructor's `new x a` becomes `newmeta x a m`, the `setmeta x m` a `copy x x` (the
+    -- indices stay: tags, positions); the native twin call stays. Only where x has that ONE `new` of the constructor's
+    -- site and ONE setmeta in its function, and the tree has NO debug hook and no getlocal / setlocal (a hook or a frame
+    -- read could observe the bare temporary — the translation condition, FLOW-0049)
+    function G7.newmetas()
+        local L = G7.NMPEND
+        G7.NMPEND = nil
+        if not L or G7.ANYHOOK or (G7.LOCCALLS and #G7.LOCCALLS > 0) or (G7.ANYFRAME and G7.ANYFRAME[1]) then return 0 end
+        local n = 0
+        for _, c in ipairs(L) do
+            local body = G7.REC.fns[c.fn] or NOTHING
+            local inew, iset, nnew, nset = nil, nil, 0, 0
+            for i, ins in ipairs(body) do
+                if ins[2] == c.x then
+                    if ins[1] == 'new' then nnew = nnew + 1; if tostring(obinfo[ins[3]]) == c.label then inew = i end
+                    elseif ins[1] == 'setmeta' then nset = nset + 1; if ins[3] == c.m then iset = i end end
+                end
+            end
+            if inew and iset and nnew == 1 and nset == 1 then
+                body[inew] = { 'newmeta', c.x, body[inew][3], c.m }
+                body[iset] = { 'copy', c.x, c.x }
+                n = n + 1
+            end
+        end
+        G7.NEWMETAS = n
+        return n
+    end
     function G7.eqable(o)
         if fnports[o] or G7.NATIVE[o] then return false end
         local tn = TNAME[o]
@@ -3676,6 +3707,12 @@ local function build(store, opts)
                 if argn[2] then
                     local mtp = expr(argn[2])
                     G7.ins({ 'setmeta', tp, mtp })
+                    -- (a CONSTRUCTOR straight into the native setmetatable: a newmeta candidate, rewritten after the walk —
+                    -- FLOW-0037 / CART-1908, G7.newmetas)
+                    if G7.REC and G7.W and argn[1]:type() == 'table_constructor' and isbuiltin('setmetatable') then
+                        G7.NMPEND = G7.NMPEND or {}
+                        G7.NMPEND[#G7.NMPEND + 1] = { fn = G7.cur(), x = tp, m = mtp, label = 'tbl:' .. key_of(argn[1]) }
+                    end
                     if G7.MTT then G7.MTT[tp] = true end -- (GE's metatable slot, CART-1837)
                     proto(tp, field(mtp, '__index'), true)
                     storec(tp, '\1mt', mtp) -- (its handlers: __call, operators, __newindex — CART-1699)
@@ -4284,7 +4321,7 @@ local function build(store, opts)
                                 G7.ins({ 'call', { hr }, hp, { ev, ln } }, tag)
                                 callc(hp, { ev, ln }, hr, nil, curerr())
                             end)
-                            G7.HOOKFNS[#G7.HOOKFNS + 1] = hp
+                            G7.HOOKFNS[#G7.HOOKFNS + 1] = hp; G7.ANYHOOK = true
                         end
                     end
                 end
@@ -7818,6 +7855,7 @@ local function build(store, opts)
                 for o in each(af[1]) do if TNAME[o] == 'boolean' or o == G7.EXT or G7.XC[o] then G7.REC.ins(af[3], { 'new', af[2], o }) end end
             end
         end
+        G7.newmetas()
         local FD = require 'cartograph.flowdump'
         local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
         local psha, pvia -- (the producer's commit and where it came from, CART-1997)

@@ -266,6 +266,13 @@ for _, F in ipairs(D.functions) do
                     failh(FNOF[a] and 'meta-on-function(model)' or 'meta', a, META, ('h(%d,META) lacks %d'):format(a, b)); break
                 end
             end end end
+        elseif op == 'newmeta' then
+            -- (`new x a` + `setmeta x m` at site a — flowpath CORE.md D50, CART-1908: x holds a, a's META cell holds m's sites)
+            local x, a0, m = ins[2], ins[3], ins[4]
+            if not hasv(x, a0) then fail('newmeta', x, 'v lacks its site') end
+            for b in pairs(v(m)) do
+                if not hash(a0, META, b) then failh('meta', a0, META, ('h(%d,META) lacks %d'):format(a0, b)); break end
+            end
         elseif op == 'cocreate' then
             local x, a, fv = ins[2], ins[3], ins[4]
             if not hasv(x, a) then fail('cocreate', x, 'v lacks the thread') end
@@ -309,7 +316,7 @@ for _, F in ipairs(D.functions) do
     w(F.self)
     for _, ins in ipairs(F.body) do
         local op = ins[1]
-        if op == 'new' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
+        if op == 'new' or op == 'newmeta' or op == 'copy' or op == 'load' or op == 'loadDyn' or op == 'loadRaw' or op == 'op' or op == 'cocreate' or op == 'keys' or op == 'getmeta' then w(ins[2])
         elseif op == 'call' or op == 'pcall' or op == 'resume' or op == 'yield' then for _, x in ipairs(ins[2]) do w(x) end end
     end
 end
