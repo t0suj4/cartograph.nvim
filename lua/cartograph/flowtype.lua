@@ -5332,6 +5332,8 @@ local function build(store, opts)
         callc = callc, mflow = mflow, port = port, objproto = objproto, fnports = fnports, typeobj = typeobj, STR = STR,
         filter = filter, proto = proto, gfilter = gfilter, each = each, fields = function (o) return ofield[o] end,
         gfwide = function () G7.GFWIDE = true end, -- (instanceof may be redefined in this tree: every guard keeps all, CART-1914)
+        gfhi = function (o) G7.GFHI = G7.GFHI or {}; G7.GFHI[o] = true end, -- (a prototype whose class has a static hasInstance)
+        gfany = function (o) G7.GFANY = G7.GFANY or {}; G7.GFANY[o] = true end, -- (a Proxy: its chain is whatever its trap says)
         EXT = EXT, fn_at = fn_at, call_at = call_at, req_at = req_at, root = root, probes = {}, modports = modports,
         nodes = store.data.nodes }
     -- (opts.dump: the walker's primitives RECORD — a primitive the walker calls is an instruction, what it does inside,
@@ -5600,8 +5602,18 @@ local function build(store, opts)
     -- objects and prototype links the first run never saw
     function G7.gfunk(gport) -- (a guard that KNOWS NOTHING: its prototype unknown, empty, or the tree's instanceof redefinable)
         local u, any = G7.GFWIDE or top[gport], false
-        for g in each(gport) do any = true; if g == G7.EXT or G7.XC[g] then u = true end end
+        local function hi(o, seen) -- (o or a prototype above it belongs to a class with a static hasInstance)
+            if G7.GFHI[o] then return true end
+            if seen[o] then return false end
+            seen[o] = true
+            for c in pairs(protos[o] or NOTHING) do if hi(c, seen) then return true end end
+            return false
+        end
+        for g in each(gport) do any = true; if g == G7.EXT or G7.XC[g] or (G7.GFHI and hi(g, {})) then u = true end end
         return u or not any
+    end
+    function G7.gfpass(o) -- (an object any guard keeps: unknown code's — its chain is not ours — or a Proxy's)
+        return o == G7.EXT or G7.XC[o] or (G7.GFANY and G7.GFANY[o]) or false
     end
     function G7.gfix()
         for _ = 1, opts.gf_rounds or 20 do -- (opts.gf_rounds: a test's lower cap)
@@ -5614,7 +5626,7 @@ local function build(store, opts)
                         gf.wide = true; edge(gf[1], gf[2]); grew = true
                     else
                         local function chain(o, seen)
-                            if gp[o] then return true end
+                            if gp[o] or G7.gfpass(o) then return true end
                             if seen[o] then return false end
                             seen[o] = true
                             for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end
@@ -7196,7 +7208,7 @@ local function build(store, opts)
                 local gp = {}
                 for g in each(pr.guard) do gp[g] = true end
                 local function chain(o, seen)
-                    if gp[o] then return true end
+                    if gp[o] or G7.gfpass(o) then return true end
                     if seen[o] then return false end
                     seen[o] = true
                     for c in pairs(protos[o] or NOTHING) do if chain(c, seen) then return true end end

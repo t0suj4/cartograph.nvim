@@ -102,18 +102,35 @@ function M.walker(S, files)
         local fnmap = S.fn_at[file] or {}
         local function txt(n) local _, _, s, _, _, e = n:range(true); return src:sub(s + 1, e) end
         -- ★ instanceof MAY NOT BE THE PROTOTYPE WALK (CART-1914): `C[Symbol.hasInstance]` is an arbitrary predicate, and a
-        -- Proxy's getPrototypeOf trap returns any chain. Where a file names `Symbol.hasInstance` or constructs a `Proxy`,
-        -- every instanceof guard of the solve keeps its whole source (S.gfwide). From the tree, never the text; a shadowed
-        -- Symbol / Proxy is counted too — conservative
+        -- Proxy's getPrototypeOf trap returns any chain. Two slots are modelled exactly: a class's STATIC member named
+        -- `[… .hasInstance]` marks that class's prototype (S.gfhi — a guard on it or a subclass knows nothing), and
+        -- `new Proxy(…)` marks its object (S.gfany — it passes every guard). Any OTHER mention — `Symbol["hasInstance"]`,
+        -- an assignment or defineProperty, `Proxy.revocable`, an alias of Proxy — widens every guard of the solve
+        -- (S.gfwide), as does a query that does not parse. From the tree, never the text; a shadowed name counts too
+        local function hislot(nm) -- (a class member's name node: `[x.hasInstance]`, the member static)
+            if not nm or nm:type() ~= 'computed_property_name' then return false end
+            local e = nm:named_child(0)
+            local pr = e and e:type() == 'member_expression' and e:field('property')[1]
+            return pr and txt(pr) == 'hasInstance' or false
+        end
+        local function isstatic_m(m) for _, c in kids(m) do if not c:named() and txt(c) == 'static' then return true end end return false end
         if S.gfwide then
             local okq, q = pcall(vim.treesitter.query.parse, lang,
-                '(member_expression object: (identifier) @o property: (property_identifier) @p) (new_expression constructor: (identifier) @c)')
-            if okq then
+                '((property_identifier) @p (#eq? @p "hasInstance")) ((string_fragment) @s (#eq? @s "hasInstance")) ((identifier) @i (#eq? @i "Proxy"))')
+            if not okq then S.gfwide() else
                 for id, nd in q:iter_captures(tree, src) do
-                    local nm, t = q.captures[id], txt(nd)
-                    if (nm == 'p' and t == 'hasInstance' and txt(nd:parent():field('object')[1]) == 'Symbol') or (nm == 'c' and t == 'Proxy') then
-                        S.gfwide(); break
+                    local nm, par = q.captures[id], nd:parent()
+                    local modelled
+                    if nm == 'p' then
+                        local cp = par and par:parent()
+                        local m = cp and cp:parent()
+                        modelled = cp and m and (m:type() == 'method_definition' or m:type() == 'public_field_definition')
+                            and m:field('name')[1] and m:field('name')[1]:id() == cp:id()
+                    elseif nm == 'i' then
+                        modelled = par and par:type() == 'new_expression' and par:field('constructor')[1]
+                            and par:field('constructor')[1]:id() == nd:id()
                     end
+                    if not modelled then S.gfwide(); break end
                 end
             end
         end
@@ -251,6 +268,9 @@ function M.walker(S, files)
             local body = n:field('body')[1]
             for _, m in kids(body) do
                 local mt = m:type()
+                if (mt == 'method_definition' or mt == 'public_field_definition') and S.gfhi and isstatic_m(m) and hislot(m:field('name')[1]) then
+                    S.gfhi(po) -- (a static hasInstance: instanceof this class, or a subclass, runs it)
+                end
                 if mt == 'method_definition' then
                     local nm = m:field('name')[1]
                     local isstatic = false
@@ -358,6 +378,7 @@ function M.walker(S, files)
                 local p = new()
                 local o = newobj('new:' .. file .. ':' .. (n:start()))
                 addobj(p, o)
+                if S.gfany and ctor and ctor:type() == 'identifier' and txt(ctor) == 'Proxy' then S.gfany(o) end
                 S.proto(p, field(cv, 'prototype'))
                 local aps = n:field('arguments')[1] and args_of(n) or {}
                 table.insert(aps, 1, p)

@@ -1287,48 +1287,84 @@ test('flowtype (ts): inside `if (x instanceof B)` and `x instanceof B ? …` x h
 end)
 
 -- ★ AN instanceof GUARD NEVER NARROWS PAST WHAT IT KNOWS (CART-1914): a class the solve does not see (an unresolved
--- import: its prototype is empty or unknown code's), a tree that names `Symbol.hasInstance` (instanceof runs any
--- predicate) or builds a `Proxy` (getPrototypeOf returns any chain), and a guard still growing at the round cap — each
--- keeps the WHOLE source in the branch, where it had kept nothing or a partial set
+-- import: its prototype empty), a class whose STATIC `[Symbol.hasInstance]` runs instead of the chain walk — and its
+-- subclasses, which inherit it — an object built by `new Proxy` (its chain is the trap's), any OTHER mention of
+-- hasInstance or Proxy (every guard of the solve), and a guard still growing at the round cap. Each keeps the WHOLE
+-- source where it had kept nothing or a partial set; a sibling class's guard in the same tree still narrows
 test('flowtype (ts): an instanceof guard with an unknown class, a hasInstance or Proxy tree, or at the cap keeps all', function ()
     if not parser_available('typescript') then skip 'no typescript parser' end
-    local base = {
-        'class Leaf { name(): string { return "leaf"; } }',
+    local LEAF = 'class Leaf { name(): string { return "leaf"; } }'
+    local head = {
+        LEAF,
         'class Node2 { name(): string { return "node"; } }',
         'function pick(k: number) { return k > 0 ? new Leaf() : new Node2(); }',
         'const v = pick(1);',
     }
-    local function run(extra, opts)
-        local lines = vim.list_extend(vim.deepcopy(base), extra)
+    -- (the `name` probes' targets by line, 0-based: the head is lines 0-3)
+    local function run(extra, opts, leaf)
+        local lines = vim.list_extend(vim.deepcopy(head), extra)
+        if leaf then lines[1] = leaf end
         local root = tree({ ['src/m.ts'] = table.concat(lines, '\n') })
         store.ingest(ts.extract(root))
         local R = flowtype.of(store, vim.tbl_extend('force', { open = false }, opts or {}))
         vim.fn.delete(root, 'rf')
-        local got = {}
+        local by = {}
         for _, p in ipairs(R.probes) do
-            if p.member == 'name' and p.line >= #base then
-                for _, t in ipairs(p.targets) do got[#got + 1] = t:match('(%w+)%.name@') end
+            if p.member == 'name' and p.line >= #head then
+                local l = by[p.line] or {}; by[p.line] = l
+                for _, t in ipairs(p.targets) do l[#l + 1] = t:match('(%w+)%.name@') end
             end
         end
-        table.sort(got)
-        return table.concat(got, ' ')
+        for k, l in pairs(by) do table.sort(l); by[k] = table.concat(l, ' ') end
+        return by
     end
-    eq('Leaf', run({ 'if (v instanceof Leaf) { v.name(); }' }), 'the control: a known class narrows')
-    eq('Leaf Node2', run({ 'import { Ext } from "nowhere";', 'if (v instanceof Ext) { v.name(); }' }, { open = true }),
+    eq('Leaf', run({ 'if (v instanceof Leaf) { v.name(); }' })[4], 'the control: a known class narrows')
+    eq('Leaf Node2', run({ 'import { Ext } from "nowhere";', 'if (v instanceof Ext) { v.name(); }' }, { open = true })[5],
         'an unresolved class keeps the whole source')
-    eq('Leaf Node2', run({ 'export function g(C: any) { if (v instanceof C) { v.name(); } }' }, { open = true }),
+    eq('Leaf Node2', run({ 'export function g(C: any) { if (v instanceof C) { v.name(); } }' }, { open = true })[4],
         'a class an exported function is handed keeps the whole source (empty today, unknown code\'s once CART-2052 seeds it)')
-    eq('Leaf Node2', run({ 'if (v instanceof Leaf) { v.name(); }', 'const s = Symbol.hasInstance;' }),
-        'a tree naming Symbol.hasInstance: instanceof may be any predicate')
-    eq('Leaf Node2', run({ 'if (v instanceof Leaf) { v.name(); }', 'const p = new Proxy({}, {});' }),
-        'a tree building a Proxy: the chain may be any')
+    local guards = {
+        'class Sub extends Leaf {}',
+        'if (v instanceof Leaf) { v.name(); }',
+        'if (v instanceof Node2) { v.name(); }',
+        'if (v instanceof Sub) { v.name(); }',
+    }
+    for _, leaf in ipairs({
+        'class Leaf { static [Symbol.hasInstance](o: any): boolean { return true; } name(): string { return "leaf"; } }',
+        'class Leaf { static get [Symbol.hasInstance]() { return (o: any) => true; } name(): string { return "leaf"; } }',
+    }) do
+        local by = run(guards, nil, leaf)
+        eq('Leaf Node2', by[5], 'a static hasInstance: the guard on its class keeps all — ' .. leaf)
+        eq('Node2', by[6], 'and a sibling class\'s guard in the same tree still narrows — ' .. leaf)
+        eq('Leaf Node2', by[7], 'and a subclass inherits it — ' .. leaf)
+    end
+    local by = run(guards, nil, 'class Leaf { [Symbol.hasInstance](o: any): boolean { return true; } name(): string { return "leaf"; } }')
+    eq('Leaf', by[5], 'an INSTANCE hasInstance is not the class\'s: its guard narrows')
+    for _, other in ipairs({
+        'const s = Symbol.hasInstance;',
+        'Object.defineProperty(Node2, Symbol["hasInstance"], { value: () => true });',
+        'const r = Proxy.revocable({}, {});',
+        'const P = Proxy;',
+    }) do
+        eq('Leaf Node2', run({ 'if (v instanceof Node2) { v.name(); }', other })[4],
+            'any other hasInstance or Proxy mention widens every guard of the solve — ' .. other)
+    end
+    local px = {
+        'class Proxy { name(): string { return "p"; } }',
+        'const w = Math.random() > 0.5 ? v : new Proxy();',
+        'if (w instanceof Leaf) { w.name(); }',
+        'if (v instanceof Leaf) { v.name(); }',
+    }
+    by = run(px)
+    eq('Leaf Proxy', by[6], 'an object built by new Proxy passes every guard')
+    eq('Leaf', by[7], 'and a guard its object does not reach still narrows')
     -- (the cap: the verdict at the guarded call is still filtered — over whole sets — but the FLOW out of the branch is
     -- the guard's port: a callback handed on inside it sees what the widened guard let through)
     local cb = { 'if (v instanceof Leaf) { v.visit(x => x.name()); }' }
-    base[1] = 'class Leaf { visit(f: (x: Leaf) => void): void { f(this); } name(): string { return "leaf"; } }'
-    base[2] = 'class Node2 { visit(f: (x: Node2) => void): void { f(this); } name(): string { return "node"; } }'
-    eq('Leaf', run(cb), 'the control: the callback sees only the Leaf')
-    eq('Leaf Node2', run(cb, { gf_rounds = 0 }), 'a guard still growing at the round cap widens')
+    head[1] = 'class Leaf { visit(f: (x: Leaf) => void): void { f(this); } name(): string { return "leaf"; } }'
+    head[2] = 'class Node2 { visit(f: (x: Node2) => void): void { f(this); } name(): string { return "node"; } }'
+    eq('Leaf', run(cb)[4], 'the control: the callback sees only the Leaf')
+    eq('Leaf Node2', run(cb, { gf_rounds = 0 })[4], 'a guard still growing at the round cap widens')
 end)
 
 -- ★ a TS NAMESPACE is an object of its exports, a barrel's `export * from` / `export { a as b } from` re-exports,
