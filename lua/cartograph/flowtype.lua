@@ -79,7 +79,8 @@ M.EXPERIMENTS = {
     ['fhit-all'] = "the `.f` rule as it was before CART-1697's rule dialog: a call through a tainted load of `.f` taints the parameters of EVERY function stored as `.f`, not only _G's (for comparison)",
     ['strict-records'] = "a NAMED load on a RECORD skips `[]`; a MAP keeps it. A map site is a table constructor bound to a name its file indexes by computed key (`by_id = {}` with `b.by_id[id] = …`), decided before the solve (CART-1697)",
     callsite = 'a call binds a small closed function to an instance of its OWN per call site (as a generic for binds its iterator; CART-1697: the blob)',
-    ['guard-filters'] = 'a type guard\'s then-block reads a FILTERED variable — `if type(y) == "table" then … y …` emits ["filterType", x, y, tag, positive] and the block reads x (CART-1920, flowpath D21 / D51). OPT-IN: flowpath\'s probes certify with it (filter f1, hunt0180b q09; 402 fixtures unchanged), but vimruntime (b48h root) went from CERTIFIED to refused — certE `storeRaw unhandled` x7 in vim/diagnostic.lua::M.open_float@2425 (#513-517, #537-538), 73 filters; not reproduced in a small fixture, filed for FLOW',
+    ['no-guard-filters'] = 'a type guard\'s then-block reads y itself, unfiltered — the reading before CART-1920. By default `if type(y) == "table" then … y …` emits ["filterType", x, y, tag, positive] and the block reads x (flowpath D21 / D51 / D52); default since vimruntime b48h E-certified with it (95ef44fd: 70 filters, 0 refused) and the 412 flowpath fixtures kept every verdict',
+    ['guard-filters'] = 'the default since CART-1920 (accepted, no effect: scripts written while it was opt-in)',
 }
 local EXPOPT = { spread = true, order = true, selfseed = true, litkeys = true }
 --- the active experiments of a solve -> { name = value } (true for a bare name); errors on an unknown name
@@ -5150,7 +5151,7 @@ local function build(store, opts)
                 scopes[#scopes + 1] = {}
                 for _, x in tsutil.inamed, n, -1 do stmt(x); if raises(x) then break end end
                 scopes[#scopes] = nil
-            elseif t == 'if_statement' and G7.EXP['guard-filters'] and G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
+            elseif t == 'if_statement' and not G7.EXP['no-guard-filters'] and G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)
                 and not G7.hasfn(n:field('consequence')[1]) then
                 -- (a TYPE GUARD: its then-block reads a filtered y, CART-1920 — G7.tagpass)
                 local g = G7.typeguard(n:field('condition')[1], lookup, reasg, txt, strval)

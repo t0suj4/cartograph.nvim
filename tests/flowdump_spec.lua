@@ -3422,13 +3422,13 @@ test('flowdump: a constructor into the native setmetatable is one newmeta; hooks
     ok(flowcheck.check(D).failed > 0, 'a newmeta whose site lacks the metatable fails')
 end)
 
--- (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51 — experiment guard-filters: a type guard's then-block reads
+-- (CART-1920, flowpath FLOW-0038 / FLOW-0135, CORE.md D21 / D51 — on by default, no-guard-filters off: a type guard's then-block reads
 -- a filtered variable, ["filterType", x, y, tag, positive]. What passes is the core's Guard.asite or more: `~= "function"`
 -- and `== "table"` drop a closure; since D52 (FLOW-0188) a TABLE SITE is surely a table, so `== "function"` and
 -- `~= "table"` drop it, and `~= "thread"` (which the core reads as `~= object`) gets no filter. x is written by the filter
 -- alone (D21's π-node: a `new x a` per literal of y made it non-fresh, FLOW-0189). Not for a heap path, a reassigned
--- local, a shadowed `type`, or a block holding a closure; off by default)
-test('flowdump: a type guard\'s then-block reads a filtered variable under guard-filters (CART-1920)', function ()
+-- local, a shadowed `type`, or a block holding a closure)
+test('flowdump: a type guard\'s then-block reads a filtered variable, by default (CART-1920)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
     local function run(guard, exp)
         local D = dump(table.concat({
@@ -3471,7 +3471,8 @@ test('flowdump: a type guard\'s then-block reads a filtered variable under guard
     end end
     ok(fxv ~= nil, 'the filter is emitted'); eq(0, writers, 'the filter alone writes its destination')
     eq(0, flowcheck.check(Df).failed, 'closed')
-    o, n = run('type(v) == "table"'); eq(0, n, 'off by default'); eq({ 'F', 'T' }, o)
+    o, n = run('type(v) == "table"'); eq(1, n, 'on by default'); eq({ 'T' }, o)
+    o, n = run('type(v) == "table"', { ['no-guard-filters'] = true }); eq(0, n, 'no-guard-filters turns it off'); eq({ 'F', 'T' }, o)
     -- (a debug hook could change v under the guard: the filter passes everything — G7.tfiltfix)
     local Dh = dump('local Z, T = {}, {}\nlocal function F() end\ndebug.sethook(function () end, "c")\n'
         .. 'local function g(v) if type(v) == "table" then local w = v; Z.w = w end end\ng(T); g(F)\n', GF)
