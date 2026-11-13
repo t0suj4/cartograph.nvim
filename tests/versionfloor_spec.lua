@@ -752,6 +752,17 @@ test('versionfloor: a tree with an ERROR is UNKNOWN, its facts never read (CART-
     ok(ids(vf.scan('lua', 'local x = 7 // 2'))['int-div'], 'the clean file is read')
 end)
 
+test('versionfloor: a TypeScript ERROR is LOCAL, so the rest of the tree still counts (CART-0782)', function ()
+    if not js_ready('typescript') then skip('no typescript parser') end
+    -- arktype's `out T` variance annotation: the grammar errs on that one token, and 299 real facts (2021 among
+    -- them) sit in 26 files like it — refusing the file, as Lua's tearing grammar needs, would lower a true floor
+    local src = 'interface I<out T> { x: T }\nconst y = a ?? b\n'
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'typescript')
+    ok(okp and parser:parse()[1]:root():has_error(), 'the fixture really has an ERROR')
+    ok(ids(vf.scan('typescript', src))['nullish'], 'and its ?? is still a 2020 fact')
+    eq(nil, vf.ERROR_TEARS.typescript, 'typescript is not a tearing grammar')
+end)
+
 test('versionfloor lua: the report names the PUC ruler, the guessed version and LuaJIT (CART-0782)', function ()
     if not lua_ready() then skip('no lua parser') end
     local ts = require 'cartograph.providers.treesitter'

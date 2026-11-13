@@ -19,8 +19,10 @@
 --     the stronger claim.
 --   · Detection is over the TREE, never over text. `&.` inside a string or a
 --     comment is not a feature use; a regex would insist it was.
---   · A file whose grammar is missing or which fails to parse contributes
---     NOTHING and is counted as unknown, not as clean.
+--   · A file whose grammar is missing contributes NOTHING and is counted as
+--     unknown, not as clean. So does a file with a parse ERROR in a language
+--     whose grammar tears the rest of the file at one (M.ERROR_TEARS: lua);
+--     elsewhere an ERROR is local and the rest of the tree still counts.
 --   · A language with no table is reported as uncovered, not as floor-free.
 
 -- @langs javascript lua python ruby tsx typescript
@@ -483,6 +485,19 @@ function M.older(a, b)
     return false
 end
 
+--- Languages whose grammar TEARS a file at an ERROR: there a tree with an ERROR is a MISPARSE from that row on, its
+--- facts are debris, and the file is UNKNOWN (CART-0782). Decided per language, by measurement, because an ERROR
+--- means different things in different grammars:
+---   lua   wow_addons' 5.1-only string escapes (`\H`, `\[`) turned the rest of Carbonite.lua into ERROR and 3
+---         detectors fired on the debris; 27 of 3,183 files have an ERROR, and those 3 false facts were all they held.
+---   typescript / tsx are NOT here: their ERRORs are LOCAL grammar gaps (an `out T` variance annotation, a `<const T>`
+---         type parameter, an `&` in a JSX attribute) and the rest of the tree reads true — arktype keeps 299 of its
+---         7,946 facts in 26 such files (2021 features among them), turborepo's .tsx 26 in 23. Refusing those files
+---         would lower a correct floor.
+---   ruby / python / javascript: 4 ruby-lsp files with an ERROR, no facts in any (oscar, activesupport, jquery,
+---         turborepo js: none) — no evidence either way, so the old behaviour stands.
+M.ERROR_TEARS = { lua = true }
+
 --- Every version-gated feature use in `src`. Returns a list of
 --- { id, v, desc, line } (line is 0-based), or nil + why when it cannot look.
 function M.scan(lang, src)
@@ -498,12 +513,7 @@ function M.scan(lang, src)
     local ok2, trees = pcall(function () return parser:parse() end)
     local root = ok2 and trees and trees[1] and trees[1]:root()
     if not root then return nil, 'unparsed' end
-    -- the header's promise, which nothing enforced until CART-0782: a tree with an ERROR is a MISPARSE, and facts read
-    -- off it are noise — wow_addons' invalid string escapes (`\H`, `\[`, legal in 5.1 only) turned the rest of
-    -- Carbonite.lua into ERROR and 3 detectors fired on the debris. Measured before the guard: of 5133 files over
-    -- django-oscar / ruby-lsp / rails activesupport / jquery / desynced / wow_addons, 31 had an ERROR and the only
-    -- facts in them were those 3 false ones. Such a file is UNKNOWN, never clean.
-    if root:has_error() then return nil, 'parse error (the tree has an ERROR node)' end
+    if root:has_error() and M.ERROR_TEARS[lang] then return nil, 'parse error (the tree has an ERROR node)' end
     local out = {}
     local function walk(n)
         local cands = bynode[n:type()]
