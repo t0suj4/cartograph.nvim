@@ -5344,3 +5344,72 @@ test('flowtype: library value members have objects - tables, the class\'s host t
     eq(0, X.stats.xnosrc, 'and every such arrival has its root')
     vim.fn.delete(r2, 'rf')
 end)
+
+-- (CART-2035: a builtin whose declared return is a UNION got no object at all — onetype calls a real union none — so its
+-- result was empty and untainted under the nvim profile: vim.diff `string|integer[][]`, vim.fn.has `0|1`, stdpath
+-- `string|string[]`, vim.secure.read `(boolean|string|nil)`. Each part is now an object; a literal part its scalar
+-- type; a generic part its argument where it binds (tbl_deep_extend's `T2` the vararg), else `any` (tainted). os.date
+-- keeps its format-decided result, CART-2030)
+test('flowtype: a union return is each of its parts; literals scalar, a bound generic its argument (CART-2035)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local function sinkd(x) return x end', 'local function sinke(x) return x end', 'local function sinkh(x) return x end',
+        'local function sinks(x) return x end', 'local function sinkr(x) return x end', 'local function sinkt(x) return x end',
+        'local A, B = { a = 1 }, { b = 2 }',
+        'sinkd(vim.diff("a", "b"))',
+        'sinke(vim.tbl_deep_extend("force", A, B))',
+        'sinkh(vim.fn.has("nvim"))',
+        'sinks(vim.fn.stdpath("data"))',
+        'sinkr(vim.secure.read("x"))',
+        'sinkt(os.date("%c"))',
+        'local function sinkw(x) return x end',
+        'sinkw(vim.fn.win_gettype())',
+        'local function sinkq(x) return x end',
+        'sinkq(vim.treesitter.get_parser(0):source())' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local oldp = store.data.profile
+    store.data.profile = 'nvim'
+    local okr, R = pcall(flowtype.solve, store, { open = false, argprobes = true })
+    store.data.profile = oldp
+    if not okr then error(R, 0) end
+    local objs, ecall = {}, nil
+    for _, c in ipairs(store.data.calls) do
+        local nm = (c.to or ''):match('::(sink%a)@')
+        if nm then local l, why = R.arg_objs(c, 1); objs[nm] = l and table.concat(vim.fn.sort(l), ' ') or why end
+        if nm == 'sinke' then ecall = c end
+    end
+    eq({ sinkd = 'type:integer[][] type:string', sinke = 'partial', sinkh = 'type:integer', sinks = 'type:string type:string[]',
+        sinkr = 'type:boolean type:string', sinkt = 'type:string', sinkw = 'type:string',
+        sinkq = 'type:integer type:string' }, objs,
+        'each part an object, a typed receiver\'s method too (LanguageTree:source); 0|1 an integer; \'autocmd\'|\'command\'|… a string; nil dropped; os.date still by its format')
+    -- (tbl_deep_extend `T1|T2`: T2 binds the vararg — A and B reach the result — T1 binds nothing: `any`, the taint.
+    -- R.objs_of is an explain instrument: a second solve, explain on)
+    store.data.profile = 'nvim'
+    local okx, X = pcall(flowtype.solve, store, { open = false, argprobes = true, explain = true })
+    store.data.profile = oldp
+    if not okx then error(X, 0) end
+    local held = {}
+    for _, o in ipairs(X.objs_of(X.arg_port(ecall, 1)) or {}) do held[#held + 1] = o end
+    table.sort(held)
+    ok(vim.tbl_contains(held, 'tbl:m.lua:6:13') and vim.tbl_contains(held, 'tbl:m.lua:6:24'), 'the bound generic is its arguments: ' .. vim.inspect(held))
+    vim.fn.delete(root, 'rf')
+    -- (a `|` INSIDE a part is no split: no shipped signature has one today, so a stub profile states it)
+    local r2 = tree({ ['m.lua'] = 'local function sinku(x) return x end\nsinku(xlib.f())\n' })
+    store.ingest(ts.extract(r2))
+    local P = require 'cartograph.spec.profile'
+    local old = P.load
+    P.load = function (nm, ...)
+        if nm == 'stub' then return { sigs = { ['xlib#f'] = { returns = { { type = 'table<string, integer|string>|boolean' } } } } } end
+        return old(nm, ...)
+    end
+    store.data.profile = 'stub'
+    local oku, U = pcall(flowtype.solve, store, { open = false, argprobes = true })
+    P.load, store.data.profile = old, oldp
+    if not oku then error(U, 0) end
+    local got
+    for _, c in ipairs(store.data.calls) do
+        if (c.to or ''):match('::sinku@') then local l, why = U.arg_objs(c, 1); got = l and table.concat(vim.fn.sort(l), ' ') or why end
+    end
+    eq('type:boolean type:table<string, integer|string>', got, 'two parts, the table one whole')
+    vim.fn.delete(r2, 'rf')
+end)

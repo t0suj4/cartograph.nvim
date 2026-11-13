@@ -2113,6 +2113,46 @@ local function build(store, opts)
         RET[ck] = one or false
         return one
     end
+    -- ★ A UNION RETURN IS EACH OF ITS PARTS (CART-2035): onetype calls a real union NONE, so a builtin declared
+    -- `string|osdate`, `integer|table`, `string|integer[][]` got no object at all — its result empty and untainted, a
+    -- certifiable wrong answer in a closed solve (luajit 2 signatures, wow 2, nvim 79). Where retk gives nothing, each
+    -- non-nil part is an object of its own, as a one-type return is: a literal part its scalar type ('a' string, 0
+    -- integer, true boolean). A generic part (`T1|T2`: vim.tbl_deep_extend) stays its NAME: the by-name call binds it to
+    -- its argument as genarg binds a one-type generic (G7.genbind), else it is `any`. Split at depth 0 only, outer
+    -- parentheses off: `fun(a: x|y)` and `table<K, V|W>` are ONE part, `(boolean|string|nil)` three.
+    -- Memoized like retk: { part, ... } or false
+    G7.RETP = {} -- (a G7 field: build is at Lua's 200 locals)
+    function G7.retparts(key, k)
+        local ck = k == 1 and key or (key .. '\0' .. k)
+        local r = G7.RETP[ck]
+        if r ~= nil then return r or nil end
+        local sg = PSIGS[key]
+        local rk = type(sg) == 'table' and sg.returns and sg.returns[k]
+        local ty = rk and rk.type
+        r = false
+        if type(ty) == 'string' then ty = ty:gsub('^%s+', ''):gsub('%s+$', ''); ty = ty:match('^%((.*)%)$') or ty end
+        if type(ty) == 'string' and not onetype(ty) then
+            local parts, seen, depth, from = {}, {}, 0, 1
+            local function put(p)
+                p = p:gsub('^%s+', ''):gsub('%s+$', ''):gsub('%?$', ''):gsub('%*$', '')
+                if p:match("^'.*'$") or p:match('^".*"$') then p = 'string'
+                elseif p:match('^%-?%d+$') then p = 'integer'
+                elseif p:match('^%-?%d*%.%d+$') then p = 'number'
+                elseif p == 'true' or p == 'false' then p = 'boolean' end
+                if p ~= '' and p ~= 'nil' and not seen[p] then seen[p] = true; parts[#parts + 1] = p end
+            end
+            for i = 1, #ty do
+                local ch = ty:sub(i, i)
+                if ch:match('[%(<{%[]') then depth = depth + 1
+                elseif ch:match('[%)>}%]]') then depth = depth - 1
+                elseif ch == '|' and depth == 0 then put(ty:sub(from, i - 1)); from = i + 1 end
+            end
+            put(ty:sub(from))
+            if #parts > 0 then r = parts end -- (`0|1` is ONE part after its literals: integer)
+        end
+        G7.RETP[ck] = r
+        return r or nil
+    end
     -- ★ A GENERIC RETURN IS ITS ARGUMENT (CART-1653): `assert(v: T, …): T` returns v — not an object of a type named
     -- `T`. 48 of lua/cartograph's empty receivers were `A().node(…)` with A = `assert(require(…).load())`: the algebra
     -- table never arrived, a bare `T` did. A return whose type is a generic-shaped name (T, K, V, T1) that also types a
@@ -2201,6 +2241,21 @@ local function build(store, opts)
         if g then return g, gf end
         return nil
     end
+    -- (a generic PART of a union return, CART-2035: the parameter it binds, as genarg binds a one-type generic — the
+    -- argument, its elements `[]`, its keys `{k}`, from a vararg on `...` — or nil: unbound, `any`)
+    function G7.genbind(key, rt)
+        local sg = PSIGS[key]
+        for i, pm in ipairs(type(sg) == 'table' and sg.params or NOTHING) do
+            local pt = type(pm.type) == 'string' and pm.type:gsub('%?$', ''):gsub('%s', '')
+            if pm.name == '...' and pt == rt then return i, '...' end
+            if pm.name ~= '...' then
+                if pt == rt then return i end
+                if pt == rt .. '[]' or (pt and pt:match('^table<[^,]+,(.+)>$') == rt) then return i, '[]' end
+                if pt and pt:match('^table<([^,]+),') == rt then return i, '{k}' end
+            end
+        end
+        return nil
+    end
     -- (a function TYPE's returns: `fun(a: integer): TSNode, string` -> { 'TSNode', 'string' }; wrapped in parentheses
     -- too. Anything else is no function type: nil)
     local FUNRETS = {}
@@ -2278,7 +2333,8 @@ local function build(store, opts)
         for o in each(recv) do
             local tn = TNAME[o]
             local rt = tn and retk(tn .. '#' .. m, k)
-            if rt then addobj(res, G7.retobj(rt, res, tn .. '#' .. m)) end
+            if rt then addobj(res, G7.retobj(rt, res, tn .. '#' .. m))
+            elseif tn then for _, pt in ipairs(G7.retparts(tn .. '#' .. m, k) or NOTHING) do addobj(res, G7.retobj(pt, res, tn .. '#' .. m)) end end
         end
     end
     -- (the loop's reader callbacks, made once — CART-1839: a closure per pop was an FNEW in the loop body, NYI in LuaJIT
@@ -2384,7 +2440,8 @@ local function build(store, opts)
                         for _, o in dit(d) do
                             local tn = TNAME[o]
                             local rt = tn and retk(tn .. '#' .. mf[1], mf[3] or 1)
-                            if rt then addobj(mf[2], G7.retobj(rt, mf[2], tn .. '#' .. mf[1])) end
+                            if rt then addobj(mf[2], G7.retobj(rt, mf[2], tn .. '#' .. mf[1]))
+                            elseif tn then for _, pt in ipairs(G7.retparts(tn .. '#' .. mf[1], mf[3] or 1) or NOTHING) do addobj(mf[2], G7.retobj(pt, mf[2], tn .. '#' .. mf[1])) end end
                         end
                     end
                     local smc = G7.SMC[p]
@@ -4269,6 +4326,8 @@ local function build(store, opts)
                 -- (debug.setmetatable: its result is the version's — the signature's generic `T`, the target, is 5.2+'s
                 -- alone, CART-2031)
                 or (aps[1] and ((fname == 'debug.setmetatable' and select(2, lookup('debug'))) or isbuiltin('debug.setmetatable')))
+                -- (os.date: its literal format decides, CART-2030 — not its `string|osdate` union's parts, CART-2035)
+                or ((fname == 'os.date' and select(2, lookup('os'))) or isbuiltin('os.date'))
             if ires then for _, r in ipairs(resl) do G7.IRES[r] = true end end -- (and not the callee's declared type: bindcall)
             if f and f:type() ~= 'method_index_expression' then
                 local owner, mm = fname:match('^(.+)%.([%w_]+)$')
@@ -4304,9 +4363,20 @@ local function build(store, opts)
                             if rt and rt:match('^[A-Z]%d?$') then rt = 'any' end
                             local gl = rt and G7.genlist(key, rt)
                             if gl then G7.applylist(gl, aps, r, key)
-                            else
-                                local ro = rt and G7.retobj(rt, r, key, aps)
+                            elseif rt then
+                                local ro = G7.retobj(rt, r, key, aps)
                                 if ro then addobj(r, ro) end
+                            else -- (a union: each part, CART-2035 — a generic part its argument where it binds)
+                                for _, pt in ipairs(G7.retparts(key, k) or NOTHING) do
+                                    local bi, bf = nil, nil
+                                    if pt:match('^[A-Z]%d?$') then bi, bf = G7.genbind(key, pt); if not bi then pt = 'any' end end
+                                    if bi and bf == '...' then for j = bi, #aps do edge(aps[j], r) end
+                                    elseif bi then if aps[bi] then edge(bf and field(aps[bi], bf) or aps[bi], r) end
+                                    else
+                                        local ro = G7.retobj(pt, r, key, aps)
+                                        if ro then addobj(r, ro) end
+                                    end
+                                end
                             end
                         end
                     end
