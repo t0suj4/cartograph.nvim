@@ -9301,8 +9301,19 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 else
                                     local v = node_text(a, src)
                                         :gsub('^["\']', ''):gsub('["\']$', '')
-                                    args[#args + 1] = v
-                                    argv[#argv + 1] = { k = 'lit', v = v }
+                                    -- ★ THE VALUE, NOT THE SPELLING (CART-2027): a string's escapes are source text —
+                                    -- `require('\102oo')` named a module `\102oo` and linked nothing. Decoded where the
+                                    -- spec can (`string_value`, lua); an escape whose meaning it cannot fix (the
+                                    -- version's: `\x`, `\u`) is no known value — an expression, never the raw text
+                                    local dv = v
+                                    if v:find('\\', 1, true) and spec.string_value then dv = spec.string_value(a, src) end
+                                    if dv then
+                                        args[#args + 1] = dv
+                                        argv[#argv + 1] = { k = 'lit', v = dv }
+                                    else
+                                        args[#args + 1] = ''
+                                        argv[#argv + 1] = { k = 'expr' }
+                                    end
                                 end
                             elseif SCALAR_LIT[t] then
                                 -- boolean/nil/number literals: the FLAG

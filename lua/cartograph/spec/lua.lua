@@ -1125,6 +1125,36 @@ local function lua_compiles(text, prof, root)
             or 'the code states no Lua version (no profile lua_version, no .luarc / .luacheckrc)')
 end
 
+-- ★ A STRING LITERAL'S VALUE (CART-2026, shared since CART-2027): its `content` child is SOURCE TEXT — `'\102oo'` is "foo".
+-- Without a backslash the text is the value, as in a long string `[[…]]`, which has no escapes. A short string's escapes
+-- are DECODED, one pass, no code run: `\ddd`, `\n` `\t` … `\\` `\"` `\'`, a backslash-newline. One whose meaning is the
+-- VERSION's — `\x` `\z` `\u` (5.1 reads `\x66` as "x66") — or that 5.2+ refuses (`\q`, `\256`) is no value: nil.
+-- Used by flowtype (keys, require names) and by the extractor's argument reader (require's module name, any lit argument)
+local LUA_ESC = { a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', ['\\'] = '\\', ['"'] = '"', ["'"] = "'" }
+local function lua_string_value(x, src)
+    local c = x:field('content')[1]
+    local ct = c and node_text(c, src) or ''
+    if not ct:find('\\', 1, true) or node_text(x, src):match('^%[=*%[') then return ct end
+    local out, i = {}, 1
+    while i <= #ct do
+        local j = ct:find('\\', i, true)
+        if not j then out[#out + 1] = ct:sub(i); break end
+        out[#out + 1] = ct:sub(i, j - 1)
+        local ch = ct:sub(j + 1, j + 1)
+        if ch:match('%d') then
+            local d = ct:match('^%d%d?%d?', j + 1)
+            if tonumber(d) > 255 then return nil end
+            out[#out + 1] = string.char(tonumber(d)); i = j + 1 + #d
+        elseif ch == '\n' or ch == '\r' then -- (a backslash-newline: one newline, CR LF either way)
+            out[#out + 1] = '\n'; i = j + 2
+            local nx = ct:sub(i, i)
+            if (nx == '\n' or nx == '\r') and nx ~= ch then i = i + 1 end
+        elseif LUA_ESC[ch] then out[#out + 1] = LUA_ESC[ch]; i = j + 2
+        else return nil end
+    end
+    return table.concat(out)
+end
+
 local function lua_declaration(defn, src)
     return type(src) == 'string' and defn:field('body')[1] == nil and lua_meta_file(src) or false
 end
@@ -1794,6 +1824,8 @@ return {
     colon_calls_pass_self = true,
     -- a function that only DECLARES (an empty body in a `---@meta` file): its effects are the native implementation's
     declaration = lua_declaration,
+    -- a string literal node's VALUE, escapes decoded; nil where the escape's meaning is the version's (CART-2026 / 2027)
+    string_value = lua_string_value,
     -- does the text COMPILE (CART-1559: a parse accepts 61 upvalues, the compiler does not) — under the analysed code's
     -- OWN Lua version (CART-2000), lua_compiles: true | false, why | nil, why (no oracle for that version)
     compiles = lua_compiles,

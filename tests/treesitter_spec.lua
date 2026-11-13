@@ -6797,3 +6797,30 @@ test('lua: a dotted call through ANOTHER binding of its root is an inferred edge
         ok(got['L.go'] and got['L.go'].to and got['L.go'].inferred, what .. ': use\'s L is another binding: inferred — ' .. vim.inspect(got['L.go'] and { to = got['L.go'].to, inferred = got['L.go'].inferred, crk = got['L.go'].crk }))
     end
 end)
+
+-- (CART-2027: a string argument's ESCAPES are source text — `require('\102oo')` named a module `\102oo`, so a root-layout
+-- foo.lua was never linked and flowtype read the require as unknown code. The argument reader now takes the VALUE
+-- through the spec's decoder (lua's string_value, shared with flowtype since CART-2026); an escape whose meaning is the
+-- Lua version's (`\x66`: "x66" on 5.1, "f" on 5.2+) is no known value — an expression, never the raw spelling)
+test('treesitter: a Lua string argument is its decoded VALUE; a version-dependent escape is unknown (CART-2027)', function ()
+    if not has_parser('lua') then skip('no lua parser') end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(name, text) local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(text); fd:close() end
+    put('foo.lua', 'return { x = 1 }\n')
+    put('m.lua', 'local a = require("\\102oo")\nlocal b = require"\\102oo"\nlocal c = require("\\x66oo")\nprint("a\\tb")\n')
+    local data = ts.extract(root)
+    local imports = 0
+    for _, e in ipairs(data.edges or {}) do if e.kind == 'import' and e.to == 'foo.lua' then imports = imports + 1 end end
+    eq(2, imports, 'both decodable spellings link foo.lua')
+    local seen = {}
+    for _, c in ipairs(data.calls or {}) do
+        local a1 = (c.argv or {})[1]
+        if a1 then seen[#seen + 1] = a1.k .. ':' .. tostring(a1.v) end
+    end
+    table.sort(seen)
+    ok(vim.tbl_contains(seen, 'lit:foo'), 'the value: ' .. vim.inspect(seen))
+    ok(vim.tbl_contains(seen, 'expr:nil'), '\\x66oo is no known value: ' .. vim.inspect(seen))
+    ok(vim.tbl_contains(seen, 'lit:a\tb'), '\\t decoded to a tab: ' .. vim.inspect(seen))
+    for _, x in ipairs(seen) do ok(not x:find('\\', 1, true), 'no raw escape survives: ' .. x) end
+    vim.fn.delete(root, 'rf')
+end)

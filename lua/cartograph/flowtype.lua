@@ -3206,30 +3206,11 @@ local function build(store, opts)
         -- `\x` `\z` `\u` (5.1 reads `\x66` as "x66") — or that 5.2+ refuses (`\q`, `\256`) is no value: nil, the caller's
         -- computed key. So is a value spelling one of the solve's own fields: the metatable slot `\1mt`, hidden `\1…`
         -- slots, `[]`, `#`, `{k}`
-        local ESC = { a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', ['\\'] = '\\', ['"'] = '"', ["'"] = "'" }
+        -- (the decoder is the Lua spec's, shared with the extractor's argument reader since CART-2027)
         local function strval(x)
-            local c = x:field('content')[1]
-            local ct = c and txt(c) or ''
-            if not ct:find('\\', 1, true) or txt(x):match('^%[=*%[') then return ct end
-            local out, i = {}, 1
-            while i <= #ct do
-                local j = ct:find('\\', i, true)
-                if not j then out[#out + 1] = ct:sub(i); break end
-                out[#out + 1] = ct:sub(i, j - 1)
-                local ch = ct:sub(j + 1, j + 1)
-                if ch:match('%d') then
-                    local d = ct:match('^%d%d?%d?', j + 1)
-                    if tonumber(d) > 255 then return nil end
-                    out[#out + 1] = string.char(tonumber(d)); i = j + 1 + #d
-                elseif ch == '\n' or ch == '\r' then -- (a backslash-newline: one newline, CR LF either way)
-                    out[#out + 1] = '\n'; i = j + 2
-                    local nx = ct:sub(i, i)
-                    if (nx == '\n' or nx == '\r') and nx ~= ch then i = i + 1 end
-                elseif ESC[ch] then out[#out + 1] = ESC[ch]; i = j + 2
-                else return nil end
-            end
-            local v = table.concat(out)
-            if v:byte(1) == 1 or v == '[]' or v == '#' or v == '{k}' then return nil end
+            G7.LUASTR = G7.LUASTR or require('cartograph.spec.lua').string_value
+            local v = G7.LUASTR(x, src)
+            if v and (v:byte(1) == 1 or v == '[]' or v == '#' or v == '{k}') then return nil end
             return v
         end
         -- (an instance's positions are the SNIPPET's: keyed under a file of its own, they match no call record — a
