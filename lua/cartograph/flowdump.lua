@@ -102,7 +102,8 @@
 --   __newindex); `loadRaw` [x, y, k | null] reads any field of the object ITSELF, with no __index and no prototype:
 --   pairs' value (k null) and rawget(t, k) with a variable key (CART-1758). `storeRawDyn` [x, k | null, y] is a raw
 --   store under a computed key: rawset(t, k, v) and a constructor's `[e] = v` (CART-1771).
--- * SITES are flowtype's objects: `table`, `function` (fn = its function id: P.fnOf), `type` (a value the environment
+-- * SITES are flowtype's objects: `table` (a constructor's `tbl:`, newproxy's `proxymt:`, and a LIBRARY table —
+--   contracts.library_sites, CART-2058: each surely a table, D52), `function` (fn = its function id: P.fnOf), `type` (a value the environment
 --   profile types — a host value; `type:string` is the strings), `ext` (code outside the tree: EXT), `globals` (_G),
 --   A `type` or `ext` site is a HOST value. A `type` site carries `host` = its KIND, from the environment profile
 --   (CART-1761): `prim` (a store raises: string, number, a function type), `members` (its declared members only:
