@@ -3808,3 +3808,57 @@ test('flowdump: the dump states the profile\'s Lua runtime, and nothing when it 
     eq('5.2', P.load('lua-factorio-11').lua_version, 'Factorio 1.1 is Lua 5.2 too')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-2061 / CART-2060, flowpath FLOW-0106 D60 / D61: at a stated Lua 5.2+ a file that BINDS or ASSIGNS `_ENV` gaps every
+-- function of it (`lua52-env-bound`), a `load` handed an env gaps its caller (`lua52-load-env`) and its literal chunk, and
+-- fixed-env is withheld; a free `_ENV` reads the globals table, not `_G._ENV`. Clause env-marked states it, at 52+ only)
+test('flowdump: Lua 5.2 _ENV bindings and load-with-env are marked per function; a free _ENV is the globals table (CART-2061)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({
+        ['a.lua'] = 'local x = {}\nfunction A() local _ENV = { print = print }; y = 1 end\nfunction B() return 1 end\n',
+        ['b.lua'] = 'OBS = _ENV\n-- _ENV = nil (a comment names it: no binding)\nlocal s = "_ENV = 1"\n',
+        ['c.lua'] = 'local e = {}\nlocal f = load("return 1", "n", "t", e)\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        P.load = function (nm, ...) if nm == 'stub' then return { lua_version = lv } end return old(nm, ...) end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, dump = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        local D = vim.json.decode(R.dump)
+        local gaps, lab, vv, obs = {}, {}, {}, nil
+        for _, g in ipairs(D.gaps) do
+            if g.kind:match('^lua52%-') then
+                local nm = D.names.functions[g.fn + 1] or tostring(g.fn)
+                gaps[#gaps + 1] = g.kind .. ' ' .. nm
+            end
+        end
+        table.sort(gaps)
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        local fobs = D.names.fields
+        for _, F in ipairs(D.functions) do for _, i in ipairs(F.body) do
+            if i[1] == 'store' and fobs[i[3] + 1] == 'OBS' then
+                obs = {}
+                for _, s in ipairs(vv[i[4]] or {}) do obs[#obs + 1] = lab[s] end
+                table.sort(obs); obs = table.concat(obs, ',')
+            end
+        end end
+        return gaps, D.contracts.clauses, obs
+    end
+    local g, cl, obs = run('5.2')
+    eq({ 'lua52-env-bound a.lua::A@1', 'lua52-env-bound a.lua::B@2', 'lua52-env-bound chunk:a.lua',
+        'lua52-env-bound chunk:load:c.lua:1:10', 'lua52-env-bound ts:load:c.lua:1:10:0:7', 'lua52-load-env chunk:c.lua' }, g,
+        'every function of a.lua (the chunk too), not b.lua (a comment and a string are no binding); the load\'s caller and its chunk')
+    eq(nil, cl['fixed-env'], 'fixed-env withheld')
+    ok(cl['env-marked'] ~= nil, 'the dump states that it marks them')
+    eq('_G', obs, 'a free _ENV is the globals table')
+    g, cl, obs = run('5.1')
+    eq({}, g, '5.1: _ENV is an ordinary name')
+    eq(nil, cl['env-marked'])
+    ok(cl['fixed-env'] ~= nil)
+    eq('', obs or '', '5.1: OBS = _G._ENV, nothing')
+    vim.fn.delete(root, 'rf')
+end)

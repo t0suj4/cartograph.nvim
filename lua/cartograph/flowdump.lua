@@ -241,6 +241,7 @@ M.CONTRACTS = {
     ['loader-args'] = 'a file whose package\'s ecosystem declares its loader (spec/ecosystem chunk_args: WoW\'s addon name and private table) is run once, as a chunk called with exactly those values: init creates them, one private table per package shared by its files, and every other file\'s `...` is tainted (stated only when a file has a declared loader, CART-1822)',
     ['host-handlers'] = 'a function handed to a method its file\'s ecosystem declares a HANDLER registrar (spec/ecosystem `handlers`: WoW\'s frame:SetScript / frame:HookScript) is called by the host with the receiver, then unknown host values (one tainted spread port); the call is emitted at the registration, tagged contract:host-handlers, and raises into the registering function (stated only when such a call exists, CART-1955). Likewise a HOOKED function whose hook form the ecosystem declares host_calls (spec/ecosystem `hooks`: WoW\'s hooksecurefunc): the host calls the hook\'s wrapper with unknown host values — a member hook both with the table first and with all arguments unknown — emitted at the hooksecurefunc (CART-1990)',
     ['loaded-code'] = 'code loaded at run time from a source the tree does not hold — load / loadstring with a non-literal source, loadfile, dofile — does not read or write the tree\'s globals by name (stated only when the tree has such a call; a literal source is walked as tree code; the sound reading is experiment loaded-globals — CART-1796, the user\'s decision 2026-10-22)',
+    ['env-marked'] = 'Lua 5.2+ (stated only at ver 52+): every function whose global accesses may go through another table than the globals one carries a gap — `lua52-env-bound` for each function of a file that binds `_ENV` (a local, parameter, loop variable or local function) or assigns it, and of a literal chunk `load` was handed an env; `lua52-load-env` for the function calling `load(chunk, name, mode, env)` — and fixed-env is withheld when any does. A free `_ENV` (no binding in scope) reads the globals table (CART-2061)',
     ['hidden-fields'] = 'a dynamic key never reads or writes the metatable slot (Lua; the core\'s loadDyn / storeDyn range over it)',
 }
 
@@ -386,7 +387,9 @@ function M.build(rec, X, sink)
                 rec.gap(sf.fn or 'init', 'setfenv', sf.port and { sf.port } or {})
             end
         end
-        X.FIXEDENV = harmful == 0
+        -- (5.2+: a binding or assignment of _ENV, or a load handed an env, gives some function another environment than
+        -- the globals table: those functions carry their gaps and the claim is withheld, CART-2061)
+        X.FIXEDENV = harmful == 0 and (X.ENVMARKS or 0) == 0
     end
     -- (THE THREAD'S ENVIRONMENT — CART-1838, off under experiment no-getfenv0: getfenv(0) was the globals table and what a setfenv at
     -- a literal level 0 set. That is exact while no setfenv may set level 0: none at a literal 0, and none whose first
@@ -1355,6 +1358,7 @@ function M.build(rec, X, sink)
                 if not (k == 'fixed-env' and not X.FIXEDENV) and not (k == 'thread-env' and not X.THREADENV) and not (k == 'globals-per-program' and #(X.ENVL or {}) < 2)
                     and not (k == 'host-model' and #hmj == 0) and not (k == 'loaded-code' and not X.LOADCONTRACT)
                     and not (k == 'loader-args' and #(X.CHUNKINIT or {}) == 0)
+                    and not (k == 'env-marked' and (X.LUAVER or 51) < 52)
                     and not (k == 'host-handlers' and (X.HANDLERCALLS or 0) == 0)
                     and not (k == 'function-no-metatable' and (X.FNMT or X.FNMAYBE))
                     and not (k == 'libraries-never-escape' and not next(X.LIBSITES or {})) then ks[#ks + 1] = k end

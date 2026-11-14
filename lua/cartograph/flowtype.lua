@@ -2782,6 +2782,7 @@ local function build(store, opts)
         end
     else G7.RG, G7.RTOP = nil, nil end
     G7.CHUNKVA = {} -- (file -> its chunk's `...` port, CART-1822)
+    G7.ENVMARKS, G7.ENVFORCE = 0, {} -- (5.2+ _ENV bindings / load-with-env marked, and the walks forced to mark: CART-2061)
     G7.STRPEND = {} -- (string-metatable reads / writes, decided once the receiver's contents are final, CART-1811)
     G7.RAWDST = {} -- (the result ports of RAW loads: no prototype, no __index handler, CART-2010)
     G7.PERRS = {} -- (every pcall's error port: a hook raises inside a protected builtin too, CART-2019)
@@ -3373,6 +3374,35 @@ local function build(store, opts)
         end
         if G7.LITKEYS then reasg() end
         G7.REASG = G7.REASGF[file] or NOTHING
+        -- ★ _ENV AT A STATED 5.2+ (CART-2061 / CART-2060, flowpath FLOW-0106 D60 / D61): a file that BINDS `_ENV` (a local,
+        -- a parameter, a loop variable, a local function) or ASSIGNS it may run its global accesses through another
+        -- table than the globals one. The walk does not model that: every function of such a file — and of a literal
+        -- `load` chunk handed an env — carries the gap `lua52-env-bound`, and the dump withholds fixed-env. A READ of
+        -- `_ENV` with no binding in scope is the environment itself (expr below), not `_G._ENV`. By the parse tree: a
+        -- comment or a string naming _ENV is no binding
+        local envbound = false
+        if G7.LUAVSTATED and G7.LUAVER >= 52 then
+            if G7.ENVFORCE[file] then envbound = true
+            elseif src:find('_ENV', 1, true) then -- (a cost gate only: the decision is the tree's)
+                local function isenv(x) local _, _, b, _, _, e = x:range(true); return src:sub(b + 1, e) == '_ENV' end
+                local function scan(nd)
+                    for _, x in tsutil.inamed, nd, -1 do
+                        if envbound then return end
+                        if x:type() == 'identifier' and isenv(x) then
+                            local p = x:parent()
+                            local pt = p and p:type()
+                            if pt == 'variable_list' or pt == 'parameters' or pt == 'attribute'
+                                or ((pt == 'for_numeric_clause' or pt == 'function_declaration') and p:field('name')[1] == x) then
+                                envbound = true; return
+                            end
+                        end
+                        if x:named_child_count() > 0 then scan(x) end
+                    end
+                end
+                scan(tree)
+            end
+            if envbound then G7.ENVMARKS = G7.ENVMARKS + 1 end
+        end
         -- (experiment `strict-records`: the names this file indexes by a COMPUTED key in a store — `b.by_id[id] = …` gives
         -- by_id — the last name of the store's base; a constructor bound to one is a MAP site)
         if G7.EXP['strict-records'] and not G7.MAPNAMEF[file] then
@@ -3711,6 +3741,7 @@ local function build(store, opts)
             -- (a VALUE-KEYED instance: its key parameters are the call's literals, constants inside it, CART-1729)
             if inst and clone.consts then for j, sv in pairs(clone.consts) do if fp.params[j] then G7.CONSTK[fp.params[j]] = sv end end end
             fnstack[#fnstack + 1] = fp
+            if envbound then G7.gap('lua52-env-bound', {}) end -- (CART-2061)
             local walkfn0 = G7.WALKFN
             G7.WALKFN = id
             local body = n:field('body')[1]
@@ -3905,6 +3936,10 @@ local function build(store, opts)
             -- NAME, in the caller's environment — as unknown code it was unmodelled, a certified wrong whole answer. A
             -- literal source (no escape sequence to decode) is parsed and walked as the body of the function load
             -- returns, a chunk of its own; the dump holds it, so the certificate checks it
+            -- (5.2+ `load(chunk, name, mode, env)`: the chunk's globals are env's — the call's function and a literal chunk's
+            -- functions carry `lua52-load-env`, and fixed-env is withheld, CART-2061)
+            local loadenv = isbuiltin('load') and argn[4] and G7.LUAVSTATED and G7.LUAVER >= 52
+            if loadenv then G7.gap('lua52-load-env', {}); G7.ENVMARKS = G7.ENVMARKS + 1; G7.ENVFORCE['load:' .. key_of(n)] = true end
             if (isbuiltin('load') or isbuiltin('loadstring')) and argn[1] and argn[1]:type() == 'string' then
                 local cn = argn[1]:field('content')[1]
                 local body = cn and txt(cn) or ''
@@ -4858,6 +4893,9 @@ local function build(store, opts)
             if t == 'identifier' then
                 local nm = txt(n)
                 local p, glob = lookup(nm)
+                -- (5.2+: a free `_ENV` is the chunk's environment, the globals table — it had read `_G._ENV`, so
+                -- `serpent.dump(_ENV)` dumped nothing; a file that rebinds it is gapped above, CART-2061)
+                if glob and nm == '_ENV' and G7.LUAVSTATED and G7.LUAVER >= 52 then local q = new(); edge(G7.GPORT, q); return q end
                 if glob then return G7.gload(nm) end
                 return p
             end
@@ -5389,6 +5427,7 @@ local function build(store, opts)
                 R.pl, R.pc, R.pf = pl, pc, pf
             end
         end
+        if envbound then G7.gap('lua52-env-bound', {}) end -- (the chunk's own: CART-2061)
         for _, s in tsutil.inamed, tree, -1 do stmt(s); if raises(s) then break end end
         G7.W = false
         if G7.REC and rk0 then G7.W, G7.FNS, G7.CK, expr, callv, stmt = rw0, rf0, rk0, re0, rc0, rs0 end
@@ -8181,7 +8220,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, LUARUNTIME = G7.LUARUNTIME, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, FNTP = G7.FNTP, FNTO = G7.FNTO, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, LUARUNTIME = G7.LUARUNTIME, ENVMARKS = G7.ENVMARKS, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, FNTP = G7.FNTP, FNTO = G7.FNTO, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
