@@ -181,3 +181,49 @@ test('fabcensus: without --backward the forward census is what it was', function
     ok(o:find('FABRICATION CENSUS — ', 1, true), 'the forward header: ' .. o)
     ok(not o:find('BACKWARD', 1, true), 'and nothing of the reverse direction')
 end)
+
+-- (CART-1961: THE TYPED PIN. Java's inferred tier is instance calls on locals / params, spelled `T::m` with T the
+-- receiver's declared type; the binding pin cannot speak to them. Over a CONSTRUCTED graph (--graph), so the oracle's
+-- every branch is judged on the row shape it decides, whatever the extractor currently produces)
+test('fabcensus: the typed pin decides a Java `T::m` edge by the declared type and the tree\'s hierarchy (CART-1961)', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function fn(file, cls, m, l) return { id = file .. '::' .. cls .. '::' .. m .. '@' .. l, name = cls .. '::' .. m, file = file, kind = 'method' } end
+    local nodes = {
+        fn('a/Base.java', 'Base', 'm', 1), fn('a/Sub.java', 'Sub', 'n', 1), fn('k/Key.java', 'Key', 'methodName', 1),
+        fn('k/Key.java', 'Key', 'x', 2), fn('c/V.java', 'V', 'y', 1), fn('k/X.java', 'X', 'getMessage', 1),
+        fn('c/U.java', 'U', 'run', 1),
+    }
+    local function call(file, full, to, line)
+        return { file = file, fn = file .. '::U::run@1', full = full, callee = full:match('::(.*)$'), to = to, inferred = true, line = line }
+    end
+    local data = {
+        nodes = nodes,
+        edges = {
+            { kind = 'import', from = 'c/U.java', to = 'a/Sub.java', bind = 'Sub' },
+            { kind = 'import', from = 'c/U.java', to = 'a/Base.java', bind = 'Base' },
+            { kind = 'import', from = 'c/U.java', to = 'c/Utils.java', bind = 'Descriptor' },
+            { kind = 'import', from = 'c/U.java', to = 'a/P.java', bind = 'P' },
+        },
+        extends = { { file = 'a/Sub.java', child = 'Sub', parent = 'Base' },
+            { file = 'a/P.java', child = 'P', parent = 'RuntimeException' } },
+        calls = {
+            call('c/U.java', 'Sub::m', 'a/Base.java::Base::m@1', 3),                     -- inherited: a supertype's file
+            call('c/U.java', 'Base::n', 'a/Sub.java::Sub::n@1', 4),                      -- an override in a subtype
+            call('c/U.java', 'Descriptor::methodName', 'k/Key.java::Key::methodName@1', 5), -- unrelated: witnessed
+            call('c/V.java', 'V::x', 'k/Key.java::Key::x@2', 6),                         -- unqualified: refused
+            call('c/U.java', 'P::getMessage', 'k/X.java::X::getMessage@1', 7),           -- the chain leaves the tree
+        },
+    }
+    local g = root .. '/graph.json'
+    local fd = assert(io.open(g, 'w')); fd:write(vim.json.encode(data)); fd:close()
+    local r = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', repo('tools/fabcensus.lua'), root, '--graph', g },
+        { cwd = repo(), text = true }):wait()
+    o = (r.stdout or '') .. (r.stderr or '')
+    vim.fn.delete(root, 'rf')
+    ok(o:match('typed%-pinned%s+2%s'), 'a supertype\'s and a subtype\'s file both agree: ' .. o)
+    ok(o:match('typed%-contra%s+1%s'), 'the unrelated class is witnessed: ' .. o)
+    ok(o:find('Descriptor::methodName  ->  Key::methodName', 1, true), 'and printed as a defect')
+    ok(o:match('1%s+T is a class of the calling file'), 'an unqualified-looking row is refused, not judged')
+    ok(o:match('1%s+a supertype chain leaves the tree'), 'a chain past the tree is refused')
+    ok(not o:find('BUCKET PARTITION BROKEN', 1, true), 'the partition holds')
+end)

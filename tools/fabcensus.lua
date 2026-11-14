@@ -192,15 +192,18 @@ local tier = require 'cartograph.tier'
 local target = arg[1]
 if not target then
     print('usage: nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path>')
-    print('         [--show <bucket>] [--group <bucket>]')
+    print('         [--show <bucket>] [--group <bucket>] [--graph <data.json>]')
     print('  buckets: pinned contradicted suspect undecided hop-pinned hop-contradicted')
     os.exit(2)
 end
-local show, group, backward
+local show, group, backward, graph
 for i = 2, #(arg or {}) do
     if arg[i] == '--show' then show = arg[i + 1] end
     if arg[i] == '--group' then group = arg[i + 1] end
     if arg[i] == '--backward' then backward = true end
+    -- (a SAVED graph — the extractor's data as JSON — in place of extracting <root>: the census over a graph a test
+    -- constructs, where a row shape the extractor no longer produces is still the oracle's to judge, CART-1961)
+    if arg[i] == '--graph' then graph = arg[i + 1] end
 end
 
 local reg = dofile(here .. '/corpora.lua')
@@ -225,7 +228,12 @@ local function stdlib_members()
     return out
 end
 
-local data = ts.extract(root, c and c.packs and { packs = c.packs } or nil)
+local data
+if graph then
+    local fd = assert(io.open(graph, 'rb')); data = vim.json.decode(fd:read('*a'), { luanil = { object = true } }); fd:close()
+else
+    data = ts.extract(root, c and c.packs and { packs = c.packs } or nil)
+end
 
 local byid, files = {}, {}
 for _, n in ipairs(data.nodes) do
@@ -652,7 +660,100 @@ end
 
 local STD = stdlib_members()
 local B = { pinned = {}, contradicted = {}, suspect = {}, undecided = {},
-    ['hop-pinned'] = {}, ['hop-contradicted'] = {}, reexport = {} }
+    ['hop-pinned'] = {}, ['hop-contradicted'] = {}, reexport = {},
+    ['typed-pinned'] = {}, ['typed-contradicted'] = {} }
+
+-- ── THE TYPED PIN (CART-1961) ───────────────────────────────────────────────
+-- Java's inferred tier is INSTANCE calls on locals / fields / params: the extractor types the receiver (CART-1077)
+-- and spells the call `T::m`, T the receiver's DECLARED type. The binding pin cannot speak to them — the receiver is
+-- a variable, no import binds it — but T is a class name, resolved from the calling file as Java does: a class of
+-- the same file, the file's own import bind, else one class of the same package (directory). Two or none: no pin.
+-- ⚠ INHERITANCE: a call on T may resolve into a SUPERTYPE's file (an inherited method) or a SUBTYPE's (an override
+-- the object may dispatch to), so the resolution CONTRADICTS the declared type only when the target's class is
+-- neither — by the tree's own extends / implements (data.extends / data.implements). Where either chain LEAVES the
+-- tree (a supertype no class of the tree is — RuntimeException, a library type), the tree cannot say what lies past
+-- it: the row is refused, counted under that reason. A supertype written QUALIFIED (`implements a.b.C`) is not in
+-- data.implements, so its chain reads as ending there: the one residual, stated in the output.
+local typed_why, n_typed_pop = {}, 0
+local THIER
+local function typed_hier()
+    if THIER then return THIER end
+    local up, defines, files_of = {}, {}, {}
+    local function simple(t) return (t or ''):match('([%w_$]+)%s*$') end
+    local function place(c, f)
+        if not (c and f) then return end
+        local d = defines[f]; if not d then d = {}; defines[f] = d end; d[c] = true
+        local fo = files_of[c]; if not fo then fo = {}; files_of[c] = fo end; fo[f] = true
+    end
+    local function link(f, c, p)
+        if not (f and c and p) then return end
+        place(c, f)
+        local k = f .. '\0' .. c
+        local l = up[k]; if not l then l = {}; up[k] = l end; l[#l + 1] = p
+    end
+    for _, e in ipairs(data.extends or {}) do link(e.file, simple(e.child), simple(e.parent)) end
+    for _, e in ipairs(data.implements or {}) do link(e.file, simple(e.child), simple(e.iface)) end
+    for _, n in ipairs(data.nodes or {}) do
+        local c = n.file and n.file:match('%.java$') and n.name and n.name:match('^([%w_$%.]+)::')
+        if c then place(c:match('([%w_$]+)$'), n.file) end
+    end
+    THIER = { up = up, defines = defines, files_of = files_of }
+    return THIER
+end
+-- the file the simple class name p names, seen from file f — or nil (none, or several)
+local function typed_where(f, p)
+    local H = typed_hier()
+    if H.defines[f] and H.defines[f][p] then return f end
+    local b = binds[f] and binds[f][p]
+    if b then return b end
+    local dir, hit, n = f:match('^(.*)/[^/]*$') or '', nil, 0
+    for g in pairs(H.files_of[p] or {}) do
+        if (g:match('^(.*)/[^/]*$') or '') == dir then hit, n = g, n + 1 end
+    end
+    if n == 1 then return hit end
+    return nil
+end
+-- every (file, class) on the supertype chain of (f, c), itself included, and whether the chain left the tree
+local function typed_chain(f, c)
+    local H = typed_hier()
+    local seen, q, leaves = { [f .. '\0' .. c] = true }, { { f, c } }, false
+    local i = 1
+    while i <= #q do
+        local qf, qc = q[i][1], q[i][2]; i = i + 1
+        for _, p in ipairs(H.up[qf .. '\0' .. qc] or {}) do
+            local pf = typed_where(qf, p)
+            if not pf then leaves = true
+            else
+                local k = pf .. '\0' .. p
+                if not seen[k] then seen[k] = true; q[#q + 1] = { pf, p } end
+            end
+        end
+    end
+    return seen, leaves
+end
+--- The typed pin of a Java `T::m` call: its bucket, or nil and the reason no answer is available.
+local function typed_pin(call, def)
+    local T = call.full:match('^([%w_$%.]+)::[%w_$]+$')
+    T = T and T:match('([%w_$]+)$')
+    local tf = T and typed_where(call.file, T)
+    if not tf then return nil, 'the declared type is no single class of this tree (JDK, a library, ambiguous)' end
+    -- (an UNQUALIFIED call `m()` — or `this.m()` — is spelled with the ENCLOSING class, and Java resolves it through
+    -- more than that class's chain: a static import (`import static …EntitledActions.createTempFileForWrite`), an
+    -- outer class. 97 libs rows read as contradictions, every one hand-read was such a call. The call record does not
+    -- say which form it was, and the enclosing class is ALWAYS a class of the calling file — inside a lambda or a field
+    -- initializer too, where the function id names no class. So a T declared in the calling file is refused: the
+    -- price is a typed receiver of a same-file class, which the pin then does not judge)
+    if tf == call.file then return nil, 'T is a class of the calling file: an unqualified call cannot be told from a typed one' end
+    local D = def.name and def.name:match('^([%w_$%.]+)::')
+    D = D and D:match('([%w_$]+)$')
+    if not D then return nil, 'the target is no class member' end
+    local up, leaves_t = typed_chain(tf, T)
+    if up[def.file .. '\0' .. D] then return 'typed-pinned', tf end
+    local down, leaves_d = typed_chain(def.file, D)
+    if down[tf .. '\0' .. T] then return 'typed-pinned', tf end -- (an override in a subtype: a dispatch target)
+    if leaves_t or leaves_d then return nil, 'a supertype chain leaves the tree: what lies past it is unknown' end
+    return 'typed-contradicted', tf
+end
 local n_inferred, n_cross = 0, 0
 
 for _, call in ipairs(data.calls) do
@@ -690,6 +791,12 @@ for _, call in ipairs(data.calls) do
                 end
             elseif call.method and call.callee and STD[call.callee] then
                 B.suspect[#B.suspect + 1] = row
+            elseif call.full and call.file:match('%.java$') and call.full:match('^[%w_$%.]+::[%w_$]+$') then
+                -- a typed Java instance call `T::m` (CART-1961)
+                n_typed_pop = n_typed_pop + 1
+                local k, tf = typed_pin(call, def)
+                if k then row.recv, row.bound = call.full:match('^(.-)::'), tf; B[k][#B[k] + 1] = row
+                else typed_why[tf] = (typed_why[tf] or 0) + 1; B.undecided[#B.undecided + 1] = row end
             elseif recv then
                 -- dotted, unbound: the population the one-hop pin can speak to
                 n_hop_pop = n_hop_pop + 1
@@ -723,6 +830,7 @@ end
 -- happened twice in one session.
 local n_buckets = #B.pinned + #B.contradicted + #B.suspect + #B.undecided
     + #B['hop-pinned'] + #B['hop-contradicted'] + #B.reexport
+    + #B['typed-pinned'] + #B['typed-contradicted']
 if n_buckets ~= n_cross then
     print(('⚠ BUCKET PARTITION BROKEN: %d bucketed vs %d cross-file edges — a bucket '
         .. 'is missing from the sum, and every percentage below is wrong.')
@@ -749,6 +857,21 @@ line('SUSPECT', #B.suspect, 'a method call whose name is a stdlib member (undeci
 line('reexport', #B.reexport,
     'the bound file RE-EXPORTS the target, or shares its import UNIT — no witness')
 line('UNDECIDED', #B.undecided, 'no import binding pins the receiver')
+if n_typed_pop > 0 then
+    print('')
+    print('TYPED — a Java instance call `T::m`, T the receiver\'s DECLARED type, resolved as Java does (CART-1961).')
+    print('  Contradicted only when the target\'s class is neither a supertype nor a subtype of T in the tree.')
+    line('typed-pinned', #B['typed-pinned'], 'T, a supertype or a subtype of T defines the target')
+    line('typed-contra', #B['typed-contradicted'], 'the target\'s class is UNRELATED to T — WITNESSED WRONG')
+    local decl = {}
+    for why, n in pairs(typed_why) do decl[#decl + 1] = { why, n } end
+    table.sort(decl, function (a, b) return a[2] > b[2] or (a[2] == b[2] and a[1] < b[1]) end)
+    print(('  of %d typed rows it DECLINED %d (counted in UNDECIDED):'):format(n_typed_pop,
+        n_typed_pop - #B['typed-pinned'] - #B['typed-contradicted']))
+    for _, d in ipairs(decl) do print(('    %6d  %s'):format(d[2], d[1])) end
+    print('  (residual: a supertype written qualified — `implements a.b.C` — is not in data.implements, so a chain')
+    print('   through it reads as ending there)')
+end
 print('')
 print('ONE HOP OUT — the receiver is a PARAMETER and the callers agree what they pass.')
 print('  A weaker test than the pin above (it assumes the caller set is complete and')
@@ -833,12 +956,15 @@ end
 -- high end by 1.2 points for free — the same contamination the hop buckets caused,
 -- from a new bucket, two hours later. A reconcilable row is NOT a proved-right row.
 local n_hop = #B['hop-pinned'] + #B['hop-contradicted']
+-- (the TYPED pin's rows too, CART-1961: another oracle — it rests on the extractor's declared types and the tree's
+-- hierarchy — so from the binding pin's point of view they are still undecided, as the hop rows are)
+local n_typed = #B['typed-pinned'] + #B['typed-contradicted']
 local lo = pct(#B.contradicted)
-local hi = pct(#B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport)
+local hi = pct(#B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport + n_typed)
 -- two decimals on the low end: a witnessed defect must never round to 0.0%.
 print(('FABRICATED in [%.2f%%, %.1f%%]  — witnessed / witnessed+undecided (%d / %d edges)')
     :format(lo, hi, #B.contradicted,
-        #B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport))
+        #B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport + n_typed))
 print('  the low end is proved; the high end assumes every undecided edge is wrong,')
 print('  which nobody believes. What narrows it is another DECIDABLE oracle, never a')
 print('  larger hand sample — the one-hop pin below is the first of those, built.')
@@ -846,13 +972,20 @@ if n_hop > 0 then
     local wit = #B.contradicted + #B['hop-contradicted']
     local lo2 = pct(wit)
     local hi2 = pct(#B.contradicted + #B.suspect + #B.undecided
-        + #B['hop-contradicted'] + #B.reexport)
+        + #B['hop-contradicted'] + #B.reexport + n_typed)
     print(('  WITH THE ONE-HOP PIN FOLDED IN: [%.2f%%, %.1f%%]  (%d / %d edges)')
         :format(lo2, hi2, wit, #B.contradicted + #B.suspect + #B.undecided
-            + #B['hop-contradicted'] + #B.reexport))
+            + #B['hop-contradicted'] + #B.reexport + n_typed))
     print('  — moves at BOTH ends: it witnesses more wrong AND believes more right,')
     print('  and it rests on the two assumptions named above. Quote the strict band')
     print('  unless you also state which oracle you allowed.')
+end
+if n_typed > 0 then
+    local wit = #B.contradicted + #B['typed-contradicted']
+    local all = #B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport + #B['typed-contradicted']
+    print(('  WITH THE TYPED PIN FOLDED IN: [%.2f%%, %.1f%%]  (%d / %d edges)'):format(pct(wit), pct(all), wit, all))
+    print(('  — the typed pin agrees on %d of %d it decided; it rests on the declared types and the tree\'s hierarchy.')
+        :format(#B['typed-pinned'], n_typed))
 end
 print('  dated reference: ~10% hand-sampled on this tree in July (50 edges read,')
 print('  35 correct / 15 wrong, 95% CI 6.4–14.7%). A point inside the band, not a rival.')
@@ -872,6 +1005,17 @@ if #B['hop-contradicted'] > 0 then
         print(('  %s:%d  %s  ->  %s (%s)'):format(r.call.file, r.call.line,
             tostring(r.call.full), r.def.name, r.def.file))
         print(('      but `%s` is a parameter its callers pin to %s'):format(r.recv, r.hop))
+    end
+end
+
+if #B['typed-contradicted'] > 0 then
+    print('')
+    print(('── TYPED CONTRADICTIONS (%d) — each is a defect, not a statistic ──'):format(#B['typed-contradicted']))
+    for i, r in ipairs(B['typed-contradicted']) do
+        if i > 40 then print(('  … %d more (--show typed-contradicted)'):format(#B['typed-contradicted'] - 40)); break end
+        print(('  %s:%d  %s  ->  %s (%s)'):format(r.call.file, r.call.line, tostring(r.call.full), r.def.name, r.def.file))
+        print(('      but the receiver is declared `%s` (%s), unrelated to the target\'s class; in %s'):format(r.recv, r.bound,
+            tostring(r.call.fn)))
     end
 end
 
