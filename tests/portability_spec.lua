@@ -2929,7 +2929,9 @@ local function lualib_fixture(version, ccd)
     w('base/data.lua', 'util = require("util")\nrequire("circuit-connector-sprites")\n'
         .. 'require("prototypes.entity")\n')
     w('base/prototypes/entity.lua', 'local function f(p) circuit_connector_definitions["x"] = p end\n'
-        .. 'for k, v in pairs(circuit_connector_definitions) do end\n')
+        .. 'for k, v in pairs(circuit_connector_definitions) do end\n'
+        .. 'require("__base__.prototypes.sounds")\n')     -- the dotted __mod__ form
+    w('base/prototypes/sounds.lua', 'sounds = { click = 1 }\n')
     return root
 end
 local CCD20 = 'circuit_connector_definitions =\n{\n  create_single = mk1,\n  create_vector = mk2\n}\n'
@@ -2955,6 +2957,25 @@ test('lualibdistill: the data stage\'s globals and their members, followed throu
     eq(nil, a20.globals.shadow, 'a local is never a global')
     eq('value', a20.globals.default_circuit_wire_max_distance.kind)
     eq(nil, a20.globals_open, 'nothing wrote through _G')
+    eq({ click = true }, a20.globals.sounds.members,
+        'a `__base__.prototypes.x` require is followed (base 2.0.77 writes that form)')
+    eq(nil, a20.incomplete, 'every require resolved')
+    eq(nil, a20.computed, 'no computed require')
+    -- AN UNRESOLVED REQUIRE makes the artifact INCOMPLETE; a COMPUTED one walks every
+    -- other core/base file, and what only that walk adds is MAYBE
+    local fd = assert(io.open(r20 .. '/base/data-updates.lua', 'w'))
+    fd:write('require("no.such.file")\nlocal function load(p) return require(p) end\n'); fd:close()
+    fd = assert(io.open(r20 .. '/base/prototypes/orphan.lua', 'w'))
+    fd:write('orphan_global = {}\ncircuit_connector_definitions.only_maybe = 1\n'); fd:close()
+    vim.fn.mkdir(r20 .. '/base/scenarios', 'p')
+    fd = assert(io.open(r20 .. '/base/scenarios/control.lua', 'w'))
+    fd:write('require("a-runtime-only-lib")\n'); fd:close()  -- runtime trees are never walked
+    local b = assert(LD.distill(r20))
+    eq({ 'base/data-updates.lua: no.such.file' }, b.incomplete,
+        'the unresolved literal require, and not the scenario\'s (a runtime tree)')
+    eq(true, b.globals.orphan_global.maybe, 'defined only by a file a computed require might load')
+    eq({ only_maybe = true }, b.globals.circuit_connector_definitions.maybe_members)
+    eq(nil, b.globals.circuit_connector_definitions.maybe, 'the global itself is real')
     vim.fn.delete(r20, 'rf'); vim.fn.delete(r11, 'rf')
 end)
 
@@ -2984,6 +3005,8 @@ test('portability: lualib_verdict decides data-stage names, and only those (CART
     eq(nil, (V(from, { version = '2.0.77', globals = {}, globals_open = 'x' }, 'oldg',
         { 'data.lua' }, data)), 'unless the target\'s global SET is open')
     eq(nil, (V(nil, to, 'zz.y', { 'data.lua' }, data)), 'a root no lualib defines: no say')
+    local _, sd = V(from, to, 'ccd.create', { 'data.lua' }, data, { ccd = { create = true } })
+    eq(true, sd.shim, 'a key the project writes itself is its own definition')
     -- THE STAGE GATE: these globals do not exist at runtime
     eq(nil, (V(from, to, 'ccd.create', { 'control.lua' },
         { ['control.lua'] = { runtime = true } })), 'a runtime file is not judged')
@@ -2992,6 +3015,19 @@ test('portability: lualib_verdict decides data-stage names, and only those (CART
     eq(nil, (V(from, to, 'ccd.create', { 'data.lua' }, nil)), 'no partition, no verdict')
     eq(nil, (V(from, to, 'ccd.create', { 'o.lua' }, { ['o.lua'] = {} })),
         'a file placed in NO stage is not a data-stage file')
+    -- COMPLETENESS: no absence from an incomplete artifact, no presence from a MAYBE
+    local inc = vim.deepcopy(to); inc.incomplete = { 'x.lua: y' }
+    eq('lualib-unadjudicable', (V(from, inc, 'ccd.create', { 'data.lua' }, data)))
+    eq(nil, (V(from, inc, 'oldg', { 'data.lua' }, data)), 'nor a whole global gone')
+    local mb = vim.deepcopy(to)
+    mb.globals.ccd.members.create = true; mb.globals.ccd.maybe_members = { create = true }
+    eq('lualib-unadjudicable', (V(from, mb, 'ccd.create', { 'data.lua' }, data)),
+        'a key only a maybe-loaded file writes is not SUPPLIED')
+    mb.globals.newg.maybe = true
+    eq('lualib-unadjudicable', (V(from, mb, 'newg', { 'data.lua' }, data)))
+    local fm = vim.deepcopy(from); fm.globals.ccd.maybe_members = { create = true }
+    eq('lualib-absent', (V(fm, to, 'ccd.create', { 'data.lua' }, data)),
+        'an origin that only MAYBE had it proves no removal; the target\'s absence stands')
 end)
 
 test('portability: a 1.1 mod\'s circuit_connector_definitions.create is REMOVED once both lualibs are distilled (CART-0651)', function ()
@@ -3056,6 +3092,20 @@ test('portability: a 1.1 mod\'s circuit_connector_definitions.create is REMOVED 
         ok(row and row.lualib and row.lualib.verdict == 'lualib-removed',
             'portability_move_calls returns the row: ' .. vim.inspect(env.result or env))
         eq(1, env.subject.lualib_lost)
+        -- A LOCAL SHIM is the project's own definition: the requirement set excludes
+        -- it, so no lualib verdict may call it work — both spellings
+        for _, shim in ipairs({
+            'function circuit_connector_definitions.create(a, b) return {} end\n',
+            'circuit_connector_definitions.create = circuit_connector_definitions.create_vector\n' }) do
+            w('prototypes/shim.lua', shim)
+            w('data.lua', 'require("prototypes.shim")\nrequire("prototypes.entity")\n')
+            store.ingest(ts.extract(mod))
+            local _, bs = audit()
+            local e = bs['circuit_connector_definitions.create']
+            local r = e and e.reason
+            ok(r ~= 'lualib-removed' and r ~= 'lualib-absent',
+                'a shim is no porting work (' .. tostring(r) .. '): ' .. shim)
+        end
     end)
     pm.ONDEMAND = saved
     for _, d in ipairs({ od, r20, r11, mod }) do vim.fn.delete(d, 'rf') end

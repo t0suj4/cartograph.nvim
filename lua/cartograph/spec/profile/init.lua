@@ -14,7 +14,10 @@ local validity = require 'cartograph.validity'
 --- input the user has and the release does not ship — a game install's data-stage
 --- lualib — are written here, outside the repo, and found after the shipped ones.
 --- A shipped artifact of the same name wins.
-M.ONDEMAND = vim.fn.stdpath('data') .. '/cartograph/profile'
+--- CARTOGRAPH_PROFILE_ONDEMAND overrides it: the test suite points it at a temp dir,
+--- so a user's distilled artifacts never change what a spec measures.
+M.ONDEMAND = os.getenv('CARTOGRAPH_PROFILE_ONDEMAND')
+    or (vim.fn.stdpath('data') .. '/cartograph/profile')
 
 --- Load the profile for a runtime (e.g. 'zig-std', 'lua-factorio'). Returns the
 --- profile table or nil. Memoized. Two artifact forms: a HAND-AUTHORED `.lua`

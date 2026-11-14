@@ -1312,7 +1312,8 @@ end
 ---                        lualib was available to say it ever existed. Breaks in the
 ---                        target unless a dependency mod supplies it — the hedge is
 ---                        that, and only that.
----   lualib-supplied      the target's lualib defines it. Counted, not work.
+---   lualib-supplied      the target's lualib defines it, or the project writes the
+---                        key itself (a local shim, `own`). Counted, not work.
 ---   lualib-unadjudicable the root IS a target data-stage global, but its members
 ---                        cannot be enumerated (an OPEN global), or neither version
 ---                        defines the member (a dependency's extension, or a call
@@ -1326,7 +1327,7 @@ end
 ---
 --- ★ THE MEMBER SET IS A UNION of every key the data stage ever writes, so only an
 --- ABSENCE from a CLOSED global is evidence; that is the only claim built on it.
-function M.lualib_verdict(lib_from, lib_to, name, files, stage_by_file)
+function M.lualib_verdict(lib_from, lib_to, name, files, stage_by_file, own)
     if not lib_to or type(name) ~= 'string' or not stage_by_file then return nil end
     local list = type(files) == 'table' and files or { files }
     if #list == 0 then return nil end
@@ -1345,18 +1346,36 @@ function M.lualib_verdict(lib_from, lib_to, name, files, stage_by_file)
         origin_lualib = lib_from and lib_from.version or nil }
     if not gt then
         -- the target does not define the root at all
-        if gf and not lib_to.globals_open then
+        if gf and not gf.maybe and not lib_to.globals_open and not lib_to.incomplete then
             d.global = true
             return 'lualib-removed', d
         end
         return nil
     end
+    -- an artifact a literal require escaped is no basis for an absence
+    if lib_to.incomplete then d.open = 'the target lualib is incomplete'; return 'lualib-unadjudicable', d end
+    -- MAYBE: defined only by a file a computed require might load — a superset for
+    -- absences, never a presence
+    if gt.maybe or (member and (gt.maybe_members or {})[member]) then
+        d.open = 'defined only in a file a computed require might load'
+        return 'lualib-unadjudicable', d
+    end
     if not member then return 'lualib-supplied', d end
     if (gt.members or {})[member] then return 'lualib-supplied', d end
+    -- A LOCAL SHIM: the project writes this key itself (`own`, from
+    -- cartograph.lualib.global_writes over its data-stage files). Its own definition
+    -- is no porting work, whatever the base game dropped.
+    if own and own[base] and own[base][member] then
+        d.shim = true
+        return 'lualib-supplied', d
+    end
     if gt.open then d.open = gt.open; return 'lualib-unadjudicable', d end
     -- the origin's set holds only keys some data-stage file really wrote, so
     -- presence there is a fact even for an open origin global
-    if gf and (gf.members or {})[member] then return 'lualib-removed', d end
+    if gf and (gf.members or {})[member] and not gf.maybe
+        and not (gf.maybe_members or {})[member] then return 'lualib-removed', d end
+    -- the origin only MAYBE had it: the target's absence stands, its history does not
+    if gf and (gf.members or {})[member] then return 'lualib-absent', d end
     if lib_from then
         d.neither = true
         return 'lualib-unadjudicable', d
@@ -1456,7 +1475,7 @@ function M.unknown_reason(prof, name, where, rctx)
     -- that global, and its own member set is the stronger evidence.
     if rctx and rctx.lib_to then
         local lv, ld = M.lualib_verdict(rctx.lib_from, rctx.lib_to, name, files,
-            rctx.stage_by_file)
+            rctx.stage_by_file, rctx.own_writes and rctx.own_writes())
         if lv then return lv, ld end
     end
     -- THE RECEIVER AXIS. Reached only after every question that is NOT about a
@@ -1832,6 +1851,24 @@ function M.audit(store, runtime, opts)
     res.receiver = { available = rctx ~= nil, why = rwhy,
         meta = rctx and rctx.meta or nil, tier = rctx and rctx.tier or nil }
     if rctx then rctx.stage_by_file = sm and sm.by_file or nil end
+    -- the keys this project writes on globals in its data-stage files — parsed ONCE,
+    -- and only when a lualib verdict actually asks (CART-0651 (b))
+    if rctx and rctx.lib_to and sm and (store.data or {}).root then
+        local memo
+        rctx.own_writes = function ()
+            if memo == nil then
+                local files = {}
+                for f, at in pairs(sm.by_file) do
+                    if at.data and f:match('%.lua$') then files[#files + 1] = f end
+                end
+                table.sort(files)
+                local ok_, w = pcall(require('cartograph.lualib').global_writes,
+                    store.data.root, files)
+                memo = ok_ and w or false
+            end
+            return memo or nil
+        end
+    end
     res.lualib = { target = rctx and rctx.lib_to and rctx.lib_to.version or nil,
         origin = rctx and rctx.lib_from and rctx.lib_from.version or nil,
         why = rctx and (rctx.lib_why or rctx.lib_from_why) or nil,

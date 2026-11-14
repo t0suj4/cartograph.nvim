@@ -33,6 +33,11 @@ export XDG_STATE_HOME
 # in the cache this time. The suite's store lives and dies with its state home.
 CARTOGRAPH_STAMPCACHE_DIR="$XDG_STATE_HOME/stamped"
 export CARTOGRAPH_STAMPCACHE_DIR
+# … and the ON-DEMAND profile directory (CART-0651): artifacts a user distilled from their own install (a game's
+# data-stage lualib) live under stdpath('data'), which the suite does not isolate; pointed here, a spec measures
+# the shipped artifacts and what it wrote itself, never what this machine happens to hold.
+CARTOGRAPH_PROFILE_ONDEMAND="$XDG_STATE_HOME/profile-ondemand"
+export CARTOGRAPH_PROFILE_ONDEMAND
 # no `exec` — the trap has to survive to clean up, and the suite's exit code
 # has to survive the trap
 trap 'rm -rf "$XDG_STATE_HOME"' EXIT
