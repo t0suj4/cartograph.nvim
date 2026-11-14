@@ -1422,6 +1422,55 @@ local function class_supers(data, spec)
     SUPERS[data] = m
     return m
 end
+--- ★ THE CLASS-CHAIN PICK (CART-2069): a class-keyed call the resolver left WITHOUT a target — an exact miss the veto
+--- did not pass — is looked up along its class's chain BY FQCN: the class, then its parents, traits and parent
+--- interfaces, level by level. A member matches CASE-INSENSITIVELY, as PHP's do (`$this->getStockService()` is
+--- BaseService::getStockservice). The nearest level with exactly one match answers; two at that level refuse (nil).
+--- It never replaces a resolution: it fills only an empty slot, and inherits the veto's own reading of the chain.
+local MEMBERS = setmetatable({}, { __mode = 'k' }) -- data -> FQCN(lower) .. '::' .. member(lower) -> { node ... }
+local function class_members(data, spec)
+    local m = MEMBERS[data]
+    if m then return m end
+    m = {}
+    local cns = data.classnames or {}
+    for _, n in ipairs(data.nodes or {}) do
+        local cls, mem = (n.name or ''):match('^([%w_]+)::([%w_]+)$')
+        if cls and n.file and cns[n.file] and (n.kind == 'method' or n.kind == 'function') then
+            local fq = class_fqcn_of(spec, cns, n.file, cls)
+            if fq then
+                local k = fq:lower() .. '::' .. mem:lower()
+                local l = m[k]; if not l then l = {}; m[k] = l end
+                l[#l + 1] = n
+            end
+        end
+    end
+    MEMBERS[data] = m
+    return m
+end
+function M._class_chain_pick(qcls, full, file, data, spec)
+    local classnames = data and data.classnames
+    if not (qcls and full and spec and spec.class_fqcn and classnames) then return nil end
+    local mem = full:match('::([%w_]+)$')
+    local fq = mem and spec.class_fqcn(qcls, classnames[file])
+    if not fq then return nil end
+    local idx, sup = class_members(data, spec), class_supers(data, spec)
+    local cur, seen = { fq:lower() }, {}
+    for _ = 1, 16 do
+        local hits, nxt = {}, {}
+        for _, c in ipairs(cur) do
+            if not seen[c] then
+                seen[c] = true
+                for _, n in ipairs(idx[c .. '::' .. mem:lower()] or {}) do hits[#hits + 1] = n end
+                for _, p in ipairs(sup[c] or {}) do nxt[#nxt + 1] = p end
+            end
+        end
+        if #hits == 1 then return hits[1] end
+        if #hits > 1 then return nil end
+        if #nxt == 0 then return nil end
+        cur = nxt
+    end
+    return nil
+end
 function M._class_veto(target, qcls, file, data, spec)
     local classnames = data and data.classnames
     if not (target and qcls and spec and spec.class_fqcn and classnames) then return nil end
@@ -10616,6 +10665,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
                     or (p.call.qcls and M._class_veto(target, p.call.qcls, p.file, data, select(2, elang_for(p.file)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
+                if not target and p.call.qcls then -- (the class-chain pick, CART-2069: fills an empty slot only)
+                    local pick = M._class_chain_pick(p.call.qcls, p.full or p.call.callee, p.file, data, select(2, elang_for(p.file)))
+                    if pick then target, inferred, refused, ext = pick, true, nil, nil end
+                end
                 -- (a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — the binder's value is
                 -- H's field, not the def: a guess, INFERRED, CART-1715)
                 if target and p.call.cba then inferred = true end
@@ -11490,6 +11543,10 @@ function M.relink(data, touched, opts)
                     or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
                     or (cget(i, 'qcls') and M._class_veto(target, cget(i, 'qcls'), cfile, data, select(2, elang_for(cfile)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
+                if not target and cget(i, 'qcls') then -- (the class-chain pick, CART-2069: fills an empty slot only)
+                    local pick = M._class_chain_pick(cget(i, 'qcls'), cfull or ccallee, cfile, data, select(2, elang_for(cfile)))
+                    if pick then target, inferred, refused, ext = pick, true, nil, nil end
+                end
                 if target and cget(i, 'cba') then inferred = true end -- (a same-name field alias: a guess, CART-1715)
                 if target and cget(i, 'crk') and target.drk and cget(i, 'crk') ~= target.drk then inferred = true end -- (another binding of the root)
             end

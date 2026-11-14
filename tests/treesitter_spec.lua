@@ -7016,3 +7016,46 @@ test('php: an explicit static call T::m() resolves into the class it names (CART
          'T::s T -> T::s',                    -- a short member resolves once it is qualified
          'U::make \\App\\A\\U -> U::make' }, got)
 end)
+
+-- CART-2069. php method names are CASE-INSENSITIVE, and a class-keyed call the resolver leaves without a target walks
+-- its class's chain BY FQCN (class, parents, traits, parent interfaces) for a member matching case-insensitively — the
+-- nearest level with exactly one match answers, two at one level refuse. It only fills an empty slot. An inherited
+-- constructor is reached the same way. Extract and relink agree.
+test('php: a class-keyed call with no target walks its class chain, case-insensitively (CART-2069)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, lines)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$'); vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    w('src/Base.php', { '<?php', 'namespace App;',
+        'class BaseService { protected function getStockservice() {} public function __construct() {} }',
+        'class Other { protected function getStockService() {} }',     -- the wrong, exact-case match elsewhere
+        'trait T1 { public function dup() {} }', 'trait T2 { public function dup() {} }' })
+    w('src/Calendar.php', { '<?php', 'namespace App;', 'class Calendar extends BaseService {', '  use T1, T2;',
+        '  public function run() { $this->getStockService(); $this->RUN2(); $this->dup(); }',
+        '  public function run2() {}', '}', 'function mk() { return new Calendar(); }' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local function targets(d)
+        local t = {}
+        for _, c in ipairs(d.calls or {}) do
+            if c.file == 'src/Calendar.php' then
+                t[#t + 1] = ('%s -> %s'):format(tostring(c.full), c.to and c.to:match('::([%w_]+::[%w_]+)@') or 'nil')
+            end
+        end
+        table.sort(t)
+        return t
+    end
+    local want = {
+        'Calendar::RUN2 -> Calendar::run2',                       -- same class, another case
+        'Calendar::__construct -> BaseService::__construct',      -- an inherited constructor
+        'Calendar::dup -> nil',                                   -- two traits at one level: refused
+        'Calendar::getStockService -> BaseService::getStockservice', -- the chain's, not Other's exact-case one
+    }
+    eq(want, targets(data))
+    local rd = vim.deepcopy(data)
+    for _, c in ipairs(rd.calls) do c.to, c.refused, c.inferred = nil, nil, nil end
+    ts.relink(rd)
+    eq(want, targets(rd), 'relink agrees')
+end)
