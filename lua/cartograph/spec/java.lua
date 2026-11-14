@@ -384,6 +384,21 @@ local function jvt_params(node, src, out) -- name -> {ty}
     end
 end
 local function jvt_fields(node, src, out) -- name -> {ty}
+    -- (a RECORD's components are fields of its body's scope, typed by their declaration — `sig.methodName()` inside
+    -- `record Key(String className, Sig sig)` reads Sig's accessor, CART-2068)
+    local rec = node:parent()
+    if rec and rec:type() == 'record_declaration' then
+        local ps = rec:field('parameters')[1]
+        for _, p in (ps and inext or NOOP), ps, -1 do
+            if p:type() == 'formal_parameter' then
+                local nm = p:field('name')[1]
+                if nm then
+                    local sr, _, er = p:range()
+                    out[node_text(nm, src)] = { ty = java_base_type(p:field('type')[1], src), at = sr, ate = er }
+                end
+            end
+        end
+    end
     for _, c in inext, node, -1 do
         if c:type() == 'field_declaration' then
             local ty = java_base_type(c:field('type')[1], src)
@@ -651,6 +666,22 @@ local function java_scan_fields(tsroot, src)
                 elseif JAVA_TYPE_DECLS[t] then decl(c) end -- nested types own their fields
             end
         end
+        -- (a RECORD's components are its fields, typed by their declaration: `methodSignature.methodName()` inside
+        -- `record MethodKey(String className, MethodSignature methodSignature)` reads MethodSignature's accessor — it
+        -- had no field row, and the call was name-matched to MethodKey's own methodName, CART-2068)
+        if owner and n:type() == 'record_declaration' then
+            local ps = n:field('parameters')[1]
+            for _, p in (ps and inext or NOOP), ps, -1 do
+                if p:type() == 'formal_parameter' then
+                    local ty, pn = java_base_type(p:field('type')[1], src), p:field('name')[1]
+                    if ty and ty ~= 'var' and pn then
+                        local fq = imports[ty]
+                        if fq and (fq:match('^java%.') or fq:match('^javax%.') or fq:match('^jdk%.')) then ty = fq end
+                        rows[#rows + 1] = { typename = owner, field = node_text(pn, src), ftype = ty }
+                    end
+                end
+            end
+        end
         members(body)
     end
     for _, c in inext, tsroot, -1 do
@@ -794,6 +825,41 @@ local JAVA_GUARDS = {
     -- the memo CALL: `cache.computeIfAbsent(k, f)` / `putIfAbsent` fills an absent key only (CART-1585)
     rhs_setonce = function (top, src) return java_memo_call(top:parent(), top, src) end,
 }
+
+-- ★ A RECORD COMPONENT'S ACCESSOR IS A METHOD (CART-2068): `record Descriptor(String className, String methodName)` declares
+-- `className()` and `methodName()` with no method_declaration, so the record had no member nodes: a typed call
+-- `item.methodName()` found no Descriptor::methodName and the name join landed it on an unrelated class's member
+-- (libs DynamicInstrumentationTests.java:56 -> MethodKey::methodName, witnessed by fabcensus's typed pin). Each
+-- component mints `Record::component`, unless the body declares that accessor itself (a zero-parameter method of the
+-- same name — then the real node stands).
+local function java_synth_defs(tsroot, src)
+    local out = {}
+    local function walk(n)
+        if n:type() == 'record_declaration' then
+            local nm, ps, body = n:field('name')[1], n:field('parameters')[1], n:field('body')[1]
+            if nm and ps then
+                local declared = {}
+                for _, d in (body and inext or function () end), body, -1 do
+                    if d:type() == 'method_declaration' then
+                        local mn, mp = d:field('name')[1], d:field('parameters')[1]
+                        if mn and mp and mp:named_child_count() == 0 then declared[node_text(mn, src)] = true end
+                    end
+                end
+                local rec = node_text(nm, src)
+                for _, p in inext, ps, -1 do
+                    if p:type() == 'formal_parameter' then
+                        local pn = p:field('name')[1]
+                        local comp = pn and node_text(pn, src)
+                        if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn } end
+                    end
+                end
+            end
+        end
+        for _, c in inext, n, -1 do if c:named() then walk(c) end end
+    end
+    walk(tsroot)
+    return out
+end
 
 return {
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
@@ -1138,6 +1204,7 @@ return {
     --   iface_bean(decl, src) — at extraction: the class's bean name (explicit or `true`), nil if not a candidate
     --   iface_markers         — at resolution: interfaces whose transitive sub-interfaces draw from ALL implementers
     iface_bean = java_bean_name,
+    synth_defs = java_synth_defs, -- (a record component's implicit accessor, CART-2068)
     iface_markers = JAVA_SERVICE_MARKERS,
     entry_names = { main = true },
     -- An annotation registers the member iff its NAME says so — see

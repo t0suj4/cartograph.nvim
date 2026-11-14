@@ -6672,13 +6672,16 @@ test('parallel parity: a registration only a slice could resolve does not surviv
     for _, e in ipairs(acc2.edges) do if e.kind == 'reg' and e.from == 'main.lua' then kept = e end end
     ok(kept, 'the registration with another occurrence survives')
     eq({ 2 }, vim.tbl_map(function (a) return a.start.line end, kept.at)) -- and only that occurrence
-    -- ★ AND A METHOD, which the name index holds under its QUALIFIED name only (the bare name is in `tail`): the
-    -- elasticsearch shape — a record's compact constructor passes its component `total`, and a method total() exists in
-    -- one other class of the slice and a third class outside it (a name under three characters never upgrades)
+    -- ★ AND A METHOD, which the name index holds under its QUALIFIED name only (the bare name is in `tail`): a
+    -- call passes an UNBOUND name `total`, and a method total() exists in one other class of the slice and a third
+    -- class outside it (a name under three characters never upgrades). (It was a RECORD's compact constructor passing
+    -- its component — the elasticsearch shape — until CART-2068 made a record's components bound fields with their own
+    -- accessors: that name is no longer a candidate for another class's method at all. The relink mechanism is kept
+    -- with a name the record does NOT declare)
     if not has_parser('java') then return end
     local jroot = vim.fn.tempname(); vim.fn.mkdir(jroot, 'p')
     local function jput(f, t) local fd = assert(io.open(jroot .. '/' .. f, 'w')); fd:write(t); fd:close() end
-    jput('R.java', 'import java.util.Objects;\npublic record R(int total) {\n    public R {\n        Objects.requireNonNull(total);\n    }\n}\n')
+    jput('R.java', 'import java.util.Objects;\npublic record R(int count) {\n    public R {\n        Objects.requireNonNull(total);\n    }\n}\n')
     jput('A.java', 'public class A {\n    public int total() { return 1; }\n}\n')
     jput('B.java', 'public class B {\n    public int total() { return 2; }\n}\n')
     local jseq = ts.extract(jroot)
@@ -7058,4 +7061,39 @@ test('php: a class-keyed call with no target walks its class chain, case-insensi
     for _, c in ipairs(rd.calls) do c.to, c.refused, c.inferred = nil, nil, nil end
     ts.relink(rd)
     eq(want, targets(rd), 'relink agrees')
+end)
+
+-- CART-2068. A Java record component's implicit accessor is a method: `record Descriptor(String className, String
+-- methodName)` mints Descriptor::methodName (not className, whose accessor the body declares itself), so a typed call
+-- `item.methodName()` resolves into the record instead of a name match on an unrelated class. And a record's components
+-- are its typed fields: `this.sig.methodName()` reads Sig's accessor.
+test('java: a record component mints its implicit accessor and types its field (CART-2068)', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, lines)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$'); vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    w('src/c/Utils.java', { 'package c;', 'public class Utils {', '  static int load() { return 1; }',
+        '  record Descriptor(String className, String methodName) { public String className() { return "x"; } }', '}' })
+    w('src/c/Sig.java', { 'package c;', 'public record Sig(String methodName) {}' })
+    w('src/c/Key.java', { 'package c;', 'public record Key(String className, Sig sig) {',
+        '  public String methodName() { return this.sig.methodName(); }', '}' })
+    w('src/k/Other.java', { 'package k;', 'public class Other { public String methodName() { return "k"; } }' })
+    w('src/c/T.java', { 'package c;', 'import c.Utils.Descriptor;', 'public class T {',
+        '  boolean f(Descriptor item) { return item.methodName() != null && item.className() != null; }', '}' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local synth, named = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.name and n.name:match('^Descriptor::') then named[n.name] = (named[n.name] or 0) + 1; if n.synth then synth[n.name] = true end end
+    end
+    eq(true, synth['Descriptor::methodName'], 'the implicit accessor is minted')
+    eq(1, named['Descriptor::className'], 'a DECLARED accessor is not minted twice')
+    ok(not synth['Descriptor::className'], 'and the declared one is the real node')
+    local to = {}
+    for _, c in ipairs(data.calls) do if c.full then to[c.file .. ' ' .. c.full] = c.to and c.to:match('::([%w_]+::[%w_]+)@') end end
+    eq('Descriptor::methodName', to['src/c/T.java Descriptor::methodName'], 'the typed call lands in the record, not Other')
+    eq('Descriptor::className', to['src/c/T.java Descriptor::className'])
+    eq('Sig::methodName', to['src/c/Key.java Sig::methodName'], 'a record component is a typed field')
 end)
