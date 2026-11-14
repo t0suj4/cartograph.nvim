@@ -1378,6 +1378,71 @@ function M._nested_unseen(t2, fnid, parent_fn)
 end
 --- the bare CALL's veto (CART-1602): a callee bound at its site resolves to no function but the def its binder
 --- declares -> the fn-value refusal, or nil
+--- ★ THE CLASS VETO (CART-0735): a call whose key names a class (`T::m`, `T::__construct`) resolves into a target
+--- only when the two are the SAME CLASS by the language's own name rules — the call's class as written, read through
+--- the CALLING file's namespace and `use` aliases, against the target class in ITS file's namespace. A definition key
+--- is a bare class name, so the lookup alone bound `new Request()` to the project's Request while the file uses
+--- Symfony's. A mismatch, or a name either side cannot decide (a multi-namespace file), refuses: the veto only ever
+--- turns an edge into a refusal, it never picks one.
+--- AN INHERITED METHOD IS ADMITTED through the class's SUPERTYPE CHAIN, read by the same rules: `$this->save()` in
+--- `class Product extends BaseModel` (`use App\Base\Model as BaseModel`) reaches App\Base\Model::save — each
+--- data.extends row's parent, as written, resolved through ITS file's names — and its TRAITS (`use Helps;` in the class
+--- body, recorded in the file's names), whose methods are the class's.
+local function class_fqcn_of(spec, classnames, file, cls)
+    local cn = classnames[file]
+    return cn and spec.class_fqcn(cls, { ns = cn.ns, alias = {}, multi = cn.multi }) -- (a DECLARED class: its own ns)
+end
+local SUPERS = setmetatable({}, { __mode = 'k' }) -- data -> FQCN(lower) -> { parent FQCN(lower) ... }
+local function class_supers(data, spec)
+    local m = SUPERS[data]
+    if m then return m end
+    m = {}
+    local cns = data.classnames or {}
+    for _, e in ipairs(data.extends or {}) do
+        local c = e.child and class_fqcn_of(spec, cns, e.file, e.child)
+        local p = e.parent and spec.class_fqcn(e.written or e.parent, cns[e.file])
+        if c and p then
+            local l = m[c:lower()]; if not l then l = {}; m[c:lower()] = l end
+            l[#l + 1] = p:lower()
+        end
+    end
+    -- (and each class's TRAITS, recorded with its file's names: a trait's method is the class's)
+    for f, cn in pairs(cns) do
+        for cls, list in pairs(cn.traits or {}) do
+            local c = class_fqcn_of(spec, cns, f, cls)
+            for _, tw in ipairs(list) do
+                local p = c and spec.class_fqcn(tw, cn)
+                if p then
+                    local l = m[c:lower()]; if not l then l = {}; m[c:lower()] = l end
+                    l[#l + 1] = p:lower()
+                end
+            end
+        end
+    end
+    SUPERS[data] = m
+    return m
+end
+function M._class_veto(target, qcls, file, data, spec)
+    local classnames = data and data.classnames
+    if not (target and qcls and spec and spec.class_fqcn and classnames) then return nil end
+    local fq = spec.class_fqcn(qcls, classnames[file])
+    local cls = (target.name or ''):match('^([%w_]+)::')
+    local tq = cls and class_fqcn_of(spec, classnames, target.file, cls)
+    if fq and tq then
+        local want, cur, seen = tq:lower(), { fq:lower() }, {}
+        local sup = class_supers(data, spec)
+        for _ = 1, 16 do -- (a chain deeper than 16, or a cycle, decides nothing more)
+            local nxt = {}
+            for _, c in ipairs(cur) do
+                if c == want then return nil end
+                if not seen[c] then seen[c] = true; for _, p in ipairs(sup[c] or {}) do nxt[#nxt + 1] = p end end
+            end
+            if #nxt == 0 then break end
+            cur = nxt
+        end
+    end
+    return tsutil.refusal('blocked', { target })
+end
 function M._callee_veto(target, cb, cbe, full, file)
     if not (target and cb and not full) or not M._bound_veto(cb, cbe, target, file) then return nil end
     return tsutil.refusal('fn-value', { target })
@@ -8609,8 +8674,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             local t = node_text(parentn, src)
             local parent = t:match('[^\\]+$') or t
             data.extends = data.extends or {}
+            -- (`written`: the parent AS WRITTEN when it differs — `\Base_Handler`, `A\B` — so a language's class rules
+            -- can read it through the file's names: php's class veto walks the chain by FQCN, CART-0735)
             data.extends[#data.extends + 1] =
-                { child = child, parent = parent, file = file }
+                { child = child, parent = parent, file = file, written = t ~= parent and t or nil }
         end
         -- V2 cut 2: a `setmetatable(_, {__index = C})` ANYWHERE (any first arg,
         -- incl. the anonymous `setmetatable({}, …)` return form) records C + its
@@ -8638,6 +8705,12 @@ local MATCH_OPTS = { match_limit = 65536 }
             if not fb then fb = {}; data.ctorbinds[file] = fb end
             local b = fb[lv]
             if not b then fb[lv] = { callee = callee, n = 1 } else b.n = b.n + 1 end
+        end
+        -- (a file's namespace + `use` aliases, where the language declares them: the class veto reads a qualified
+        -- call's class by the CALLING file's names, and its target's by the target file's — CART-0735)
+        if spec.class_names then
+            local cn = spec.class_names(tsroot, src)
+            if cn then data.classnames = data.classnames or {}; data.classnames[file] = cn end
         end
         local combined = spec._defs_query
         if combined == nil then
@@ -9103,10 +9176,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- may rewrite the resolution key to Class::name —
                     -- exact match beats every tail fallback; inheritance
                     -- still falls through to tails
-                    local qhedge, qdefer, qqual
+                    local qhedge, qdefer, qqual, qcls
                     if spec.qualify_call then
-                        local q, h, d, qn = spec.qualify_call(calln, full, src, jvt_sm)
-                        full, qhedge, qdefer, qqual = q or full, h, d, qn
+                        local q, h, d, qn, qc = spec.qualify_call(calln, full, src, jvt_sm)
+                        full, qhedge, qdefer, qqual, qcls = q or full, h, d, qn, qc
                     end
                     -- ★ A STRING RECEIVER MAKES IT THE STDLIB'S (CART-1062): `('%s'):format(x)` keys `string.format`,
                     -- which the spec's stdlib prefixes answer as external — instead of the name-match landing it on
@@ -9505,6 +9578,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                             or (spec.local_ret and spec.local_ret(calln, src)) or nil,
                         qualifier = qqual, -- @Qualifier bean name on the
                         -- receiver field (resolve_interface narrows on it)
+                        qcls = qcls, -- the class AS WRITTEN that the key names (php, CART-0735: the class veto)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         -- identifier receiver (`x.foo`): the local name, for
@@ -10540,6 +10614,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
                     or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
+                    or (p.call.qcls and M._class_veto(target, p.call.qcls, p.file, data, select(2, elang_for(p.file)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 -- (a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — the binder's value is
                 -- H's field, not the def: a guess, INFERRED, CART-1715)
@@ -11413,6 +11488,7 @@ function M.relink(data, touched, opts)
                 end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
                     or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
+                    or (cget(i, 'qcls') and M._class_veto(target, cget(i, 'qcls'), cfile, data, select(2, elang_for(cfile)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if target and cget(i, 'cba') then inferred = true end -- (a same-name field alias: a guess, CART-1715)
                 if target and cget(i, 'crk') and target.drk and cget(i, 'crk') ~= target.drk then inferred = true end -- (another binding of the root)

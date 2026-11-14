@@ -92,6 +92,9 @@ M.SLOTS = {
     -- version decides what an escape means (the extractor's argument reader, flowtype's keys — CART-2026, CART-2027)
     string_value = 'SCOPE&KEY',
     qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY', qualified_external = 'SCOPE&KEY',
+    -- (CART-0735) a file's namespace + `use` aliases + trait uses, and the language's class-name rule over them: the
+    -- resolver's class veto compares a class-keyed call's class with its target's by these
+    class_names = 'SCOPE&KEY', class_fqcn = 'SCOPE&KEY',
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection

@@ -4,7 +4,7 @@ namespace App\Controller;
 
 use App\Service\Renderer;
 
-class ProductController extends Base_Handler
+class ProductController extends \Base_Handler
 {
     public function __construct()
     {

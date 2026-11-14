@@ -20,6 +20,128 @@ local unparen = tsutil.unparen
 -- fileset (weak keys: dies with the fileset, workers build their own)
 local PHP_BASENAMES = setmetatable({}, { __mode = 'k' })
 
+-- ── CLASS NAMES BY PHP'S OWN RULES (CART-0735) ───────────────────────────────────────────────────────────────────
+-- A definition key is a BARE class name (`Request::m`), so a qualified call bound to whichever project class carries
+-- that short name: `new Request()` reached Sylius\Behat\Client\Request while the file says `use Symfony\Component\
+-- HttpFoundation\Request` (4.1% of sylius's resolved `new`, 25 of them a vendor class). PHP decides a class name from
+-- the CALLING file: a leading `\` is literal; an unqualified name goes through the file's `use` aliases, else the
+-- file's namespace (no global fallback for classes); a qualified `A\B` resolves its first segment the same way.
+-- `use function` / `use const` bind no class; a group `use A\{B, C as D}` binds each member. A file with several
+-- namespaces, or a braced one, is not read (`multi`): its names are not decided.
+local function php_class_names(root, src)
+    local ns, nsn, braced, alias, traits = '', 0, false, {}, nil
+    for _, c in inext, root, -1 do
+        local t = c:type()
+        -- (a class's or trait's TRAIT uses — `use Helps;` in its body — as written: a trait's methods are the class's,
+        -- so the class veto walks them like a supertype. Not data.extends: build_super reads a second parent there as
+        -- a name collision and drops the class's whole chain)
+        if t == 'class_declaration' or t == 'trait_declaration' then
+            local nm, body = c:field('name')[1], c:field('body')[1]
+            if nm and body then
+                for _, d in inext, body, -1 do
+                    if d:type() == 'use_declaration' then
+                        for _, u in inext, d, -1 do
+                            local ut = u:type()
+                            if ut == 'name' or ut == 'qualified_name' then
+                                traits = traits or {}
+                                local k = node_text(nm, src):lower()
+                                local l = traits[k]; if not l then l = {}; traits[k] = l end
+                                l[#l + 1] = node_text(u, src)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if t == 'namespace_definition' then
+            nsn = nsn + 1
+            if c:field('body')[1] then braced = true end
+            local nm = c:field('name')[1]
+            ns = nm and node_text(nm, src) or ''
+        elseif t == 'namespace_use_declaration' then
+            do -- (`use function` / `use const`: the keyword is a child of each CLAUSE, which clause() refuses)
+                local prefix = ''
+                for _, k in inext, c, -1 do
+                    if k:type() == 'namespace_name' then prefix = node_text(k, src) .. '\\' end
+                end
+                local function clause(cl)
+                    local al, q = cl:field('alias')[1], nil
+                    for _, k in inext, cl, -1 do
+                        local kt = k:type()
+                        if not k:named() and (kt == 'function' or kt == 'const') then return end
+                        if (kt == 'qualified_name' or kt == 'name') and not (al and k:equal(al)) then q = q or k end
+                    end
+                    if not q then return end
+                    local full = (prefix .. node_text(q, src)):gsub('^\\', '')
+                    local short = al and node_text(al, src) or full:match('([^\\]+)$')
+                    if short then alias[short:lower()] = full end
+                end
+                for _, k in inext, c, -1 do
+                    if k:type() == 'namespace_use_clause' then clause(k)
+                    elseif k:type() == 'namespace_use_group' then
+                        for _, g in inext, k, -1 do if g:type() == 'namespace_use_clause' then clause(g) end end
+                    end
+                end
+            end
+        end
+    end
+    if nsn > 1 or braced then return { multi = true } end
+    return { ns = ns, alias = alias, traits = traits }
+end
+-- the fully qualified name of class `cls` (as written) seen from a file whose names are `cn`; nil when undecided
+local function php_class_fqcn(cls, cn)
+    if not (cls and cn) or cn.multi then return nil end
+    if cls:sub(1, 1) == '\\' then return cls:sub(2) end
+    local pre = (cn.ns or '') ~= '' and (cn.ns .. '\\') or ''
+    local first, rest = cls:match('^([^\\]+)\\(.+)$')
+    if first then
+        local a = cn.alias[first:lower()]
+        return a and (a .. '\\' .. rest) or (pre .. cls)
+    end
+    return cn.alias[cls:lower()] or (pre .. cls)
+end
+
+-- the KEY's class for a name as written: the last segment of its FQCN — an ALIAS (`use A\\Thing as T`) names Thing,
+-- whose definition key is `Thing::m`, not `T::m`. The file's names are read once per source (the calls of one file
+-- are qualified in a row)
+local CN_SRC, CN_VAL
+local function php_key_class(node, src, written)
+    if CN_SRC ~= src then CN_SRC, CN_VAL = src, php_class_names(node:tree():root(), src) end
+    local fq = php_class_fqcn(written, CN_VAL)
+    return ((fq or written):match('[^\\]+$')) or written
+end
+
+-- the class a self / parent form names from `node`: (bare key name, the name as written) — the enclosing class / trait
+-- / interface for 'self', the class its base_clause names for 'parent'; nil when there is none
+local function php_enclosing(node, src, kind)
+    local p2 = node:parent()
+    while p2 do
+        local tt = p2:type()
+        if tt == 'class_declaration' or tt == 'trait_declaration' or tt == 'interface_declaration' then
+            if kind == 'self' then
+                local cn = p2:field('name')[1]
+                if not cn then return nil end
+                local c = node_text(cn, src)
+                return c, c
+            end
+            for _, c in inext, p2, -1 do
+                if c:type() == 'base_clause' then
+                    for _, pc in inext, c, -1 do
+                        local pt = pc:type()
+                        if pt == 'name' or pt == 'qualified_name' then
+                            local ptxt = node_text(pc, src)
+                            -- (PSR-0 Mage_Core_X has no '\\': it stays whole; an alias names its real class)
+                            return php_key_class(pc, src, ptxt), ptxt
+                        end
+                    end
+                end
+            end
+            return nil
+        end
+        p2 = p2:parent()
+    end
+end
+
 local function php_is_write(c, n)
     local cur, p = c, n
     if p:type() == 'variable_name' then      -- $x: unwrap the sigil
@@ -273,7 +395,12 @@ return {
         (function_call_expression function: (variable_name) @name) @call
         (member_call_expression name: (variable_name) @name) @call
         (scoped_call_expression name: (variable_name) @name) @call
+        (object_creation_expression [(name) (qualified_name) (variable_name)] @name) @call
     ]=],
+    -- (CART-0735: a file's namespace + `use` aliases, recorded at extraction — data.classnames — and the FQCN rule over
+    -- them; the resolver's class veto compares a call's class with its target's by these)
+    class_names = php_class_names,
+    class_fqcn = php_class_fqcn,
     -- ── CART-0734: VARIABLE DISPATCH WAS INVISIBLE, NOT DYNAMIC ─────────────
     -- The `member_call_expression` / `scoped_call_expression` patterns above
     -- used to require `name: (name)`, so `$obj->$method()` and `$obj::$method()`
@@ -365,8 +492,22 @@ return {
     -- class has a __construct, so a bare parent::__construct tail-
     -- matches ALL of them (2313 candidates in magento) and refuses.
     qualify_call = function (calln, name, src)
+        local t = calln:type()
+        -- ★ `new T()` CALLS T's CONSTRUCTOR (CART-0735). It recorded nothing at all, so every __construct read as
+        -- uncalled and every `new` was a dependency the graph lacked. `full` names the member, so the exact lookup
+        -- finds T::__construct; the 5th value is the class AS WRITTEN, which the resolver's class veto reads through
+        -- the file's `use` table. `new $cls()` is runtime state: left dynamic.
+        if t == 'object_creation_expression' then
+            if name:sub(1, 1) == '$' then return nil end
+            if name == 'self' or name == 'static' or name == 'parent' then
+                local cls, written = php_enclosing(calln, src, name == 'parent' and 'parent' or 'self')
+                if not cls then return nil end
+                return cls .. '::__construct', nil, nil, nil, written
+            end
+            return php_key_class(calln, src, name) .. '::__construct', nil, nil, nil, name
+        end
         if name:find(':', 1, true) then return nil end
-        local t, kind = calln:type(), nil
+        local kind
         if t == 'member_call_expression' then
             local o = calln:field('object')[1]
             if o and o:type() == 'variable_name'
@@ -381,42 +522,12 @@ return {
             end
         end
         if not kind then return nil end
-        local p2 = calln:parent()
-        while p2 do
-            local tt = p2:type()
-            if tt == 'class_declaration' or tt == 'trait_declaration'
-                or tt == 'interface_declaration' then
-                if kind == 'self' then
-                    local cn = p2:field('name')[1]
-                    return cn and (node_text(cn, src)
-                        .. '::' .. name) or nil
-                end
-                -- parent::m — resolve to the superclass named by the
-                -- enclosing class's base_clause. A trait has no
-                -- base_clause (its parent is the using class, unknown
-                -- here) → decline and stay a refusal. When the direct
-                -- parent only INHERITS m (no exact Parent::m def), the
-                -- name falls through to the tail path unchanged — no
-                -- worse than today, honest about the chain we can't walk.
-                for _, c in inext, p2, -1 do
-                    if c:type() == 'base_clause' then
-                        for _, pc in inext, c, -1 do
-                            local pt = pc:type()
-                            if pt == 'name' or pt == 'qualified_name' then
-                                -- def keys use the bare class name; take
-                                -- the last namespace segment (\App\Foo→Foo;
-                                -- PSR-0 Mage_Core_X has no '\' → stays whole)
-                                local ptxt = node_text(pc, src)
-                                return (ptxt:match('[^\\]+$') or ptxt)
-                                    .. '::' .. name
-                            end
-                        end
-                    end
-                end
-                return nil
-            end
-            p2 = p2:parent()
-        end
+        -- self:: / $this-> name a method of the ENCLOSING class; parent:: the superclass its base_clause names. A trait
+        -- has no base_clause (its parent is the using class, unknown here): declined, a refusal. Def keys use the BARE
+        -- class name; the 5th value keeps the name as written for the class veto (CART-0735)
+        local cls, written = php_enclosing(calln, src, kind)
+        if not cls then return nil end
+        return cls .. '::' .. name, nil, nil, nil, written
     end,
     mention_types = { name = true },
     -- OO extends: child class -> superclass name (bare last segment,
@@ -470,6 +581,9 @@ return {
     ]=],
     resolve_import = function (path, files, from)
         path = path:gsub('^["\']', ''):gsub('["\']$', '')
+        -- (a leading `\` only says FULLY QUALIFIED: `extends \Base_Handler` names the global Base_Handler, whose PSR-0
+        -- file is Base/Handler.php — with the `\` kept, the underscore form was never tried, CART-0735)
+        path = path:gsub('^\\', '')
         -- a namespaced class (use App\X, extends \App\X) or a PSR-0
         -- underscore class (extends Mage_Core_Model_Abstract): both
         -- name a file by convention. PSR-4 roots REMAP prefixes

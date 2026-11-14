@@ -288,6 +288,11 @@ local function merge_chunk(s, chunk)
     for f, fb in pairs(chunk.fieldalias or {}) do
         if not seen[f] then acc.fieldalias[f] = fb end
     end
+    -- classnames (CART-0735): a file's namespace + `use` aliases — per-file overlay
+    acc.classnames = acc.classnames or {}
+    for f, cn in pairs(chunk.classnames or {}) do
+        if not seen[f] then acc.classnames[f] = cn end
+    end
     acc.smtclasses = acc.smtclasses or {}
     for f, fs in pairs(chunk.smtclasses or {}) do
         if not seen[f] then acc.smtclasses[f] = fs end

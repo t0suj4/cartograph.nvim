@@ -6851,3 +6851,72 @@ test('treesitter: a string argument is its value - marked delimiters off, common
     if lu then eq({ 'long', 'a\tb', 'q' }, lu, 'lua: a long string is its content') end
     if not (py or rb or js or lu) then skip('no parser') end
 end)
+
+-- CART-0735. `new T()` calls T::__construct (php recorded no call at all), and a php call whose key names a class resolves
+-- only into the SAME class by PHP's rules: the class as written, read through the calling file's namespace + `use`
+-- aliases, against the target class in its own file's namespace. A definition key is a bare class name, so a short-name
+-- match bound a vendor `Request` to the project's. An inherited method, and a trait's, are admitted through the
+-- supertype chain. The extract and the relink path agree.
+test('php: `new T()` calls T::__construct, and a class-keyed call resolves only into the class PHP would load (CART-0735)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, lines)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$'); vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    w('src/Behat/Request.php', { '<?php', 'namespace App\\Behat;', 'class Request { public function __construct() {} }' })
+    w('src/Other/Thing.php', { '<?php', 'namespace App\\Other;', 'class Thing { public function __construct() {} }' })
+    w('src/Base/Model.php', { '<?php', 'namespace App\\Base;', 'class Model { public function __construct() {} public function save() {} }' })
+    w('src/Shop/Local.php', { '<?php', 'namespace App\\Shop;', 'class Local { public function __construct() {} }' })
+    w('src/Shop/Use1.php', { '<?php', 'namespace App\\Shop;',
+        'use Symfony\\Component\\HttpFoundation\\Request;', -- a VENDOR class sharing the project's short name
+        'use App\\Other\\Thing as T; use function App\\Behat\\Local;', -- a FUNCTION import binds no class name
+        'class Use1 { public function a() {',
+        '  $r = new Request();',          -- vendor: refused, never App\Behat\Request
+        '  $t = new T();',                -- alias: App\Other\Thing
+        '  $l = new Local();',            -- same namespace, no use
+        '  $x = new \\App\\Behat\\Request();', -- fully qualified
+        '  $o = new Thing();',            -- App\Shop\Thing: no such class, refused
+        '} }' })
+    w('src/Shop/Product.php', { '<?php', 'namespace App\\Shop;',
+        'use App\\Base\\Model as BaseModel;', 'use App\\Other\\{Thing, Missing as M2};',
+        'trait Helps { public function assist() {} }',
+        'class Product extends BaseModel { use Helps;',
+        '  public function __construct() { parent::__construct(); $this->save(); $this->assist(); new Thing(); }',
+        '}' })
+    local data = ts.extract(root)
+    local function row(d, file, line)
+        local out = {}
+        for _, c in ipairs(d.calls or {}) do
+            if c.file == file and c.line == line then out[#out + 1] = c end
+        end
+        return out
+    end
+    local function targets(d)
+        local t = {}
+        for _, c in ipairs(d.calls or {}) do
+            t[#t + 1] = ('%s:%d %s -> %s'):format(c.file, c.line, tostring(c.full), c.to and c.to:match('^([^:]+)') or (c.refused and 'refused' or 'nil'))
+        end
+        table.sort(t)
+        return t
+    end
+    local want = {
+        'src/Shop/Product.php:6 Model::__construct -> src/Base/Model.php',   -- parent:: through an alias
+        'src/Shop/Product.php:6 Product::assist -> src/Shop/Product.php',     -- a TRAIT's method: the class's
+        'src/Shop/Product.php:6 Product::save -> src/Base/Model.php',         -- inherited, through the chain
+        'src/Shop/Product.php:6 Thing::__construct -> src/Other/Thing.php',   -- a GROUP use
+        'src/Shop/Use1.php:5 Request::__construct -> refused',
+        'src/Shop/Use1.php:6 Thing::__construct -> src/Other/Thing.php',
+        'src/Shop/Use1.php:7 Local::__construct -> src/Shop/Local.php',
+        'src/Shop/Use1.php:8 Request::__construct -> src/Behat/Request.php',
+        'src/Shop/Use1.php:9 Thing::__construct -> refused',
+    }
+    eq(want, targets(data))
+    eq('Request', row(data, 'src/Shop/Use1.php', 5)[1].qcls, 'the class as written rides the record')
+    -- the RELINK path (a warm graph re-resolved, every call cleared first) applies the same veto
+    local rd = vim.deepcopy(data)
+    for _, c in ipairs(rd.calls) do c.to, c.refused, c.inferred = nil, nil, nil end
+    ts.relink(rd)
+    eq(want, targets(rd), 'relink agrees with extract')
+    vim.fn.delete(root, 'rf')
+end)
