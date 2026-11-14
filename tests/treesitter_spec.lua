@@ -7064,6 +7064,25 @@ test('php: a class-keyed call with no target walks its class chain, case-insensi
     eq(want, targets(rd), 'relink agrees')
 end)
 
+-- CART-2071. A bare read of a record component is the component, never its implicit accessor: `check(count)` in a method
+-- of `record R(int count)` passed the synthetic R::count as a callback (a ref edge to a method no line names), because the
+-- component's binder spans its declaration and the accessor is minted at that name. An explicit `r.count()` still calls it.
+test('java: a record component passed as an argument is no ref to its synthetic accessor (CART-2071)', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/T.java', 'w'))
+    fd:write(table.concat({ 'package p;', 'public class T {', '  record R(int count) {', '    static void check(int c) {}',
+        '    void m() { check(count); }', '  }', '  static int n(R r) { return r.count(); }', '}' }, '\n') .. '\n')
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local into = {}
+    for _, e in ipairs(data.edges) do
+        if e.to:match('::R::count@') then into[#into + 1] = e.kind .. ' ' .. e.from:match('::([%w_]+::[%w_]+)@') end
+    end
+    eq({ 'ref T::n' }, into, 'only the explicit accessor call reaches R::count')
+end)
+
 -- CART-2070. `new T(…)` calls T's constructor: keyed T::T like any Class::m call, for a plain, a generic and a nested
 -- (scoped) type, and a record's compact constructor; a class with no declared constructor and a JDK class have no target.
 test('java: new T() calls T::T — plain, generic, nested and compact; none without a declared constructor (CART-2070)', function ()

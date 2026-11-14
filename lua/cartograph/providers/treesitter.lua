@@ -1498,8 +1498,11 @@ function M._callee_veto(target, cb, cbe, full, file)
 end
 --- the callback upgrade's veto for a bound argument (above): every target but a same-file def that STARTS inside the
 --- binder's declaration — an annotation, a wrapped `KEY =⏎ v -> …` keep the lambda off the declaration's first row
+-- (★ a SYNTHETIC def is never what a binder IS: a java record component's binder spans its declaration, and the
+-- component's implicit accessor is minted at that very name — so `check(count)` in a method of `record R(int count)` read
+-- as passing the accessor R::count, a ref edge to a method no source line names, CART-2071)
 function M._bound_veto(bound, bate, t2, file)
-    return bound ~= nil and not (t2.file == file and t2.order >= bound and t2.order <= (bate or bound))
+    return bound ~= nil and (t2.synth or not (t2.file == file and t2.order >= bound and t2.order <= (bate or bound)))
 end -- (atlas.fields asks the SAME accessor as the use edges' flds, CART-1591)
 
 -- The raw-parser rider (fusion Stage C): the extract hot loop parses via
