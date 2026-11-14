@@ -1075,8 +1075,16 @@ return {
         -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /
         -- import / package resolution decides which T, and a class with no declared constructor simply has no T::T.
         if calln:type() == 'object_creation_expression' then
-            local cls = java_base_type(calln:field('type')[1], src)
-            return cls and (cls .. '::' .. cls) or nil
+            local ty = calln:field('type')[1]
+            local cls = java_base_type(ty, src)
+            if not cls then return nil end
+            -- (a JDK class — written package-qualified, `new java.util.logging.LogManager() {}`, or imported — is keyed by
+            -- its FULL name, as field types are: a project class of the same simple name is not it. It had linked to
+            -- org.elasticsearch.logging.LogManager's constructor)
+            local written = node_text(ty, src):gsub('%b<>', ''):gsub('%s+', '')
+            local fq = written:find('.', 1, true) and written or java_imports(src)[cls]
+            if fq and java_jdk_import(fq) then return fq .. '::' .. cls end
+            return cls .. '::' .. cls
         end
         if calln:type() ~= 'method_invocation' then return nil end
         local obj = calln:field('object')[1]

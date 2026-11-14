@@ -7125,20 +7125,28 @@ test('java: new T() calls T::T — plain, generic, nested and compact; none with
         '  public UB(byte[] bytes) { this(bytes, 0, bytes.length); }', '}', 'record Plain(int a) { }',
         'record Canon(String s, java.util.List<String> xs) {',
         '  public Canon(String s, java.util.List<String> xs) { this.s = s; this.xs = xs; }', '}' })
+    -- a JDK class, written package-qualified or imported, is not the project's class of the same simple name
+    put('LogManager.java', { 'package p;', 'public class LogManager { public LogManager() { } }' })
+    put('J.java', { 'package p;', 'public class J { void a() { new java.util.logging.LogManager() {}; new LogManager(); } }' })
+    put('K.java', { 'package p;', 'import java.util.logging.LogManager;', 'public class K { void b() { new LogManager(); } }' })
     local data = ts.extract(root)
     vim.fn.delete(root, 'rf')
-    local to = {}
+    local to, logm = {}, {}
     for _, c in ipairs(data.calls) do
-        if c.full and c.full:match('::') and c.callee == c.full:match('^([%w_]+)::') then
+        if c.full and c.full:match('::') and c.callee == c.full:match('([%w_]+)::[%w_]+$') then
             to[c.full] = c.to and c.to:match('::([%w_]+::[%w_]+)@') or false
         end
+        if c.callee == 'LogManager' then logm[#logm + 1] = c.file .. ' ' .. c.full .. ' ' .. tostring(c.to ~= nil) end
     end
+    table.sort(logm)
+    eq({ 'p/J.java LogManager::LogManager true', 'p/J.java java.util.logging.LogManager::LogManager false',
+        'p/K.java java.util.logging.LogManager::LogManager false' }, logm, 'a JDK LogManager never lands on the project one')
     eq('U::U', to['U::U'], 'a plain new T()')
     eq('G::G', to['G::G'], 'a generic new T<A>()')
     eq('In::In', to['In::In'], 'a nested new T.In()')
     eq('R::R', to['R::R'], 'a record compact constructor')
     eq(false, to['NoCtor::NoCtor'], 'no declared constructor: no target')
-    eq(false, to['ArrayList::ArrayList'], 'a JDK class: no target')
+    eq(false, to['java.util.ArrayList::ArrayList'], 'an imported JDK class: its full name, no target')
     eq('Plain::Plain', to['Plain::Plain'], 'a record with no constructor: its implicit canonical one')
     eq('Canon::Canon', to['Canon::Canon'], 'a declared canonical constructor')
     eq(false, to['UB::UB'], 'a declared one-arg constructor beside the implicit canonical one: two overloads, refused by name')
