@@ -3717,3 +3717,65 @@ test('flowdump: a type guard through a local alias of type(v), and a same-tag di
     o, n = run('local type = function () return "table" end; local t = type(v);', 't == "table"'); eq(0, n, 'a shadowed type'); eq(all, o)
     o, n = run('local t = type(v);', 't == "table" and t == "table"'); eq(0, n, 'a conjunction is not a disjunction'); eq(all, o)
 end)
+
+-- (CART-2064, flowpath FLOW-0106 step 2, CORE.md D61; lua5.2 checked: probes in the ticket) At a STATED 5.2+, the
+-- generic for over `pairs(t)` / `ipairs(t)` is 5.2's: the metatable's handler is read raw and its THREE results iterate
+-- — the loop calls f(s, c) with the handler's STATE s, not t. `__ipairs` only at 5.2 / 5.3. A direct
+-- `table.insert(t, v)` runs `__len(t, t)`. The twin call carries `lowered:lua52-iter`. Unstated keeps CART-2014's reading
+test('flowdump: a 5.2 pairs / ipairs loop iterates the handler\'s triple, and table.insert runs __len (CART-2064)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = table.concat({
+        'local S = { tag = "state" }',
+        'local function it(s, c) return nil end',
+        'local function iit(s, c) return nil end',
+        'local mt = { __pairs = function (t) return it, S, nil end,',
+        '  __ipairs = function (t) return iit, S, 0 end,',
+        '  __len = function (t) return 0 end }',
+        'local t = setmetatable({ 1, 2 }, mt)',
+        'for k, v in pairs(t) do end',
+        'for i, v in ipairs(t) do end',
+        'table.insert(t, 3)' }, '\n') .. '\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(lv)
+        P.load = function (nm, ...) if nm == 'stub' then return { lua_version = lv } end return old(nm, ...) end
+        store.data.profile = lv and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, dump = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        local D = vim.json.decode(R.dump)
+        local lab, vv, holds, ntag = {}, {}, {}, 0
+        for _, x in ipairs(D.sites) do lab[x.id] = x.label end
+        for _, e in ipairs(D.solution.v) do vv[e[1]] = e[2] end
+        for _, F in ipairs(D.functions) do
+            local nm = (D.names.functions[F.id + 1] or ''):match('::([%w_]+)@')
+            if nm == 'it' or nm == 'iit' or nm == '__len' then
+                local s = {}
+                for _, site in ipairs(vv[F.params[1]] or {}) do
+                    local l = (lab[site] or ''):match('^tbl:m%.lua:(%d+):')
+                    s[#s + 1] = l == '0' and 'S' or l == '6' and 't' or tostring(lab[site])
+                end
+                table.sort(s); holds[nm] = table.concat(s, ',')
+            end
+            for _, tg in ipairs(F.tags or {}) do if tg[2] == 'lowered:lua52-iter' then ntag = ntag + 1 end end
+        end
+        return holds, ntag, D
+    end
+    local h, n, D = run('5.2')
+    eq({ it = 'S', iit = 'S', __len = 't' }, h,
+        '5.2: both iterators get the handler\'s state S, and __len gets t from the direct table.insert')
+    eq(2, n, 'both twin calls are tagged lowered')
+    eq(0, flowcheck.check(D).failed, 'closed')
+    h, n = run('5.4')
+    eq('S', h.it, '5.4 still runs __pairs')
+    eq('', h.iit, '5.4 dropped __ipairs')
+    eq(1, n, 'only the pairs loop is lowered at 5.4')
+    h, n = run('5.1')
+    eq({ it = '', iit = '', __len = '' }, h, '5.1 runs none of them')
+    eq(0, n)
+    h, n = run(nil)
+    eq('t', h.it, 'unstated: CART-2014\'s reading, the iterator called with t')
+    eq(0, n, 'and nothing is tagged lowered')
+    vim.fn.delete(root, 'rf')
+end)

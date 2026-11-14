@@ -78,7 +78,10 @@
 --       Every call expression has a `.call`: a builtin the translation SPELLS (pcall, setmeta, getmeta, cocreate, resume,
 --       yield, loadRaw, storeRaw, keys …) also records its call as written — tag `native:twin`, its result variables, the
 --       callee expression's value, the arguments in Lua order — so a checker reading builtins by identity steps it as the
---       builtin its callee holds. A twin binds nothing in the solve; flowlabels skips it
+--       builtin its callee holds. A twin binds nothing in the solve; flowlabels skips it. At a STATED Lua 5.2+ the twin
+--       of a generic for's `pairs(t)` / `ipairs(t)` (`ipairs` 5.2 / 5.3) also carries the tag `lowered:lua52-iter`: the
+--       body already runs the handler as 5.2 does — `getmeta m t` (raw), `load h m __pairs|__ipairs`, `call [f, s, c] h
+--       [t]`, the loop's call f(s, c) — beside the raw (next, t, nil) arm (CART-2064, flowpath FLOW-0106 / D61)
 --     require_raises = [[fn, chunk fn, line, col] ...] — CART-1998: a require of a tree module in fn: what the module's
 --       chunk raises reaches fn's error port (the solve's route — require is a copy of the module's result, no call)
 --     positions = { files = [file ...], at = [[fn, index, file, line, col] ...] } — CART-1994 (flowpath FLOW-0074): the
@@ -254,6 +257,11 @@ function M.recorder()
     -- { recorder index, line * 2^20 + col, file } per function)
     R.pos = {}
     local CODEFUL = { load = true, store = true, call = true, pcall = true, op = true, copyKeyed = true, resume = true }
+    -- (one more tag on the LAST instruction recorded for `key` — an instruction may carry several)
+    function R.tag(key, tag)
+        local l = R.list(key)
+        local t = R.tags[key]; if not t then t = {}; R.tags[key] = t end; t[#t + 1] = { #l - 1, tag }
+    end
     function R.ins(key, ins, tag)
         local l = R.list(key)
         l[#l + 1] = ins

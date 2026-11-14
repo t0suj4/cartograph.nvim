@@ -4369,6 +4369,9 @@ local function build(store, opts)
                         metastore(tp, '#', kp, v, curerr())
                     end
                 end
+                -- (5.2+ takes t's length through __len, (t, t) — as the generic path below does for every other
+                -- by-name table builtin; this early return had skipped it, CART-2064)
+                if G7.since(52) then metacall(tp, '__len', { tp, tp }, new(), curerr()) end
                 -- (and, in the DUMP, the call itself — to the native, which has no code: a no-op beside the model. A
                 -- positional insert SHIFTS t's own elements, a write the model's store does not show; flowpath's in-tree
                 -- check counts a call to a writing builtin as the caller's write into its arguments, CART-1814 (d))
@@ -5193,6 +5196,7 @@ local function build(store, opts)
                     local a1 = fname and it:field('arguments')[1] and it:field('arguments')[1]:named_child(0)
                     if (fname == 'ipairs' or fname == 'pairs') and a1 then
                         fname_ipairs = fname == 'ipairs'
+                        G7.L52ITER = nil
                         local tp = expr(a1)
                         acc(fname == 'ipairs' and 'array' or 'iterate', a1, nil, tp)
                         -- (ipairs walks the array part: `#` — a load of it also reads `[]`, the untyped keys)
@@ -5205,7 +5209,29 @@ local function build(store, opts)
                         -- entries above, CART-2014: its ITERATOR — the handler's first result, the IR's one-result `op` —
                         -- called with t as the state. A handler returning another state than t is not followed: the
                         -- IR's op carries one result)
-                        if fname == 'pairs' and G7.since(52) then
+                        -- ★ AT A STATED 5.2+ THE LOOP IS 5.2's (CART-2064, flowpath FLOW-0106 step 2; lua5.2 checked):
+                        -- `pairs(t)` / `ipairs(t)` read t's metatable's `__pairs` / `__ipairs` RAW and, when it is
+                        -- there, iterate the handler's THREE results — f, the STATE s and the control c — calling
+                        -- f(s, c). Lowered as 5.2 runs it: `getmeta m t (raw)`, `load h m <handler>`, `call [f, s, c]
+                        -- h [t]` (a callable handler runs its __call, as a call does), and the loop's own call below
+                        -- gets s, not t. The raw arm above stays: with no handler 5.2 iterates (next, t, nil) /
+                        -- (ipairs_aux, t, 0). `__ipairs` is 5.2 / 5.3 (5.4 dropped it). The twin call is tagged
+                        -- `lowered:lua52-iter`, so a checker reading natives per call site knows the handler is
+                        -- already in the body. Over-approximation: the core's `load` runs m's own __index where 5.2
+                        -- reads raw. An UNSTATED version keeps the CART-2014 reading below (the iterator called with t)
+                        local stated = G7.LUAVSTATED and G7.LUAVER or nil
+                        local lower52 = stated and stated >= 52 and (fname == 'pairs' or stated < 54)
+                        if lower52 then
+                            local hname = fname == 'pairs' and '__pairs' or '__ipairs'
+                            local m = new()
+                            G7.mu(function () edge(G7.mtport(tp, hname), m) end)
+                            G7.ins({ 'getmeta', m, tp, '\1raw' })
+                            local h = field(m, hname)
+                            METAH[h] = hname
+                            trip = { new(), new(), new() }
+                            G7.callany(h, { tp }, trip, nil, curerr())
+                            G7.L52ITER = true
+                        elseif fname == 'pairs' and G7.since(52) then
                             trip = { new(), new() }
                             metacall(tp, '__pairs', { tp }, trip[1], curerr())
                             edge(tp, trip[2])
@@ -5218,6 +5244,7 @@ local function build(store, opts)
                             R.pl, R.pc = l0 + 1, c0
                             local fv = expr(it:field('name')[1])
                             R.ins(G7.cur(), { 'call', { new(), new(), new() }, fv, { tp } }, 'native:twin')
+                            if G7.L52ITER then R.tag(G7.cur(), 'lowered:lua52-iter') end
                             R.pl, R.pc = pl, pc
                         end
                     else
