@@ -1109,6 +1109,12 @@ function M.edits_for(plan)
                 vim.list_extend(out, plan.scaffold.post)
             end
             out[#out + 1] = ''
+            -- (a NEW file has no ending of its own: it takes the moved code's — the header and scaffold had been LF
+            -- around CRLF moved lines, a mixed file from the first write, CART-0239. The last element is the empty
+            -- string after the final newline: no ending of its own)
+            local txn = require 'cartograph.txn'
+            local ending = txn.lines_ending(out)
+            for i = 1, #out - 1 do out[i] = txn.as_ending(out[i], ending) end
             return table.concat(out, '\n')
         end
         local lines = vim.split(before, '\n', { plain = true })
@@ -1134,8 +1140,12 @@ function M.edits_for(plan)
             if (lines[at + 1] or ''):match('%S') then
                 ins[#ins + 1] = ''
             end
+            -- (the inserted lines take the DESTINATION's ending — its majority; with none of its own, the moved
+            -- code's — so an LF file gets LF lines from a CRLF source and the reverse, CART-0239)
+            local txn = require 'cartograph.txn'
+            local ending = txn.line_ending(before) or txn.lines_ending(ins)
             for i = #ins, 1, -1 do
-                table.insert(lines, at + 1, ins[i])
+                table.insert(lines, at + 1, txn.as_ending(ins[i], ending))
             end
         else
             -- a source/caller file: departures, requalified call

@@ -1214,3 +1214,27 @@ test('moveapply (CART-1146): a language that cannot write the rebind REFUSES by 
     ok(not plan, 'refused, not planned')
     ok(err and err:find('still called by name', 1, true) and err:find('a.py', 1, true), 'named: ' .. tostring(err))
 end)
+
+-- (CART-0239: the lines a move WRITES take the destination's line ending — a new file the moved code's, an existing one
+-- its own majority — so a CRLF source never leaves a mixed file behind)
+test('moveapply: a move writes the destination\'s line ending — a new file the moved code\'s, an existing LF file its own (CART-0239)', function ()
+    if not ready() then skip('no lua parser') end
+    local crlf = (MODFIXTURE .. '\n'):gsub('\n', '\r\n')
+    local function mixed(t) return t:find('[^\r]\n') ~= nil or t:find('^\n') ~= nil end
+    local st = ingest_files({ ['m.lua'] = crlf })
+    local scan = node_by(st, 'M.scan', 'function')
+    local plan = assert(moveapply.plan_extract_ids(st, { scan.id }, 'sub/new.lua'))
+    local text = dest_text(st, plan)
+    ok(text and text:find('\r\n', 1, true), 'the created file is CRLF')
+    ok(not mixed(text), 'and has no bare LF — scaffold, header and blanks included: ' .. vim.inspect(text))
+    -- an EXISTING LF destination keeps LF: the moved CRLF lines arrive as LF lines
+    st = ingest_files({ ['m.lua'] = crlf, ['sub/old.lua'] = 'local M = {}\n\nreturn M\n' })
+    scan = node_by(st, 'M.scan', 'function')
+    local perr
+    plan, perr = moveapply.plan_ids(st, { scan.id }, 'sub/old.lua')
+    ok(plan, 'a move into the existing file plans: ' .. tostring(perr))
+    local _, after = require('cartograph.txn').dryrun(st, plan)
+    local old = after and after['sub/old.lua']
+    ok(old and old:find('function M.scan', 1, true), 'moved into the existing file: ' .. tostring(old))
+    ok(not old:find('\r', 1, true), 'an LF destination gets LF lines: ' .. vim.inspect(old))
+end)

@@ -256,8 +256,48 @@ end
 --- It RAISES rather than returning a refusal because `edit_of` is contracted to
 --- return text: a nil would arrive downstream as an empty file. `dryrun` and
 --- `execute` convert the raise into a named refusal.
+--- ★ AN INSERTED LINE TAKES THE FILE'S OWN LINE ENDING (CART-0239). The split is on `\n`, so an untouched line of
+--- a CRLF file keeps its `\r` and a token replacement never touches it — but an INSERTED line arrived bare, and the
+--- file got mixed endings the moment a verb inserted (move's import line, extract-module's header). The ending is
+--- the file's MAJORITY over its terminated lines, counted once; a tie inserts LF. A text with no terminated line
+--- (a new or one-line file) has no ending of its own: nil, and the caller decides from what it inserts. Only
+--- inserted lines take it: the rest of the file is never normalized.
+--- -> '\r\n' | '\n' | nil, crlf count, lf count
+function M.line_ending(text)
+    local crlf, lf = 0, 0
+    for line in (text or ''):gmatch('([^\n]*)\n') do
+        if line:sub(-1) == '\r' then crlf = crlf + 1 else lf = lf + 1 end
+    end
+    if crlf + lf == 0 then return nil end -- (no ending of its own: an answer, not a refusal)
+    return crlf > lf and '\r\n' or '\n', crlf, lf
+end
+--- The majority ending of a list of LINES (split on `\n`: a CRLF line still ends in `\r`), or nil when none is
+--- non-empty. A new file's lines decide its ending this way: the moved code's.
+function M.lines_ending(list)
+    local crlf, lf = 0, 0
+    for _, l in ipairs(list or {}) do
+        if l ~= '' then if l:sub(-1) == '\r' then crlf = crlf + 1 else lf = lf + 1 end end
+    end
+    if crlf + lf == 0 then return nil end
+    return crlf > lf and '\r\n' or '\n'
+end
+--- One line, given `ending`: a CRLF file's line ends in exactly one `\r`, an LF file's in none.
+function M.as_ending(line, ending)
+    if ending == '\r\n' then return line:sub(-1) == '\r' and line or (line .. '\r') end
+    if ending == '\n' and line:sub(-1) == '\r' then return line:sub(1, -2) end
+    return line
+end
 function M.edit_file(text, dels, reps, ins)
     local lines = vim.split(text, '\n', { plain = true })
+    local ending
+    if ins and #ins > 0 then
+        ending = M.line_ending(text)
+        if not ending then
+            local all = {}
+            for _, i in ipairs(ins) do vim.list_extend(all, i.lines or {}) end
+            ending = M.lines_ending(all)
+        end
+    end
     local edits = {}
     for _, r in ipairs(reps or {}) do
         if atr.sl(r.at) ~= atr.el(r.at) then
@@ -291,7 +331,7 @@ function M.edit_file(text, dels, reps, ins)
                 .. e.rep.to .. l:sub(atr.ec(e.rep.at) + 1)
         elseif e.ins then
             for i = #e.ins.lines, 1, -1 do
-                table.insert(lines, e.ins.after + 2, e.ins.lines[i])
+                table.insert(lines, e.ins.after + 2, M.as_ending(e.ins.lines[i], ending))
             end
         else
             local last = e.del.e

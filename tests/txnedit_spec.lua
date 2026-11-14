@@ -91,3 +91,28 @@ test('txnedit: preview and apply refuse the SAME plans, by the same reason and c
     local fd2 = assert(io.open(root .. '/m.lua')); eq('local x = 1\n', fd2:read('a')); fd2:close()
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-0239: an INSERTED line takes the file's own line ending — the majority over its terminated lines — and nothing
+-- else in the file is touched)
+test('txnedit: an inserted line on a CRLF file ends CRLF like its neighbours (CART-0239)', function ()
+    local CRLF = 'local a = 1\r\nlocal b = 2\r\nreturn a\r\n'
+    local out = txn.edit_file(CRLF, nil, nil, { { after = -1, lines = { 'local x = require("x")' } } })
+    eq('local x = require("x")\r\nlocal a = 1\r\nlocal b = 2\r\nreturn a\r\n', out)
+    -- in the middle, two lines at once, beside a replacement on another line
+    local at = { start = { line = 2, char = 7 }, ['end'] = { line = 2, char = 8 } }
+    out = txn.edit_file(CRLF, nil, { { at = at, to = 'b' } }, { { after = 0, lines = { '-- one', '-- two' } } })
+    eq('local a = 1\r\n-- one\r\n-- two\r\nlocal b = 2\r\nreturn b\r\n', out)
+    -- a line the verb already terminated is not given a second CR
+    out = txn.edit_file(CRLF, nil, nil, { { after = 2, lines = { 'tail\r' } } })
+    eq('local a = 1\r\nlocal b = 2\r\nreturn a\r\ntail\r\n', out)
+end)
+
+test('txnedit: an LF file, a tie and a minority of CRLF lines insert LF; the file is never normalized (CART-0239)', function ()
+    eq('x\nline one\nline two\nline three\nline four\n',
+        txn.edit_file(FOUR, nil, nil, { { after = -1, lines = { 'x' } } }))
+    local tie = 'a\r\nb\n'
+    eq('x\na\r\nb\n', txn.edit_file(tie, nil, nil, { { after = -1, lines = { 'x' } } }), 'a tie: LF, the rest untouched')
+    local mostly = 'a\nb\nc\r\n'
+    eq('x\na\nb\nc\r\n', txn.edit_file(mostly, nil, nil, { { after = -1, lines = { 'x' } } }))
+    eq('\r\n', (txn.line_ending('a\r\nb\r\nc\n')), 'the majority decides')
+end)
