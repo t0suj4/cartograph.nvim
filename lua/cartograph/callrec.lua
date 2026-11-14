@@ -49,11 +49,15 @@ local M = {}
 
 -- the enclosing function's node id (syntactic, immutable; nil at top level)
 function M.fn(c) return c.fn end
--- the called name as written (syntactic, immutable)
+-- the called NAME — the last segment of the callee expression: `req` in `M:req(…)` and in `M.req(…)`, `make` in a
+-- java `o.make()` (syntactic, immutable; measured, CART-0342 — it is not the expression as written)
 function M.callee(c) return c.callee end
--- the fully-qualified callee, when the spec built one (syntactic, immutable)
+-- the qualified callee, when the spec built one: the expression as written for lua (`M:req`, `M.req`), the
+-- receiver's TYPE for a typed java call (`A::make`); nil for a bare call (`print`) (syntactic, immutable)
 function M.full(c) return c.full end
--- the method segment of a method call (syntactic, immutable)
+-- TRUE when the call site used `:` — a Lua METHOD call, whose argv[1] is the receiver (argv.lua's header) — and NIL
+-- otherwise: never false, and no other language's provider sets it (python's / javascript's `o.m()` is nil).
+-- A boolean from the syntactic form, NOT the method's name — CART-0342: its old doc called it a "segment"
 function M.method(c) return c.method end
 -- the file the call sits in (syntactic, immutable — highest fold dedup)
 function M.file(c) return c.file end

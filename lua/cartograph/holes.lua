@@ -104,6 +104,10 @@ function M.of(store, node, ctx)
     local CONCRETE = { lit = 'string', scalar = 'scalar' }
     local calls = store.calls_to and store.calls_to[node.id] or {}
     local litat, litk = {}, {}   -- param index → observed value, and its kind
+    -- (argv[i] <-> params[i] BY POSITION: this module is Lua-only, and a Lua `:` call carries its receiver at argv[1]
+    -- while a `:` function's params begin with `self`, so the two line up. A `.` call to a `:` function — or the
+    -- reverse — shifts every index by one and is NOT corrected here: its observed value lands on the wrong param,
+    -- CART-0342 / argv.lua's header)
     for _, c in ipairs(calls) do
         for i = 1, #params do
             if litat[i] == nil then

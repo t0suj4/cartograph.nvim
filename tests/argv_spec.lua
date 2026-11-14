@@ -67,3 +67,41 @@ test('argv: fold is idempotent (a second fold is a no-op)', function ()
     eq(0, n2, 'no raw tables left to fold')
     eq(5, n1)
 end)
+
+-- (CART-0342: the receiver convention, PINNED — argv.lua's header and callrec.method's doc state it, and nothing else
+-- held it: a Lua `:` call is desugared (argv[1] the receiver, method = true); every other form, and python /
+-- javascript, is the syntactic list (method nil, never false); a `:` function's params begin with `self`)
+test('argv: a Lua `:` call carries its receiver at position 1; a `.` call and python / javascript do not (CART-0342)', function ()
+    local ts = require 'cartograph.providers.treesitter'
+    local cr = require 'cartograph.callrec'
+    local function have(l) return pcall(vim.treesitter.language.add, l) end
+    if not have('lua') then skip('no lua parser') end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    w('m.lua', 'local M = {}\nfunction M:req(a) return a end\nfunction M.f() M:req("x"); M.req(M, "y") end\nreturn M\n')
+    local langs = { lua = true }
+    if have('python') then w('p.py', 'class C:\n    def req(self, a): return a\n\ndef f(o):\n    o.req("x")\n'); langs.python = true end
+    if have('javascript') then w('j.js', 'function f(o) { o.req("x"); }\n'); langs.js = true end
+    local d = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local by = {}
+    for _, c in ipairs(d.calls) do by[c.file .. ' ' .. tostring(cr.full(c) or cr.callee(c))] = c end
+    local colon, dot = by['m.lua M:req'], by['m.lua M.req']
+    eq(2, argv.n(colon), 'M:req("x") is (receiver, "x")')
+    eq('expr', argv.at(colon, 1).k, 'the receiver is argv[1]')
+    eq('x', argv.at(colon, 2).v)
+    eq(true, cr.method(colon), 'method is TRUE for a `:` call')
+    eq(2, argv.n(dot), 'M.req(M, "y") is the written list')
+    eq('local', argv.at(dot, 1).k, 'its first argument is written, an ordinary local')
+    eq(nil, cr.method(dot), 'method is nil, not false, for a `.` call')
+    eq('req', cr.callee(colon), 'callee is the last segment, not the expression as written')
+    for _, n in ipairs(d.nodes) do
+        if n.name == 'M:req' then eq({ 'self', 'a' }, n.params, 'a `:` function\'s params begin with self') end
+    end
+    if langs.python then
+        local pc = by['p.py o.req']
+        eq(1, argv.n(pc), 'python o.req("x") is the syntactic list, receiver excluded')
+        eq(nil, cr.method(pc))
+    end
+    if langs.js then eq(1, argv.n(by['j.js o.req']), 'javascript likewise') end
+end)

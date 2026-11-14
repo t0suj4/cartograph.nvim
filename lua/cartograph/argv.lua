@@ -17,6 +17,15 @@
 -- find_handler reads it on refresh re-attach — so it's folded too. a.up
 -- (the upgrade marker) is resolution/merge-only (audit/relink, all pre-fold)
 -- and is dropped. Query-read fields: k, name, v, prefix, kw, to, l.
+--
+-- ★ POSITION 1 AND THE RECEIVER (CART-0342), measured, not designed in one place: a Lua METHOD call `a:b(x)` is
+-- recorded DESUGARED — argv[1] is the receiver (k = 'expr', even when it is a plain name), argv[2..] the written
+-- arguments — and it lines up with a `:`-defined function's params, which begin with the implicit `self`. EVERY
+-- OTHER form records the SYNTACTIC list, receiver excluded: Lua's `a.b(a, x)` (the receiver is written, so it is
+-- argv[1] as an ordinary argument), python's `o.m(x)`, javascript's `o.m(x)` — while python's params begin with
+-- `self`. So a consumer aligning argv with params by position must know the language and the form
+-- (callrec.method: true for a Lua `:` call), as fabcensus's one-hop pin does; a `.` call to a `:` function shifts
+-- every index by one.
 
 local M = {}
 
