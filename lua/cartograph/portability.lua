@@ -911,6 +911,10 @@ function M.receiver_context(store, prof, origin)
     for base, e in pairs(surf.bases or {}) do ev[base] = cm.match(e.members, ct) end
     local rc = { ct = ct, ev = ev, meta = m, tier = cm.TIER,
         to_space = cm.space(ct) }
+    -- THE DATA-STAGE LUALIB, both sides, each optional (CART-0651 (b)). `lib_why`
+    -- is REPORTED: an artifact that is not there must not read as one that found
+    -- nothing.
+    rc.lib_to, rc.lib_why = M.lualib_for(prof.version)
     -- THE ORIGIN SIDE (CART-0631): a class table for the version being ported FROM,
     -- so a member name can be decided against both spaces. Optional, and its
     -- absence leaves every zero-match name exactly where it was.
@@ -949,6 +953,16 @@ function M.receiver_context(store, prof, origin)
                     rc.ev_from[base] = cm.match(e.members, oct)
                 end
             end
+        end
+    end
+    -- the ORIGIN's lualib, keyed by the origin class table's version: `origin` is an
+    -- artifact name, and only a loaded origin says which version it is
+    if rc.lib_to and rc.from_meta then
+        local lf, lwhy = M.lualib_for(rc.from_meta.version)
+        if lf and tostring(lf.version) ~= tostring(rc.lib_to.version) then
+            rc.lib_from = lf
+        else
+            rc.lib_from_why = lwhy or 'the origin lualib is the target\'s own version'
         end
     end
     return rc
@@ -1024,8 +1038,10 @@ end
 ---                         surface NO ARTIFACT MODELS lands — base's data-stage lualib
 ---                         has no artifact, and `circuit_connector_definitions.create`
 ---                         became `.create_vector` in 2.0. A mod library or the
----                         language's own stdlib. NOT a port item, and NOT a
----                         frontier: it is a decided "this was never API".
+---                         language's own stdlib, most often. NOT a port item on
+---                         this evidence — and NOT a decided "this was never API"
+---                         either: M.lualib_verdict decides the data-stage ones
+---                         first when a distilled lualib is loaded.
 ---   member-supplied       every class that declared it still does. Sound: any
 ---                         receiver that worked before still works.
 ---   member-moved          the target still declares it, but NOT on every class
@@ -1260,12 +1276,116 @@ function M.class_space_name(from_space, to_space, name)
     return best, bestd
 end
 
+-- ── THE DATA-STAGE LUALIB (CART-0651 (b)) ───────────────────────────────────
+-- The runtime class table models the runtime api, so a global the base game's DATA
+-- STAGE defines (`circuit_connector_definitions`, `util`, the *_connector_template
+-- tables) could only ever land in `not-a-runtime-member`. tools/lualibdistill.lua
+-- distils that surface from the user's own game install into an ON-DEMAND artifact
+-- (`lua-factorio-lualib-<major><minor>`); nothing is shipped, and with no artifact
+-- every name keeps the bucket it had.
+
+--- The distilled data-stage lualib for a version, or (nil, why). Matched on the
+--- MINOR, for artifact_for's reason: a wrong version manufactures verdicts out of
+--- version skew.
+function M.lualib_for(version)
+    local maj, min = tostring(version):match('^(%d+)%.(%d+)')
+    if not maj then return nil, ('%q is not major.minor'):format(tostring(version)) end
+    local name = ('lua-factorio-lualib-%s%s'):format(maj, min)
+    local art = require('cartograph.spec.profile').load(name)
+    if not art or art.kind ~= 'lualib' or type(art.globals) ~= 'table' then
+        return nil, ('no %s artifact — distil it from a %s.%s install with'
+            .. ' tools/lualibdistill.lua <factorio>/data'):format(name, maj, min)
+    end
+    if not tostring(art.version):match('^' .. maj .. '%.' .. min .. '%.') then
+        return nil, ('%s describes %s, not %s.%s'):format(name, tostring(art.version), maj, min)
+    end
+    return art
+end
+
+--- ADJUDICATE ONE NAME AGAINST THE DATA-STAGE LUALIB. PURE. Returns (verdict,
+--- detail), or nil when the lualib has nothing to say and the name keeps the bucket
+--- it would have had:
+---   lualib-removed       the ORIGIN's lualib defines the name and the TARGET's
+---                        CLOSED global lacks it (or the target defines no such
+---                        global, over a closed global set). Load-fatal. Sound.
+---   lualib-absent        the target's CLOSED global lacks the member and no origin
+---                        lualib was available to say it ever existed. Breaks in the
+---                        target unless a dependency mod supplies it — the hedge is
+---                        that, and only that.
+---   lualib-supplied      the target's lualib defines it. Counted, not work.
+---   lualib-unadjudicable the root IS a target data-stage global, but its members
+---                        cannot be enumerated (an OPEN global), or neither version
+---                        defines the member (a dependency's extension, or a call
+---                        that never worked). A hedge, never a removal.
+---
+--- ★ THE STAGE GATE. The artifact describes the DATA stage only; at runtime these
+--- globals do not exist, so a verdict is made only for a name every one of whose
+--- files the stage map places in the data stage alone. A name seen in a control file
+--- or an unplaced file keeps its old bucket. `stage_by_file` nil = no partition = no
+--- verdict.
+---
+--- ★ THE MEMBER SET IS A UNION of every key the data stage ever writes, so only an
+--- ABSENCE from a CLOSED global is evidence; that is the only claim built on it.
+function M.lualib_verdict(lib_from, lib_to, name, files, stage_by_file)
+    if not lib_to or type(name) ~= 'string' or not stage_by_file then return nil end
+    local list = type(files) == 'table' and files or { files }
+    if #list == 0 then return nil end
+    for _, f in ipairs(list) do
+        local at = stage_by_file[f]
+        if not at or not at.data then return nil end
+        for s in pairs(at) do if s ~= 'data' then return nil end end
+    end
+    local base, rest = name:match('^([%w_]+)[.:](.+)$')
+    local member = rest and rest:match('^([%w_]+)')
+    base = base or (name:match('^[%w_]+$') and name)
+    if not base then return nil end
+    local gt = lib_to.globals[base]
+    local gf = lib_from and lib_from.globals[base]
+    local d = { base = base, member = member, lualib = lib_to.version,
+        origin_lualib = lib_from and lib_from.version or nil }
+    if not gt then
+        -- the target does not define the root at all
+        if gf and not lib_to.globals_open then
+            d.global = true
+            return 'lualib-removed', d
+        end
+        return nil
+    end
+    if not member then return 'lualib-supplied', d end
+    if (gt.members or {})[member] then return 'lualib-supplied', d end
+    if gt.open then d.open = gt.open; return 'lualib-unadjudicable', d end
+    -- the origin's set holds only keys some data-stage file really wrote, so
+    -- presence there is a fact even for an open origin global
+    if gf and (gf.members or {})[member] then return 'lualib-removed', d end
+    if lib_from then
+        d.neither = true
+        return 'lualib-unadjudicable', d
+    end
+    return 'lualib-absent', d
+end
+
 --- One rendered cell of receiver evidence, for the item line. THE HEDGE IS IN THE
 --- TEXT, not only in the bucket: `~` is the project's mark for a hypothesis and `n`
 --- is the quantity that decides how much to believe it (classmatch's two known
 --- wrong answers are BOTH n=1, and it deliberately hardcodes no threshold).
 function M.receiver_cell(d)
     if not d then return '' end
+    -- a data-stage lualib verdict rests on the distilled globals, not on a receiver
+    if d.lualib then
+        if d.global then
+            return ('global `%s` gone from lualib %s (was in %s)'):format(d.base,
+                tostring(d.lualib), tostring(d.origin_lualib))
+        elseif d.open then
+            return ('lualib %s: `%s` is open — %s'):format(tostring(d.lualib), d.base, d.open)
+        elseif d.neither then
+            return ('neither lualib %s nor %s defines `%s.%s`'):format(
+                tostring(d.origin_lualib), tostring(d.lualib), d.base, tostring(d.member))
+        elseif d.member then
+            return ('lualib %s: `%s` %s `%s`%s'):format(tostring(d.lualib), d.base,
+                'has no', d.member, d.origin_lualib and (' (%s had it)'):format(d.origin_lualib) or '')
+        end
+        return ('lualib %s defines `%s`'):format(tostring(d.lualib), d.base)
+    end
     -- ⚠ THE CLASS-SPACE VERDICTS MUST NOT WEAR THE RECEIVER'S CELL (CART-0631).
     -- They are refined OUT of a zero-match, so `d` still carries that evidence, and
     -- rendering it printed `n=1 no overlapping class` — a FRONTIER statement — on a
@@ -1330,6 +1450,14 @@ function M.unknown_reason(prof, name, where, rctx)
             and not (prof.api_members or {})[cls .. '::' .. member] then
             return 'absent'
         end
+    end
+    -- THE DATA-STAGE LUALIB (CART-0651 (b)), before the receiver axis: a root the
+    -- data stage defines as a global is not a receiver whose class is unknown, it is
+    -- that global, and its own member set is the stronger evidence.
+    if rctx and rctx.lib_to then
+        local lv, ld = M.lualib_verdict(rctx.lib_from, rctx.lib_to, name, files,
+            rctx.stage_by_file)
+        if lv then return lv, ld end
     end
     -- THE RECEIVER AXIS. Reached only after every question that is NOT about a
     -- receiver has been settled above — another language's name, and a member of a
@@ -1560,6 +1688,26 @@ M.REASON_TEXT = {
         .. ' MEMBER, NOT PER BASE: a sibling call on the same base may be perfectly'
         .. ' fine, which is why they are listed separately rather than condemned'
         .. ' together. The losing classes are named on each line.',
+    -- ── the data-stage lualib (CART-0651 (b)): globals the base game's data stage
+    -- defines, distilled from the user's own install. Only names whose files the
+    -- stage map places in the data stage alone are judged here.
+    ['lualib-removed'] = 'REMOVED FROM THE DATA-STAGE LUALIB — the origin\'s base game'
+        .. ' defines this in its data stage and the target\'s does not: the root is a'
+        .. ' CLOSED global (every key it can ever hold was enumerated) without this'
+        .. ' member, or the root global is gone. Calling it calls nil and stops the'
+        .. ' load. Real porting work, LOAD-FATAL.',
+    ['lualib-absent'] = 'NOT IN THE TARGET\'S DATA-STAGE LUALIB — the root is a CLOSED'
+        .. ' global the target\'s base game defines, and it holds no such member. No'
+        .. ' lualib for the ORIGIN was available, so whether it ever existed is not'
+        .. ' known; in the target the call reaches nil unless a dependency mod adds the'
+        .. ' member. Porting work unless a dependency supplies it.',
+    ['lualib-unadjudicable'] = 'DATA-STAGE GLOBAL, MEMBER NOT DECIDABLE — the root is'
+        .. ' a global the target\'s data stage defines, but either its members cannot'
+        .. ' be enumerated (it escapes, or is written at computed keys), or neither'
+        .. ' version\'s lualib defines the member (a dependency\'s extension, or a call'
+        .. ' that never worked). Not a removal; not "no work" either.',
+    ['lualib-supplied'] = 'SUPPLIED BY THE TARGET\'S DATA-STAGE LUALIB — the target\'s'
+        .. ' base game defines this in its data stage. Counted, not work.',
     ['unenumerated-namespace'] = 'NAMESPACE MEMBER, NOT ENUMERATED — the root IS a'
         .. ' modelled namespace but the artifact distils METHODS only (and omits'
         .. ' lualib extensions), so a miss here says nothing either way.',
@@ -1568,16 +1716,40 @@ M.REASON_TEXT = {
         .. ' the environment.',
 }
 
+--- THE TEXT A BUCKET WEARS ONCE A DATA-STAGE LUALIB WAS COMPARED (CART-0651 (b)).
+--- `not-a-runtime-member`'s default text says no artifact covers the data-stage
+--- lualib, which is false the moment one is loaded; what reaches the bucket then
+--- is a narrower population, and the text says which.
+M.REASON_TEXT_LUALIB = {
+    ['not-a-runtime-member'] = 'NOT A RUNTIME MEMBER — no class in EITHER version'
+        .. ' declares this name, and its root is no global the target\'s distilled'
+        .. ' data-stage lualib defines (or the name is seen outside the data stage,'
+        .. ' where that lualib does not exist). A mod library or the language\'s own'
+        .. ' stdlib, most often — or a dependency mod\'s global. Not evidence of'
+        .. ' "no work": no artifact models a dependency\'s surface.',
+}
+
+--- The reason text for `key` given the audit result `res`.
+function M.reason_text(key, res)
+    if res and res.lualib and res.lualib.target and res.lualib.staged
+        and M.REASON_TEXT_LUALIB[key] then
+        return M.REASON_TEXT_LUALIB[key]
+    end
+    return M.REASON_TEXT[key]
+end
+
 --- THE PRESENTATION ORDER of the reason groups, and the report's ONLY list of
 --- them. `absent` FIRST: it is the one group that says anything about the target on
 --- the profile's own authority. Then the receiver axis, ordered by how much it
 --- CLAIMS — the hedged near-porting-work first, the merely consistent last — so a
 --- reader who stops after two groups has read the strongest statements.
-M.REASON_ORDER = { 'absent', 'member-removed', 'shape-broken',
+M.REASON_ORDER = { 'absent', 'lualib-removed', 'member-removed', 'shape-broken',
+    'lualib-absent',
     'receiver-class-absent', 'shape-at-risk', 'member-moved',
     'receiver-nearmiss', 'receiver-nomatch',
     'receiver-ambiguous', 'receiver-class-chain', 'receiver-class-present',
-    'member-supplied', 'receiver-typed', 'unenumerated-namespace',
+    'member-supplied', 'lualib-supplied', 'receiver-typed', 'lualib-unadjudicable',
+    'unenumerated-namespace',
     'not-a-runtime-member', 'unclaimed-bare', 'other-language' }
 
 --- Audit the open graph against a target runtime profile.
@@ -1659,6 +1831,11 @@ function M.audit(store, runtime, opts)
     local rctx, rwhy = M.receiver_context(store, prof, from)
     res.receiver = { available = rctx ~= nil, why = rwhy,
         meta = rctx and rctx.meta or nil, tier = rctx and rctx.tier or nil }
+    if rctx then rctx.stage_by_file = sm and sm.by_file or nil end
+    res.lualib = { target = rctx and rctx.lib_to and rctx.lib_to.version or nil,
+        origin = rctx and rctx.lib_from and rctx.lib_from.version or nil,
+        why = rctx and (rctx.lib_why or rctx.lib_from_why) or nil,
+        staged = (sm and sm.by_file) ~= nil }
     -- THE ORIGIN IS REPORTED WHETHER OR NOT IT LOADED (CART-0631), for the reason
     -- res.receiver.why exists: a refinement that quietly did not run looks exactly
     -- like one with nothing to refine. `asked` distinguishes the third state — no
@@ -1747,10 +1924,13 @@ end
 --- audits score the SAME requirement set, so a name present in one and absent
 --- from the other is a genuine status change rather than a set mismatch.
 function M.diff_entries(a, b)
-    local bystatus = {}
-    for _, e in ipairs(b.entries) do bystatus[e.name] = e.provided end
+    local bystatus, bentry = {}, {}
+    for _, e in ipairs(b.entries) do bystatus[e.name] = e.provided; bentry[e.name] = e end
+    -- `lualib_lost`: names provided by NEITHER profile that the target audit's
+    -- data-stage lualib verdict calls porting work (CART-0651 (b)). A separate list,
+    -- because `lost` keeps its meaning — present in one profile, absent from the other.
     local res = { from = a.runtime, to = b.runtime, lost = {}, gained = {},
-        kept = 0, neither = 0 }
+        kept = 0, neither = 0, lualib_lost = {} }
     for _, e in ipairs(a.entries) do
         local inB = bystatus[e.name]
         if e.provided and not inB then
@@ -1762,6 +1942,12 @@ function M.diff_entries(a, b)
             res.kept = res.kept + 1
         else
             res.neither = res.neither + 1
+            local be = bentry[e.name]
+            if be and (be.reason == 'lualib-removed' or be.reason == 'lualib-absent') then
+                res.lualib_lost[#res.lualib_lost + 1] = { name = e.name, calls = e.calls,
+                    verdict = be.reason, evidence = M.receiver_cell(be.receiver),
+                    file = e.files and e.files[1], files = e.files }
+            end
         end
     end
     local function bycalls(x, y)
@@ -1770,6 +1956,7 @@ function M.diff_entries(a, b)
     end
     table.sort(res.lost, bycalls)
     table.sort(res.gained, bycalls)
+    table.sort(res.lualib_lost, bycalls)
     return res
 end
 
@@ -3519,6 +3706,19 @@ function M.report(store, runtime, opts)
             .. ' typed stay unadjudicated rather than being called removed.')
             :format(res.origin.why)
     end
+    -- THE DATA-STAGE LUALIB LINE (CART-0651 (b)), in every state, for the origin
+    -- line's reason.
+    if res.lualib and res.lualib.target and res.lualib.staged then
+        L[#L + 1] = ('  DATA-STAGE LUALIB: %s%s — data-stage names are decided against'
+            .. ' the globals the base game defines')
+            :format(tostring(res.lualib.target), res.lualib.origin
+                and (' against origin ' .. tostring(res.lualib.origin)) or ' (no origin lualib)')
+    elseif res.lualib and res.lualib.target then
+        L[#L + 1] = '  DATA-STAGE LUALIB: loaded but not used — the profile declares no'
+            .. ' stage partition, so no file is known to run in the data stage'
+    elseif res.lualib and res.lualib.why then
+        L[#L + 1] = ('  DATA-STAGE LUALIB: not compared — %s'):format(res.lualib.why)
+    end
     -- THE STAGE PARTITION (CART-0216). Reported BEFORE the not-in-profile list,
     -- because "exists, but not at this stage" is a stronger statement than "not
     -- provided" and would be buried under it. The typed-empty rule applies in both
@@ -3702,7 +3902,7 @@ function M.report(store, runtime, opts)
                 L[#L + 1] = ''
                 vim.list_extend(L, reason_lines(
                     ('    %d name(s), %d call(s) — '):format(g.n, g.calls),
-                    M.REASON_TEXT[key] or ('UNLABELLED REASON %q — this key has no text'
+                    M.reason_text(key, res) or ('UNLABELLED REASON %q — this key has no text'
                         .. ' in REASON_TEXT, which is a bug in this file, not a fact'
                         .. ' about the code being audited'):format(key), '      '))
                 for i = 1, math.min(per, #g.items) do

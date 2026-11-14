@@ -2907,3 +2907,157 @@ test('portability: requires() keeps one version floor PER SCALE, never a max acr
     eq('ECMAScript', q.scale, 'the one scale keeps its name')
     vim.fn.delete(r2, 'rf')
 end)
+
+-- ── THE DATA-STAGE LUALIB (CART-0651 (b)) ──────────────────────────────────────
+-- A two-version fixture install, shaped as the real one: 2.0.77's core/lualib defines
+-- `circuit_connector_definitions = { create_single = …, create_vector = … }`, 1.1's
+-- carried `.create`. The fixture spells it as the 2.0.77 install on this machine does
+-- (core/lualib/circuit-connector-sprites.lua); the 1.1 side is a reconstruction.
+local function lualib_fixture(version, ccd)
+    local root = vim.fn.tempname()
+    for _, d in ipairs({ 'core/lualib', 'base/prototypes' }) do vim.fn.mkdir(root .. '/' .. d, 'p') end
+    local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    w('base/info.json', ('{"name":"base","version":"%s"}'):format(version))
+    w('core/lualib/dataloader.lua', 'data = { raw = {} }\nfunction data.extend(self, t) end\n')
+    w('core/data.lua', '')
+    w('core/lualib/util.lua', 'local util = {}\nfunction util.by_pixel(x, y) return {x, y} end\nreturn util\n')
+    w('core/lualib/circuit-connector-sprites.lua', ccd
+        .. 'universal_connector_template = { led_red = 1 }\n'
+        .. 'register(universal_connector_template)\n'      -- escapes: OPEN
+        .. 'local shadow = {}\nshadow.k = 1\n'               -- a local, never a global
+        .. 'default_circuit_wire_max_distance = 9\n')
+    w('base/data.lua', 'util = require("util")\nrequire("circuit-connector-sprites")\n'
+        .. 'require("prototypes.entity")\n')
+    w('base/prototypes/entity.lua', 'local function f(p) circuit_connector_definitions["x"] = p end\n'
+        .. 'for k, v in pairs(circuit_connector_definitions) do end\n')
+    return root
+end
+local CCD20 = 'circuit_connector_definitions =\n{\n  create_single = mk1,\n  create_vector = mk2\n}\n'
+local CCD11 = 'circuit_connector_definitions = {}\nfunction circuit_connector_definitions.create(v, o) end\n'
+
+test('lualibdistill: the data stage\'s globals and their members, followed through require (CART-0651)', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local LD = dofile(vim.fn.getcwd() .. '/tools/lualibdistill.lua')
+    local r20, r11 = lualib_fixture('2.0.77', CCD20), lualib_fixture('1.1.110', CCD11)
+    local a20 = assert(LD.distill(r20))
+    local a11 = assert(LD.distill(r11))
+    eq('lua-factorio-lualib-20', a20.runtime)
+    eq('lua-factorio-lualib-11', a11.runtime)
+    local g = a20.globals.circuit_connector_definitions
+    eq(nil, g.open, 'a constructor, string-key writes and a pairs() read leave it CLOSED')
+    eq({ create_single = true, create_vector = true, x = true }, g.members,
+        'constructor fields + a bracket string write inside a function body')
+    eq(true, a11.globals.circuit_connector_definitions.members.create, '1.1 had .create')
+    eq(nil, a20.globals.circuit_connector_definitions.members.create, '2.0 does not')
+    eq({ by_pixel = true }, a20.globals.util.members, 'a global bound to a require gets the module\'s table')
+    ok(a20.globals.universal_connector_template.open ~= nil,
+        'a global passed to an arbitrary function may gain keys the pass cannot name: OPEN')
+    eq(nil, a20.globals.shadow, 'a local is never a global')
+    eq('value', a20.globals.default_circuit_wire_max_distance.kind)
+    eq(nil, a20.globals_open, 'nothing wrote through _G')
+    vim.fn.delete(r20, 'rf'); vim.fn.delete(r11, 'rf')
+end)
+
+test('portability: lualib_verdict decides data-stage names, and only those (CART-0651)', function ()
+    local to = { version = '2.0.77', globals = {
+        ccd = { kind = 'table', members = { create_vector = true } },
+        tpl = { kind = 'table', members = { led = true }, open = 'escapes' },
+        newg = { kind = 'function' } } }
+    local from = { version = '1.1.110', globals = {
+        ccd = { kind = 'table', members = { create = true } },
+        tpl = { kind = 'table', members = { old = true } },
+        oldg = { kind = 'function' } } }
+    local data = { ['data.lua'] = { data = true } }
+    local V = port.lualib_verdict
+    eq('lualib-removed', (V(from, to, 'ccd.create', { 'data.lua' }, data)))
+    eq('lualib-absent', (V(nil, to, 'ccd.create', { 'data.lua' }, data)),
+        'no origin lualib: the absence is the target\'s, hedged')
+    eq('lualib-supplied', (V(from, to, 'ccd.create_vector', { 'data.lua' }, data)))
+    eq('lualib-supplied', (V(from, to, 'newg', { 'data.lua' }, data)), 'a bare global')
+    eq('lualib-unadjudicable', (V(from, to, 'tpl.anything', { 'data.lua' }, data)),
+        'an OPEN global decides nothing about its members')
+    eq('lualib-unadjudicable', (V(from, to, 'tpl.old', { 'data.lua' }, data)),
+        'not even one the origin had: an open set may hold it under a computed key')
+    local _, d = V(from, to, 'ccd.nowhere', { 'data.lua' }, data)
+    eq(true, d.neither, 'a member neither version defines is no removal')
+    eq('lualib-removed', (V(from, to, 'oldg', { 'data.lua' }, data)), 'a whole global gone')
+    eq(nil, (V(from, { version = '2.0.77', globals = {}, globals_open = 'x' }, 'oldg',
+        { 'data.lua' }, data)), 'unless the target\'s global SET is open')
+    eq(nil, (V(nil, to, 'zz.y', { 'data.lua' }, data)), 'a root no lualib defines: no say')
+    -- THE STAGE GATE: these globals do not exist at runtime
+    eq(nil, (V(from, to, 'ccd.create', { 'control.lua' },
+        { ['control.lua'] = { runtime = true } })), 'a runtime file is not judged')
+    eq(nil, (V(from, to, 'ccd.create', { 'data.lua', 'x.lua' }, data)),
+        'an unplaced file is not judged')
+    eq(nil, (V(from, to, 'ccd.create', { 'data.lua' }, nil)), 'no partition, no verdict')
+    eq(nil, (V(from, to, 'ccd.create', { 'o.lua' }, { ['o.lua'] = {} })),
+        'a file placed in NO stage is not a data-stage file')
+end)
+
+test('portability: a 1.1 mod\'s circuit_connector_definitions.create is REMOVED once both lualibs are distilled (CART-0651)', function ()
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('lua-factorio') then skip 'no lua-factorio profile' end
+    local LD = dofile(vim.fn.getcwd() .. '/tools/lualibdistill.lua')
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local saved = pm.ONDEMAND
+    local od = vim.fn.tempname(); vim.fn.mkdir(od, 'p')
+    local r20, r11 = lualib_fixture('2.0.77', CCD20), lualib_fixture('1.1.110', CCD11)
+    local mod = vim.fn.tempname(); vim.fn.mkdir(mod .. '/prototypes', 'p')
+    local function w(rel, t) local fd = assert(io.open(mod .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('data.lua', 'require("prototypes.entity")\n')
+    w('prototypes/entity.lua', 'local d = circuit_connector_definitions.create(universal_connector_template, {})\n'
+        .. 'local e = circuit_connector_definitions.create_vector(universal_connector_template, {})\n')
+    store.ingest(ts.extract(mod))
+    local function audit()
+        local res = assert(port.audit(store, 'lua-factorio'))
+        local by = {}
+        for _, e in ipairs(res.entries) do by[e.name] = e end
+        return res, by
+    end
+    pm.ONDEMAND = od
+    local ok_, err = pcall(function ()
+        local res0, by0 = audit()
+        if not res0.origin.available then skip('no origin class table: ' .. tostring(res0.origin.why)) end
+        eq('not-a-runtime-member', by0['circuit_connector_definitions.create'].reason,
+            'with no lualib distilled, the old bucket and its no-artifact text')
+        ok(res0.lualib.why ~= nil, 'and the report knows why: ' .. tostring(res0.lualib.why))
+        -- the target side only: the absence is the target's
+        local a20 = assert(LD.distill(r20))
+        local fd = assert(io.open(od .. '/' .. a20.runtime .. '.mpack', 'wb')); fd:write(vim.mpack.encode(a20)); fd:close()
+        local _, by1 = audit()
+        eq('lualib-absent', by1['circuit_connector_definitions.create'].reason)
+        -- both sides: a removal
+        local a11 = assert(LD.distill(r11))
+        fd = assert(io.open(od .. '/' .. a11.runtime .. '.mpack', 'wb')); fd:write(vim.mpack.encode(a11)); fd:close()
+        local res2, by2 = audit()
+        eq('lualib-removed', by2['circuit_connector_definitions.create'].reason)
+        eq('1.1.110', by2['circuit_connector_definitions.create'].receiver.origin_lualib)
+        eq('2.0.77', res2.lualib.target)
+        local body = table.concat(port.report(store, 'lua-factorio', { cap = 40 }), '\n')
+        ok(body:find('REMOVED FROM THE DATA-STAGE LUALIB', 1, true) ~= nil, 'the group prints')
+        ok(body:find('DATA-STAGE LUALIB: 2.0.77 against origin 1.1.110', 1, true) ~= nil,
+            'the header says what was compared')
+        ok(body:find('Neither artifact covers the data-stage lualib', 1, true) == nil,
+            'and no bucket still claims no artifact covers it')
+        -- THE AGENT SURFACE: neither profile holds the name, so the profile diff alone
+        -- would count it in `neither`; the calls verb carries the lualib verdict
+        local d = assert(port.diff(store, 'lua-factorio-11', 'lua-factorio'))
+        eq('circuit_connector_definitions.create', (d.lualib_lost[1] or {}).name)
+        eq('lualib-removed', d.lualib_lost[1].verdict)
+        local env = require('cartograph.agent').answer(store, 'portability_move_calls',
+            { from = 'lua-factorio-11', to = 'lua-factorio' })
+        local row
+        for _, r in ipairs(env.result or {}) do
+            if r.name == 'circuit_connector_definitions.create' then row = r end
+        end
+        ok(row and row.lualib and row.lualib.verdict == 'lualib-removed',
+            'portability_move_calls returns the row: ' .. vim.inspect(env.result or env))
+        eq(1, env.subject.lualib_lost)
+    end)
+    pm.ONDEMAND = saved
+    for _, d in ipairs({ od, r20, r11, mod }) do vim.fn.delete(d, 'rf') end
+    if not ok_ then error(err, 0) end
+end)

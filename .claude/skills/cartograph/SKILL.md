@@ -231,7 +231,11 @@ a clean empty answer with per-site declines phrased as facts about *your* code.
 version port.** The call surface is call-derived, so a 1.1 → 2.0 Factorio move reports
 `lost=0` — everything that actually changed (`global.*`, `game.entity_prototypes`) is
 *read*, never called. Picking the call verb gets you a clean bill of health for a broken
-port.
+port. One exception lives on the call side: a base-game DATA-STAGE global
+(`circuit_connector_definitions.create`) is in neither profile, so when a distilled
+data-stage lualib exists (tools/lualibdistill.lua, from the user's own install) the call
+verb returns those rows with `lualib = { verdict, evidence }` and counts them in
+`subject.lualib_lost`.
 
 `portability_targets` gives the from/to vocabulary, and lists non-targets with the reason
 they are blocked. Guessing profile names is what it exists to prevent.

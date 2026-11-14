@@ -2172,6 +2172,16 @@ local function v_portability_move_calls(store, args)
         rows[#rows + 1] = { name = e.name, calls = e.calls, was = nn(e.why),
             file = nn(e.file), files = e.files or {} }
     end
+    -- DATA-STAGE LUALIB ROWS (CART-0651 (b)): neither profile holds these names, so
+    -- the profile diff cannot see them; the target's distilled data-stage lualib
+    -- calls them porting work. `lualib` carries the verdict and the evidence.
+    local lualib_lost = res.lualib_lost or {}
+    subject.lualib_lost = #lualib_lost
+    for _, e in ipairs(lualib_lost) do
+        rows[#rows + 1] = { name = e.name, calls = e.calls, was = NUL,
+            file = nn(e.file), files = e.files or {},
+            lualib = { verdict = e.verdict, evidence = e.evidence } }
+    end
     if #rows > cap then
         notes[#notes + 1] = { kind = 'clipped',
             why = ('%d name(s) lost, %d returned — raise `limit` to see the rest'):format(#rows, cap),
@@ -2187,7 +2197,9 @@ local function v_portability_move_calls(store, args)
     -- absence is TRUE. Two guards, deliberately redundant: cap can never clip to
     -- nothing, and the branch reads the unclipped set so the two cannot diverge
     -- again if the clamp is ever removed.
-    if #lost_set > 0 then return { subject = subject, result = rows, notes = notes } end
+    if #lost_set > 0 or #lualib_lost > 0 then
+        return { subject = subject, result = rows, notes = notes }
+    end
     if (req.total or 0) == 0 then
         return { subject = subject, result = {}, absence = 'absent', absence_why = {
             premise = 'no-external-call-surface',

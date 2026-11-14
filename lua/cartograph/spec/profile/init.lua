@@ -10,6 +10,12 @@ local M = {}
 local DIR = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/init%.lua$')
 local validity = require 'cartograph.validity'
 
+--- THE ON-DEMAND DIRECTORY (CART-0651 (b), CART-1938): artifacts distilled from an
+--- input the user has and the release does not ship — a game install's data-stage
+--- lualib — are written here, outside the repo, and found after the shipped ones.
+--- A shipped artifact of the same name wins.
+M.ONDEMAND = vim.fn.stdpath('data') .. '/cartograph/profile'
+
 --- Load the profile for a runtime (e.g. 'zig-std', 'lua-factorio'). Returns the
 --- profile table or nil. Memoized. Two artifact forms: a HAND-AUTHORED `.lua`
 --- module (reviewable, git-diffable — Factorio) or a DISTILLED `.mpack` blob
@@ -36,6 +42,7 @@ M.load = validity.memo {
         prof = mod
     else
         local fd = io.open(DIR .. '/' .. runtime .. '.mpack', 'rb')
+            or io.open(M.ONDEMAND .. '/' .. runtime .. '.mpack', 'rb')
         if fd then
             local blob = fd:read('*a'); fd:close()
             local ok, dec = pcall(vim.mpack.decode, blob)
@@ -141,6 +148,12 @@ function M.stamp_of(runtime)
         local st = vim.uv.fs_stat(DIR .. '/' .. runtime .. '.' .. ext)
         if st then
             parts[#parts + 1] = ('%s:%d:%d'):format(ext, st.mtime.sec, st.size)
+        end
+    end
+    if #parts == 0 then
+        local st = vim.uv.fs_stat(M.ONDEMAND .. '/' .. runtime .. '.mpack')
+        if st then
+            parts[1] = ('ondemand:%s:%d:%d'):format(M.ONDEMAND, st.mtime.sec, st.size)
         end
     end
     return #parts > 0 and table.concat(parts, '|') or nil
