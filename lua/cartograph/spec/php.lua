@@ -717,6 +717,12 @@ return {
             if s and s:type() == 'relative_scope' then
                 kind = node_text(s, src) == 'parent'
                     and 'parent' or 'self'
+            elseif s and (s:type() == 'name' or s:type() == 'qualified_name') then
+                -- (an EXPLICIT static call `T::m()` names its class, CART-1974: it had been looked up by the bare member
+                -- across every class — T::make beside U::make refused ambiguous, T::s() fell to the short-name noise
+                -- floor. Keyed by the real class (an alias names its class), the class veto decides)
+                local tw = node_text(s, src)
+                return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw
             end
         end
         if not kind then return nil end

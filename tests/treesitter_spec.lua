@@ -6985,3 +6985,34 @@ test('php: a typed parameter / property receiver keys its declared class (CART-1
     ok(has('Holder:6 OtherRepo::save OtherRepo'), 'a constructor-promoted property')
     ok(has('Holder:6 - OtherRepo'), 'an untyped property keeps the name match')
 end)
+
+-- CART-1974. An EXPLICIT static call `T::m()` names its class: keyed by it (an alias names its real class) behind the class
+-- veto. It had been looked up by the bare member across every class — T::make beside U::make refused ambiguous, and a
+-- short member T::s() fell to the noise floor.
+test('php: an explicit static call T::m() resolves into the class it names (CART-1974)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, lines)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$'); vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    w('src/A/T.php', { '<?php', 'namespace App\\A;', 'class T { public static function make() {} public static function s() {} }',
+        'class U { public static function make() {} }' })
+    w('src/A/Foo.php', { '<?php', 'namespace App\\A;', 'class Foo { public static function bar() {} }', 'class Kid extends T {}' })
+    w('src/B/g.php', { '<?php', 'namespace App\\B;', 'use App\\A\\T;', 'use App\\A\\T as Alias;', 'use App\\A\\Kid;', 'use Vendor\\Foo;',
+        'function g() { T::make(); T::s(); Alias::make(); Foo::bar(); Kid::make(); \\App\\A\\U::make(); }' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, c in ipairs(data.calls or {}) do
+        if c.file == 'src/B/g.php' then got[#got + 1] = ('%s %s -> %s'):format(tostring(c.full), tostring(c.qcls),
+            c.to and c.to:match('::([%w_]+::[%w_]+)@') or (c.refused and c.refused.rule or 'nil')) end
+    end
+    table.sort(got)
+    eq({ 'Foo::bar Foo -> blocked',          -- a VENDOR Foo, not the project's App\A\Foo
+         'Kid::make Kid -> T::make',          -- inherited, through extends
+         'T::make Alias -> T::make',          -- an alias names its class
+         'T::make T -> T::make',              -- not U::make: the class is named
+         'T::s T -> T::s',                    -- a short member resolves once it is qualified
+         'U::make \\App\\A\\U -> U::make' }, got)
+end)
