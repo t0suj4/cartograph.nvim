@@ -14,10 +14,48 @@
 -- pairing. This finding is about an artifact, not about the port.
 -- ⚠ The surface is READS (what portability_move answers), not the whole port: CART-0120's Von-Neumann patch
 -- changed 1027 lines for a read-surface port of 10 names. Data-stage prototype moves are a different surface.
+-- A GOAL THE USER NAMES (`goal`, CART-1909). One of the menu's is marked `named`. Any other gets no size — this tactic
+-- has no predicate for it — but it gets the EVIDENCE such a goal would have to be decided on, its DEMAND SET: every
+-- name the code reads, against both versions, split into
+--   decided         some profile adjudicates it: kept (both), lost (only `from`), gained (only `to`)
+--   not looked at   NEITHER profile holds it (a sibling module, a dependency, an unmodelled surface): no evidence
+-- answered as `frontier` — more evidence decides it. The rows are DATA (name, reads, status), the set a negative example
+-- (CART-0584: rejecting an offered goal) narrows from the other side. `goal_kind = 'structural'` (coupling, cohesion,
+-- layering) is no question about what the environment SUPPLIES: no supply evidence could answer it, so it is
+-- `unavailable` — pointing at CART-1004 — never frontier. The tactic cannot tell a goal's kind from its name: the caller
+-- states it ('supply', the default, or 'structural').
 -- CLAIM: at least one goal is offered.
 local port = require 'cartograph.portability'
 
+local KINDS = { supply = true, structural = true }
+local MENU = { port = true, backcompat = true, ['floor-raise'] = true }
+
+-- the DEMAND SET over one environment move: every read name, its reads, and what each version says of it
+local function demand_set(store, from, to)
+    local ok, why, a, b = port.diffable_pair(from, to)
+    if not ok then return nil, why end
+    local refs = require('cartograph.externals').references(store)
+    local rows, n = {}, { kept = 0, lost = 0, gained = 0, not_looked_at = 0 }
+    for name, reads in pairs(refs.names) do
+        local in_a, in_b = port.provides(a, name) ~= nil, port.provides(b, name) ~= nil
+        local st = (in_a and in_b and 'kept') or (in_a and 'lost') or (in_b and 'gained') or 'not_looked_at'
+        n[st] = n[st] + 1
+        rows[#rows + 1] = { name = name, reads = reads, status = st, decided = st ~= 'not_looked_at' }
+    end
+    table.sort(rows, function (x, y)
+        if x.reads ~= y.reads then return x.reads > y.reads end
+        return x.name < y.name
+    end)
+    return { rows = rows, decided = n.kept + n.lost + n.gained, kept = n.kept, lost = n.lost, gained = n.gained,
+        not_looked_at = n.not_looked_at, surface = 'reads' }
+end
+
 local function measure(store, p)
+    local gk = p.goal_kind
+    if gk == '' then gk = nil end
+    if gk and not KINDS[gk] then
+        return { error = ('goal_kind %q is neither supply nor structural'):format(tostring(gk)) }
+    end
     local res, why = port.reference_diff(store, p.from, p.to)
     if not res then return { error = why } end
     local cor, cwhy = port.correspond(p.from, p.to, res.lost)
@@ -69,6 +107,25 @@ local function measure(store, p)
     goals[#goals + 1] = bc
     goals[#goals + 1] = { goal = 'floor-raise', offered = false, absence = 'unbuilt', ticket = 'CART-1907',
         why = 'no instrument finds code still written to the old version\'s limits (satisfy the new one AND use it)' }
+    -- (the goal the user NAMED: marked when the menu has it; otherwise its demand set, or unavailable when structural)
+    local named
+    if p.goal and p.goal ~= '' then
+        if MENU[p.goal] and gk ~= 'structural' then
+            for _, g in ipairs(goals) do if g.goal == p.goal then g.named = true end end
+        elseif gk == 'structural' then
+            named = { goal = p.goal, named = true, offered = false, absence = 'unavailable', ticket = 'CART-1004',
+                why = 'a structural goal (coupling, cohesion, layering) is not a question about what the environment'
+                    .. ' supplies: no evidence on the read surface could answer it, so more of it would not help' }
+        else
+            local d, dwhy = demand_set(store, p.from, p.to)
+            if not d then return { error = dwhy } end
+            named = { goal = p.goal, named = true, offered = false, absence = 'frontier', demand = d,
+                why = ('this tactic has no predicate for %q: the evidence it would be decided on is its demand set —'
+                    .. ' %d read name(s), %d decided by a profile (kept %d / lost %d / gained %d), %d NOT LOOKED AT (no'
+                    .. ' profile holds them)'):format(p.goal, #d.rows, d.decided, d.kept, d.lost, d.gained, d.not_looked_at) }
+        end
+        if named then goals[#goals + 1] = named end
+    end
     return { from = p.from, to = p.to, goals = goals, rows = cor.rows,
         corpus = corpus and { sources = corpus.sources, disagree = disagree } or nil }
 end
@@ -79,7 +136,7 @@ local E = {
     tags = { 'find', 'code' },
     measures = 'CART-0588',
     summary = 'the goals one environment move admits (port / backcompat / floor-raise), each SIZED: from/to = profiles (portability_targets); backcompat splits the lost reads into common form / needs a shim / unpaired (frontier); corpus = tools/corpusroots.lua JSON (@file) of code already on `to`, the independent check of each pairing',
-    params = { from = 'string', to = 'string', corpus = 'string?' },
+    params = { from = 'string', to = 'string', corpus = 'string?', goal = 'string?', goal_kind = 'string?' },
     measure = measure,
     claim = function (v)
         if v.error then return false, v.error end
@@ -89,6 +146,9 @@ local E = {
                 L[#L + 1] = g.goal == 'backcompat'
                     and ('backcompat %d (common %d / shim %d / unpaired %d)'):format(g.size, g.common, g.shim, g.unpaired)
                     or ('%s %d'):format(g.goal, g.size)
+            elseif g.demand then
+                L[#L + 1] = ('%s: frontier (demand %d: %d decided, %d not looked at)'):format(g.goal, #g.demand.rows,
+                    g.demand.decided, g.demand.not_looked_at)
             else
                 L[#L + 1] = ('%s: %s'):format(g.goal, g.absence)
             end
@@ -121,6 +181,45 @@ E.examples = {
                 and a and a.to == 'script.active_mods' and a.basis == 'member-move' and a.common == true
                 and e and e.to == nil, vim.inspect(v)
         end },
+    },
+    {
+        name = 'a goal the menu LACKS gets its demand set: every read name, decided by a profile or NOT LOOKED AT (CART-1909)',
+        files = { ['control.lua'] = FILES['control.lua']:gsub('return M', 'function M.c() return mylib.x end\nfunction M.d() return mylib.y end\nreturn M') },
+        params = function () return { from = 'lua-factorio-11', to = 'lua-factorio', goal = 'drop every 1.1 global' } end,
+        expect = { holds = true, check = function (v)
+            local g = v.goals[4]
+            if not (g and g.goal == 'drop every 1.1 global' and g.named and g.absence == 'frontier' and g.demand) then
+                return false, vim.inspect(v.goals)
+            end
+            local st = {}
+            for _, r in ipairs(g.demand.rows) do st[r.name] = r.status end
+            return st['global.seen'] == 'lost' and st['game.active_mods'] == 'lost' and st['mylib.x'] == 'not_looked_at'
+                and st['mylib.y'] == 'not_looked_at' and g.demand.not_looked_at == 2
+                and g.demand.decided == #g.demand.rows - 2, vim.inspect(g.demand)
+        end },
+    },
+    {
+        name = 'a STRUCTURAL goal is unavailable, not frontier: no supply evidence answers it (CART-1909, CART-1004)',
+        files = FILES,
+        params = function () return { from = 'lua-factorio-11', to = 'lua-factorio', goal = 'reduce coupling', goal_kind = 'structural' } end,
+        expect = { holds = true, check = function (v)
+            local g = v.goals[4]
+            return g and g.absence == 'unavailable' and g.ticket == 'CART-1004' and g.demand == nil, vim.inspect(v.goals)
+        end },
+    },
+    {
+        name = 'a goal the menu HAS is marked named, and no fourth entry is made',
+        files = FILES,
+        params = function () return { from = 'lua-factorio-11', to = 'lua-factorio', goal = 'backcompat' } end,
+        expect = { holds = true, check = function (v)
+            return v.goals[2].named == true and v.goals[1].named == nil and #v.goals == 3, vim.inspect(v.goals)
+        end },
+    },
+    {
+        name = 'a goal_kind that is neither supply nor structural is refused, not guessed',
+        files = FILES,
+        params = function () return { from = 'lua-factorio-11', to = 'lua-factorio', goal = 'x', goal_kind = 'vibes' } end,
+        expect = { holds = false, check = function (v) return v.error ~= nil and v.error:find('vibes', 1, true) ~= nil, vim.inspect(v) end },
     },
     {
         name = 'the reverse move loses nothing: port and backcompat are ABSENT, with the reason, never a silent 0',
