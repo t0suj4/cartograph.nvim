@@ -64,6 +64,8 @@ M.NODE_FIELDS = {
                     -- parallel-vs-sequential split the graph gate caught.
     synth = true, -- a synthetic def emitted from a DSL call (ruby attr_*),
                   -- no `def` keyword in the source
+    ovl = true, -- a synthetic OVERLOAD: a real def of the same name does not shadow it (a java record's implicit canonical
+                -- constructor beside a declared one, CART-2070)
     altkeys = true, -- extra EXACT resolver keys for one def (zig value-receiver
                     -- dual-key, v83): persisted so the parallel/rebuild resolver
                     -- (M.relink) re-derives the same keys the live-tree

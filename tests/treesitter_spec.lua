@@ -7064,6 +7064,49 @@ test('php: a class-keyed call with no target walks its class chain, case-insensi
     eq(want, targets(rd), 'relink agrees')
 end)
 
+-- CART-2070. `new T(…)` calls T's constructor: keyed T::T like any Class::m call, for a plain, a generic and a nested
+-- (scoped) type, and a record's compact constructor; a class with no declared constructor and a JDK class have no target.
+test('java: new T() calls T::T — plain, generic, nested and compact; none without a declared constructor (CART-2070)', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/p', 'p')
+    local function put(f, lines)
+        local fd = assert(io.open(root .. '/p/' .. f, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    put('U.java', { 'package p;', 'public class U {', '  U() { }', '  static U make() { return new U(); }', '}' })
+    put('G.java', { 'package p;', 'public class G<T> {', '  public G() { }', '  public static class In { public In() { } }',
+        '  record R(int n) { public R { } }', '}' })
+    put('V.java', { 'package p;', 'import java.util.ArrayList;', 'public class V {',
+        '  Object f() { new G<String>(); new G.In(); new G.R(1); new ArrayList<>(); return new NoCtor(); }',
+        '  void g(byte[] b) { new UB(b, 0, 1); new Plain(1); new Canon("a", null); }', '}',
+        'class NoCtor { }' })
+    -- a record's IMPLICIT canonical constructor: minted unless declared (compact, or the components' types in order),
+    -- and a declared non-canonical one does not shadow it
+    put('Rec.java', { 'package p;', 'record UB(byte[] bytes, int offset, int length) {',
+        '  public UB(byte[] bytes) { this(bytes, 0, bytes.length); }', '}', 'record Plain(int a) { }',
+        'record Canon(String s, java.util.List<String> xs) {',
+        '  public Canon(String s, java.util.List<String> xs) { this.s = s; this.xs = xs; }', '}' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local to = {}
+    for _, c in ipairs(data.calls) do
+        if c.full and c.full:match('::') and c.callee == c.full:match('^([%w_]+)::') then
+            to[c.full] = c.to and c.to:match('::([%w_]+::[%w_]+)@') or false
+        end
+    end
+    eq('U::U', to['U::U'], 'a plain new T()')
+    eq('G::G', to['G::G'], 'a generic new T<A>()')
+    eq('In::In', to['In::In'], 'a nested new T.In()')
+    eq('R::R', to['R::R'], 'a record compact constructor')
+    eq(false, to['NoCtor::NoCtor'], 'no declared constructor: no target')
+    eq(false, to['ArrayList::ArrayList'], 'a JDK class: no target')
+    eq('Plain::Plain', to['Plain::Plain'], 'a record with no constructor: its implicit canonical one')
+    eq('Canon::Canon', to['Canon::Canon'], 'a declared canonical constructor')
+    eq(false, to['UB::UB'], 'a declared one-arg constructor beside the implicit canonical one: two overloads, refused by name')
+    local synth = {}
+    for _, n in ipairs(data.nodes) do if n.synth and n.name and n.name:match('^(%w+)::%1$') then synth[n.name] = true end end
+    eq({ ['Plain::Plain'] = true, ['UB::UB'] = true }, synth, 'only the records that do not declare it get one')
+end)
+
 -- CART-0379. A record's compact constructor is a constructor: `public R { … }` mints R::R, binds the record's components
 -- as its params (so `count` is the parameter, not a reference to the accessor), owns its calls, and its body has flow rows
 -- (an `if` included). A `static { … }` block stays with the file's region: load-time code, no name, no minted owner.

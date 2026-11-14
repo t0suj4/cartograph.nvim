@@ -8835,7 +8835,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local sp = pos_of(sd.node)
                 local id = uid(('%s::%s@%d'):format(file, sd.name, sp.start.line))
                 local node = { id = id, name = sd.name, kind = 'method',
-                    file = file, range = sp, order = sp.start.line, synth = true }
+                    file = file, range = sp, order = sp.start.line, synth = true, ovl = sd.ovl or nil }
                 nodes[#nodes + 1] = node
                 exact[sd.name] = exact[sd.name] or {}
                 table.insert(exact[sd.name], node)
@@ -10148,7 +10148,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                 if hasreal then
                     local filt = {}
                     for _, n in ipairs(cands) do
-                        if not n.synth then filt[#filt + 1] = n end
+                        -- (a synthetic OVERLOAD stays: it is another signature of the name, not the same one emitted
+                        -- twice — a java record's implicit canonical constructor beside a declared one, CART-2070)
+                        if not n.synth or n.ovl then filt[#filt + 1] = n end
                     end
                     cands = filt
                 end

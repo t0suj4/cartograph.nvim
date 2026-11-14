@@ -864,6 +864,31 @@ local function java_synth_defs(tsroot, src)
                         if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn } end
                     end
                 end
+                -- ★ AND ITS CANONICAL CONSTRUCTOR, unless the body declares it (CART-2070): `record UTF8Bytes(byte[] b, int o,
+                -- int l)` with only `UTF8Bytes(byte[] b)` declared had ONE constructor node, so `new UTF8Bytes(b, o, l)` linked
+                -- to the one-argument constructor. The canonical one is declared by a compact constructor or a constructor
+                -- whose parameter TYPES are the components', in order.
+                local function sig(list)
+                    local t = {}
+                    for _, q in (list and inext or function () end), list, -1 do
+                        if q:type() == 'formal_parameter' or q:type() == 'spread_parameter' then
+                            local ty = q:field('type')[1] or q:named_child(0)
+                            t[#t + 1] = ty and node_text(ty, src):gsub('%s+', '') or '?'
+                        end
+                    end
+                    return table.concat(t, ',')
+                end
+                local want, canonical = sig(ps), false
+                for _, d in (body and inext or function () end), body, -1 do
+                    local dt = d:type()
+                    if dt == 'compact_constructor_declaration'
+                        or (dt == 'constructor_declaration' and sig(d:field('parameters')[1]) == want) then
+                        canonical = true
+                    end
+                end
+                -- (`ovl`: another overload of the name, so a declared constructor does not shadow it — the call is then
+                -- ambiguous by name and refused, the honest answer until arity is consulted, CART-1385)
+                if not canonical then out[#out + 1] = { name = rec .. '::' .. rec, node = nm, ovl = true } end
             end
         end
         for _, c in inext, n, -1 do if c:named() then walk(c) end end
@@ -946,6 +971,8 @@ return {
     calls = [=[
         (method_invocation name: (identifier) @name) @call
         (object_creation_expression type: (type_identifier) @name) @call
+        (object_creation_expression type: (generic_type (type_identifier) @name)) @call
+        (object_creation_expression type: (scoped_type_identifier (type_identifier) @name .)) @call
     ]=],
     -- ★ TWO PATTERNS, because 42.5% of java's fields have NO INITIALIZER (1130 of
     -- 2656 declarators on libs) and the single value-requiring pattern made every
@@ -1044,6 +1071,13 @@ return {
     end,
     scan_fields = java_scan_fields,
     qualify_call = function (calln, name, src, model)
+        -- ★ `new T(…)` CALLS T's CONSTRUCTOR (CART-2070): the row carried the bare class name and the constructor node
+        -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /
+        -- import / package resolution decides which T, and a class with no declared constructor simply has no T::T.
+        if calln:type() == 'object_creation_expression' then
+            local cls = java_base_type(calln:field('type')[1], src)
+            return cls and (cls .. '::' .. cls) or nil
+        end
         if calln:type() ~= 'method_invocation' then return nil end
         local obj = calln:field('object')[1]
         local cls, hedge, defer, qual
