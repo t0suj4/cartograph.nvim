@@ -297,6 +297,22 @@ test('guards: java — == null on a field or this.f, !X, else arms by FIELD; els
     eq(2, gw_of(data, 'K::otherfield', 'oth'), 'a test of ANOTHER field is a guard, not set-once')
 end)
 
+-- (CART-0379: a record's COMPACT CONSTRUCTOR is a function boundary like any constructor — its own guard counts, a guard
+-- around a LOCAL record declared under an `if` does not dominate the constructor's body)
+test('guards: java — a compact constructor is a guard boundary; its own guard is set-once (CART-0379)', function ()
+    if not ready('java') then skip 'no java parser' end
+    local root = mkroot('G.java', table.concat({
+        'class G {',
+        '    static Object sm; static Object own;',
+        '    void outer() { if (sm == null) { record L(int a) { L { sm = new Object(); } } } }',
+        '    record R(int b) { R { if (own == null) { own = new Object(); } } }',
+        '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    eq(1, gw_of(data, 'L::L', 'sm'), 'the guard outside the local record does not reach its constructor')
+    eq(3, gw_of(data, 'R::R', 'own'), 'a guard inside the compact constructor: set-once')
+end)
+
 test('guards: java memo CALLS — computeIfAbsent / putIfAbsent write their receiver set-once; put / get do not (CART-1585)', function ()
     if not ready('java') then skip 'no java parser' end
     local root = mkroot('M.java', table.concat({

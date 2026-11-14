@@ -386,3 +386,22 @@ test('cfg.graph (C): an EXECUTABLE graph — labeled edges, continue to the upda
     eq({ id('return a;') }, to(id('(i)'), 'F'))
     ok(g.rpo[g.entry] == 1 and g.rpo[id('i < a')] < g.rpo[id('(i == 2)')], 'reverse postorder: a condition before its body')
 end)
+
+-- (CART-0379: a java record's COMPACT CONSTRUCTOR is a function boundary — a local record declared under `if (x != null)`
+-- does not run its constructor under that guard, the constructor runs when something constructs it)
+test('cfg: a java compact constructor stops the guard climb', function ()
+    if not ready_lang('java') then skip 'no java parser' end
+    local src = table.concat({
+        'class G {',
+        '  static void f(Object x) {',
+        '    if (x != null) {',
+        '      record L(int a) { L { inside(a); } }',
+        '      outside(x);',
+        '    }',
+        '  }',
+        '}',
+    }, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'java'):parse()[1]:root()
+    eq(1, #guard_texts(find(root, src, 'method_invocation', 'outside'), src), 'the method body is guarded')
+    eq({}, guard_texts(find(root, src, 'method_invocation', 'inside'), src), 'the constructor body is not')
+end)

@@ -6677,11 +6677,12 @@ test('parallel parity: a registration only a slice could resolve does not surviv
     -- class outside it (a name under three characters never upgrades). (It was a RECORD's compact constructor passing
     -- its component — the elasticsearch shape — until CART-2068 made a record's components bound fields with their own
     -- accessors: that name is no longer a candidate for another class's method at all. The relink mechanism is kept
-    -- with a name the record does NOT declare)
+    -- with a name the record does NOT declare. And it is a static FIELD INITIALISER, the region's: a compact constructor
+    -- is a minted function since CART-0379, so a call in it is that function's `ref`, not the file's registration)
     if not has_parser('java') then return end
     local jroot = vim.fn.tempname(); vim.fn.mkdir(jroot, 'p')
     local function jput(f, t) local fd = assert(io.open(jroot .. '/' .. f, 'w')); fd:write(t); fd:close() end
-    jput('R.java', 'import java.util.Objects;\npublic record R(int count) {\n    public R {\n        Objects.requireNonNull(total);\n    }\n}\n')
+    jput('R.java', 'import java.util.Objects;\npublic record R(int count) {\n    static final Object O = Objects.requireNonNull(total);\n}\n')
     jput('A.java', 'public class A {\n    public int total() { return 1; }\n}\n')
     jput('B.java', 'public class B {\n    public int total() { return 2; }\n}\n')
     local jseq = ts.extract(jroot)
@@ -7061,6 +7062,40 @@ test('php: a class-keyed call with no target walks its class chain, case-insensi
     for _, c in ipairs(rd.calls) do c.to, c.refused, c.inferred = nil, nil, nil end
     ts.relink(rd)
     eq(want, targets(rd), 'relink agrees')
+end)
+
+-- CART-0379. A record's compact constructor is a constructor: `public R { … }` mints R::R, binds the record's components
+-- as its params (so `count` is the parameter, not a reference to the accessor), owns its calls, and its body has flow rows
+-- (an `if` included). A `static { … }` block stays with the file's region: load-time code, no name, no minted owner.
+test('java: a record compact constructor is a minted constructor, a static block stays region-owned (CART-0379)', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local flow = require 'cartograph.flow'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/S.java', 'w'))
+    fd:write(table.concat({ 'package p;', 'public class S {', '  static int helper() { return 1; }',
+        '  static { if (helper() > 0) { helper(); } }',
+        '  record R(int count) {', '    public R {', '      if (count < 0) { throw new IllegalArgumentException(); }',
+        '      check(count);', '    }', '    static void check(int c) {}', '  }', '}' }, '\n') .. '\n')
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local ctor
+    for _, n in ipairs(data.nodes) do if n.name == 'R::R' then ctor = n end end
+    ok(ctor, 'the compact constructor is minted')
+    eq({ 'count' }, ctor.params, 'its parameters are the record components')
+    local edges = {}
+    for _, e in ipairs(data.edges) do edges[e.kind .. ' ' .. e.from .. ' ' .. e.to] = true end
+    ok(edges['ref ' .. ctor.id .. ' S.java::R::check@9'], 'the constructor owns its call')
+    local ncall = 0
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'check' then ncall = ncall + 1; eq(nil, c.top, 'a call in the constructor is not top-level (fn_types)') end
+    end
+    eq(1, ncall)
+    ok(edges['ref S.java::region@0 S.java::S::helper@2'], 'the static block stays with the region')
+    for k in pairs(edges) do ok(not k:match('R::count'), 'a component read is the parameter, not the accessor: ' .. k) end
+    local kinds = {}
+    for _, r in ipairs(flow.rows(ctor)) do kinds[r.kind] = true end
+    ok(kinds.if_statement, 'the constructor body has flow rows, its if included')
 end)
 
 -- CART-2068. A Java record component's implicit accessor is a method: `record Descriptor(String className, String

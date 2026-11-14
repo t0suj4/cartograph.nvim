@@ -118,7 +118,7 @@ local FN_BOUND = {
     function_definition = true, function_declaration = true,
     method_declaration = true, anonymous_function = true,
     arrow_function = true, lambda_expression = true,
-    constructor_declaration = true,
+    constructor_declaration = true, compact_constructor_declaration = true, -- java record (CART-0379)
     method = true, singleton_method = true, do_block = true, lambda = true,
 }
 -- ★ `block` is a TYPE-NAME COLLISION: ruby's brace block `{ |v| … }` and lua's

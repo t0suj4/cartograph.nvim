@@ -374,8 +374,17 @@ local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked
         end
     end
 end
+-- ★ A RECORD'S COMPACT CONSTRUCTOR DECLARES NO PARAMETERS AND TAKES THEM ALL (CART-0379): `public R { … }` binds the
+-- record's components implicitly, so its parameter list IS the record header's. One answer for the three readers that
+-- ask (scope binders here, `params_of` for node params and flow params).
+local function java_compact_params(node)
+    if node:type() ~= 'compact_constructor_declaration' then return nil end
+    local body = node:parent()
+    local rec = body and body:parent()
+    return rec and rec:type() == 'record_declaration' and rec:field('parameters')[1] or nil
+end
 local function jvt_params(node, src, out) -- name -> {ty}
-    local ps = node:field('parameters')[1]
+    local ps = node:field('parameters')[1] or java_compact_params(node)
     for _, c in (ps and inext or NOOP), ps, -1 do
         if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
             local nm = c:field('name')[1]
@@ -697,6 +706,7 @@ local JAVA_LEXICAL_SCOPES = {
     constructor_body        = { kind = 'local', harvest = jvt_locals },
     method_declaration      = { kind = 'param', harvest = jvt_params },
     constructor_declaration = { kind = 'param', harvest = jvt_params },
+    compact_constructor_declaration = { kind = 'param', harvest = jvt_params }, -- the record's components (CART-0379)
     lambda_expression       = { kind = 'param', harvest = jvt_params },
     class_body              = { kind = 'field', harvest = jvt_fields },
     enum_body               = { kind = 'field', harvest = jvt_fields },
@@ -802,7 +812,8 @@ local JAVA_GUARDS = {
         if p:field('alternative')[1] == node then return node:type() == 'if_statement' and 'elseif' or 'else' end
         return nil
     end,
-    fn = { method_declaration = true, constructor_declaration = true, lambda_expression = true },
+    fn = { method_declaration = true, constructor_declaration = true, compact_constructor_declaration = true,
+        lambda_expression = true },
     binop = 'binary_expression', andops = { ['&&'] = true },
     negop = 'unary_expression', negtok = '!', pfield = 'parameters',
     pw_refsem = true, -- objects are reference-typed
@@ -928,6 +939,7 @@ return {
     functions = [=[
         (method_declaration name: (identifier) @name) @def
         (constructor_declaration name: (identifier) @name) @def
+        (compact_constructor_declaration name: (identifier) @name) @def
         (variable_declarator name: (identifier) @name value: (lambda_expression) @def)
         (argument_list (lambda_expression) @adef)
     ]=],
@@ -951,12 +963,18 @@ return {
             name: (identifier) @vname !value)) @vdecl
     ]=],
     params_field = 'parameters',
+    params_of = java_compact_params, -- a compact constructor's are its record's (CART-0379)
     body_field = 'body',
     -- a CONSTRUCTOR is a function the shared table never named: it is 12.5% of
     -- java's sampled def population and every one of them was invisible to
     -- `expr.of` while the set was hardcoded elsewhere (CART-0306).
+    -- ★ A RECORD'S COMPACT CONSTRUCTOR IS A CONSTRUCTOR (CART-0379): `public R { … }` had no node, so its statements
+    -- were owned by the file's region and its body had NO flow rows (the region carries none in java), and its
+    -- `if` was invisible. A `static { … }` block is deliberately NOT here: it is load-time code with no name, the
+    -- region is what owns load-time code (the CART-0926 decision for lua's module factory), and a stop needs a
+    -- minted owner — a stop without one is a row deletion. Whether to mint it is parked on the ticket.
     fn_types = { method_declaration = true, constructor_declaration = true,
-        lambda_expression = true },
+        compact_constructor_declaration = true, lambda_expression = true },
     is_method = function () return true end,
     -- methods carry their class, `::` like php (and Java's own method-ref
     -- syntax): OwnerController::processFindForm
