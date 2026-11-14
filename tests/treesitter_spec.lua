@@ -6920,3 +6920,68 @@ test('php: `new T()` calls T::__construct, and a class-keyed call resolves only 
     eq(want, targets(rd), 'relink agrees with extract')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-1967. A php call receiver is TYPED by a declaration PHP enforces: a parameter's single class type hint (unless
+-- something in the function rebinds the variable), or a typed / constructor-promoted property of the enclosing class
+-- (`$this->p->m()`). Keyed `Class::m`, so CART-0735's class veto decides the target — an interface's method stub
+-- included, which is what the interface linker (CART-0692) acts on. Passing the variable as an argument may rebind it
+-- by reference: hedged. A vendor type (no project class) stays external.
+test('php: a typed parameter / property receiver keys its declared class (CART-1967)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, lines)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$'); vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(table.concat(lines, '\n') .. '\n'); fd:close()
+    end
+    w('src/Repo/BaseRepoInterface.php', { '<?php', 'namespace App\\Repo;', 'interface BaseRepoInterface { public function total(); }' })
+    w('src/Repo/RepoInterface.php', { '<?php', 'namespace App\\Repo;', 'interface RepoInterface extends BaseRepoInterface { public function find($id); }' })
+    w('src/Repo/OtherRepo.php', { '<?php', 'namespace App\\Repo;', 'class OtherRepo { public function find($id) {} public function save() {} }' })
+    w('src/Svc/Service.php', { '<?php', 'namespace App\\Svc;', 'use App\\Repo\\RepoInterface;', 'use App\\Repo\\OtherRepo;',
+        'use Vendor\\Clock\\ClockInterface;', 'class Service {',
+        '  public function a(RepoInterface $r) { return $r->find(1); }',                           -- 6
+        '  public function b(?OtherRepo $o) { return $o->save(); }',                               -- 7
+        '  public function c(OtherRepo $o) { $o = make(); return $o->save(); }',                   -- 8: rebound
+        '  public function d(OtherRepo $o) { foreach ($xs as $o) {} return $o->save(); }',         -- 9: foreach binder
+        '  public function e(OtherRepo $o) { $f = function () use (&$o) { return 1; }; return $o->save(); }', -- 10: by-ref use
+        '  public function f(OtherRepo $o) { $g = fn() => $o->save(); return $g; }',              -- 11: arrow
+        '  public function g(OtherRepo $o) { $h = function () use ($o) { return $o->save(); }; }', -- 12: closure use
+        '  public function h(OtherRepo $o) { helper($o); return $o->save(); }',                    -- 13: argument: hedged
+        '  public function i($u) { return $u->save(); }',                                          -- 14: untyped
+        '  public function j(self $s) { return $s->a(null); }',                                    -- 15: self
+        '  public function k(RepoInterface $r) { return $r->total(); }',                           -- 16: inherited by the interface
+        '  public function l(ClockInterface $c) { return $c->now(); }',                            -- 17: a vendor type
+        '  public function m(OtherRepo $o) { foreach ($xs as $k => $o) {} return $o->save(); }',   -- 18: a foreach VALUE
+        '}' })
+    w('src/Svc/Holder.php', { '<?php', 'namespace App\\Svc;', 'use App\\Repo\\RepoInterface;', 'use App\\Repo\\OtherRepo;',
+        'class Holder { private RepoInterface $repo; protected $untyped; private static OtherRepo $st;',
+        '  public function __construct(private OtherRepo $other) {}',
+        '  public function run() { $this->repo->find(1); $this->other->save(); $this->untyped->save(); }', -- 6
+        '}' })
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, c in ipairs(data.calls or {}) do
+        if c.file:match('^src/Svc/') then
+            got[#got + 1] = ('%s:%d %s %s%s'):format(c.file:match('([^/]+)%.php$'), c.line, tostring(c.qcls and c.full or '-'),
+                c.to and c.to:match('([^/]+)%.php::') or (c.refused and 'refused' or 'nil'), c.hedge and ' ~' .. c.hedge or '')
+        end
+    end
+    table.sort(got)
+    local function has(s) for _, g in ipairs(got) do if g == s then return true end end return false end
+    ok(has('Service:6 RepoInterface::find RepoInterface'), 'an interface-typed parameter lands on the interface: ' .. table.concat(got, ' | '))
+    ok(has('Service:7 OtherRepo::save OtherRepo'), '?Type')
+    ok(not has('Service:8 OtherRepo::save OtherRepo'), 'a rebound parameter is not typed')
+    ok(not has('Service:9 OtherRepo::save OtherRepo'), 'a foreach binder rebinds it')
+    ok(not has('Service:10 OtherRepo::save OtherRepo'), 'a by-reference closure use may rebind it')
+    ok(not has('Service:18 OtherRepo::save OtherRepo'), 'a foreach key => VALUE binder rebinds it')
+    ok(has('Service:11 OtherRepo::save OtherRepo'), 'an arrow function sees the parameter')
+    ok(has('Service:12 OtherRepo::save OtherRepo'), 'a closure sees it through use ($o)')
+    ok(has('Service:13 OtherRepo::save OtherRepo ~byref-arg'), 'passed as an argument: hedged')
+    ok(has('Service:14 - OtherRepo'), 'an untyped receiver keeps the name match')
+    ok(has('Service:15 Service::a Service'), 'self names the enclosing class')
+    ok(has('Service:16 RepoInterface::total BaseRepoInterface'), 'a method the interface inherits: through its extends')
+    ok(has('Service:17 ClockInterface::now nil'), 'a vendor type: no project class, external')
+    ok(has('Holder:6 RepoInterface::find RepoInterface'), 'a typed property')
+    ok(has('Holder:6 OtherRepo::save OtherRepo'), 'a constructor-promoted property')
+    ok(has('Holder:6 - OtherRepo'), 'an untyped property keeps the name match')
+end)

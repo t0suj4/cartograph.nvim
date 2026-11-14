@@ -32,9 +32,26 @@ local function php_class_names(root, src)
     local ns, nsn, braced, alias, traits = '', 0, false, {}, nil
     for _, c in inext, root, -1 do
         local t = c:type()
-        -- (a class's or trait's TRAIT uses — `use Helps;` in its body — as written: a trait's methods are the class's,
-        -- so the class veto walks them like a supertype. Not data.extends: build_super reads a second parent there as
-        -- a name collision and drops the class's whole chain)
+        -- (EXTRA SUPERTYPES, as written: a class's or trait's TRAIT uses — `use Helps;` in its body, whose methods are the
+        -- class's — and an INTERFACE's parents — `interface I extends J, K` — CART-1967. The class veto walks them like
+        -- a supertype. Not data.extends: build_super reads a second parent there as a name collision and drops the
+        -- class's whole chain)
+        if t == 'interface_declaration' then
+            local nm = c:field('name')[1]
+            for _, k in inext, c, -1 do
+                if nm and k:type() == 'base_clause' then
+                    for _, u in inext, k, -1 do
+                        local ut = u:type()
+                        if ut == 'name' or ut == 'qualified_name' then
+                            traits = traits or {}
+                            local key = node_text(nm, src):lower()
+                            local l = traits[key]; if not l then l = {}; traits[key] = l end
+                            l[#l + 1] = node_text(u, src)
+                        end
+                    end
+                end
+            end
+        end
         if t == 'class_declaration' or t == 'trait_declaration' then
             local nm, body = c:field('name')[1], c:field('body')[1]
             if nm and body then
@@ -140,6 +157,175 @@ local function php_enclosing(node, src, kind)
         end
         p2 = p2:parent()
     end
+end
+
+-- ── A TYPED RECEIVER (CART-1967) ────────────────────────────────────────────────────────────────────────────────────
+-- `function f(FooInterface $x) { $x->m(); }`: the parameter's class type hint is enforced when the call starts, so `$x`
+-- holds a FooInterface — until something rebinds it. Typed only when the parameter is a single CLASS type (`Foo`,
+-- `?Foo`; not a union / intersection, not a built-in), not by-reference, not variadic, and NOTHING in the function
+-- writes the variable: an assignment (or a destructuring one), a foreach binder, a catch variable, `global` / `static`,
+-- a by-reference closure `use`, a reference taken of it — or code that can write any local (`$$v`, extract, parse_str,
+-- include). A closure sees an outer parameter only through `use ($x)`, an arrow function directly. Passing `$x` as a
+-- call ARGUMENT may rebind it through a by-reference parameter this pass cannot see: such a receiver is HEDGED (~).
+local FN_TYPES = { method_declaration = true, function_definition = true, anonymous_function = true, arrow_function = true }
+local BUILTIN_TYPES = { mixed = true, object = true, callable = true, iterable = true, array = true, string = true,
+    int = true, float = true, bool = true, void = true, never = true, null = true, ['false'] = true, ['true'] = true }
+local LOCAL_WRITERS = { extract = true, parse_str = true }
+-- does anything in `fn` write `var`? -> 'write' | 'arg' (passed as an argument somewhere) | nil
+local function php_writes(fn, var, src)
+    local arg = false
+    local function under_left(n)
+        local cur, p = n, n:parent()
+        while p do
+            local pt = p:type()
+            if pt == 'assignment_expression' or pt == 'augmented_assignment_expression'
+                or pt == 'reference_assignment_expression' then
+                local l = p:field('left')[1]
+                if l and l:equal(cur) then return true end
+                -- (the RIGHT of `$y = &$x` aliases $x: a write through $y rebinds it)
+                if pt == 'reference_assignment_expression' and cur:type() == 'variable_name' then return true end
+                return false
+            elseif pt == 'list_literal' or pt == 'array_creation_expression' or pt == 'array_element_initializer'
+                or pt == 'pair' and p:parent() and p:parent():type() ~= 'foreach_statement' then
+                cur, p = p, p:parent()
+            else return false end
+        end
+        return false
+    end
+    local found
+    local function walk(n)
+        if found then return end
+        local t = n:type()
+        if t == 'dynamic_variable_name' or t == 'include_expression' or t == 'include_once_expression'
+            or t == 'require_expression' or t == 'require_once_expression'
+            or t == 'global_declaration' and node_text(n, src):find(var, 1, true)
+            or t == 'function_static_declaration' and node_text(n, src):find(var, 1, true) then
+            found = 'write'; return
+        end
+        if t == 'function_call_expression' then
+            local f = n:field('function')[1]
+            if f and f:type() == 'name' and LOCAL_WRITERS[node_text(f, src):lower()] then found = 'write'; return end
+        end
+        if t == 'variable_name' and node_text(n, src) == var then
+            local p = n:parent()
+            local pt = p and p:type()
+            if under_left(n) or pt == 'catch_clause' or pt == 'by_ref'
+                or pt == 'foreach_statement' and not (p:named_child(0) and p:named_child(0):equal(n))
+                or pt == 'pair' and p:parent() and p:parent():type() == 'foreach_statement' then
+                found = 'write'; return
+            end
+            if pt == 'argument' then arg = true end
+        end
+        for _, c in inext, n, -1 do if c:named() then walk(c) end end
+    end
+    local body = fn:field('body')[1]
+    if body then walk(body) end
+    -- (a closure's by-reference `use (&$x)` sits beside its body, not in it)
+    for _, c in inext, fn, -1 do if c:type() == 'anonymous_function_use_clause' then walk(c) end end
+    return found or (arg and 'arg') or nil
+end
+-- the class `var` is declared as, seen from `node`: (class as written, hedge) or nil
+local function php_param_class(node, var, src, depth)
+    depth = depth or 0
+    if depth > 8 then return nil end
+    local fn = node:parent()
+    while fn and not FN_TYPES[fn:type()] do fn = fn:parent() end
+    if not fn then return nil end
+    local params, found = fn:field('parameters')[1], nil
+    for _, p in (params and inext or function () end), params, -1 do
+        local pt = p:type()
+        if pt == 'simple_parameter' or pt == 'property_promotion_parameter' or pt == 'variadic_parameter' then
+            local nm = p:field('name')[1]
+            if nm and node_text(nm, src) == var then found = p; break end
+        end
+    end
+    if found then
+        if found:type() == 'variadic_parameter' or found:field('reference_modifier')[1] then return nil end
+        local ty = found:field('type')[1]
+        if ty and ty:type() == 'optional_type' then ty = ty:named_child(0) end
+        if not (ty and ty:type() == 'named_type') then return nil end
+        local tn = ty:named_child(0)
+        local tw = tn and node_text(tn, src)
+        if not tw or BUILTIN_TYPES[tw:lower()] then return nil end
+        local w = php_writes(fn, var, src)
+        if w == 'write' then return nil end
+        local lw = tw:lower()
+        if lw == 'self' or lw == 'static' or lw == 'parent' then
+            local _, written = php_enclosing(fn, src, lw == 'parent' and 'parent' or 'self')
+            if not written then return nil end
+            tw = written
+        end
+        return tw, w == 'arg' and 'byref-arg' or nil
+    end
+    -- not a parameter here: an arrow function sees the enclosing scope, a closure only what it `use`s BY VALUE
+    if fn:type() == 'arrow_function' then
+        if php_writes(fn, var, src) == 'write' then return nil end
+        return php_param_class(fn, var, src, depth + 1)
+    elseif fn:type() == 'anonymous_function' then
+        for _, c in inext, fn, -1 do
+            if c:type() == 'anonymous_function_use_clause' then
+                for _, u in inext, c, -1 do
+                    if u:type() == 'variable_name' and node_text(u, src) == var then
+                        if php_writes(fn, var, src) == 'write' then return nil end
+                        return php_param_class(fn, var, src, depth + 1)
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- ── A TYPED PROPERTY RECEIVER (CART-1967) ───────────────────────────────────────────────────────────────────────────
+-- `$this->repo->find()` where the ENCLOSING class declares `private RepoInterface $repo;` (or promotes it in its
+-- constructor: `public function __construct(private RepoInterface $repo)`): a typed property's type is enforced on
+-- EVERY assignment (PHP 7.4), so no rebinding check is needed. Same class only — an inherited property, a trait's, a
+-- docblock `@var` (unenforced) are not read. -> the class as written, or nil
+local function php_prop_class(node, prop, src)
+    local cls = node:parent()
+    while cls and cls:type() ~= 'class_declaration' and cls:type() ~= 'trait_declaration' do cls = cls:parent() end
+    local body = cls and cls:field('body')[1]
+    if not body then return nil end
+    local function typed(ty)
+        if ty and ty:type() == 'optional_type' then ty = ty:named_child(0) end
+        if not (ty and ty:type() == 'named_type') then return nil end
+        local tn = ty:named_child(0)
+        local tw = tn and node_text(tn, src)
+        if not tw or BUILTIN_TYPES[tw:lower()] then return nil end
+        local lw = tw:lower()
+        if lw == 'self' or lw == 'static' or lw == 'parent' then
+            local _, written = php_enclosing(ty, src, lw == 'parent' and 'parent' or 'self')
+            return written
+        end
+        return tw
+    end
+    for _, d in inext, body, -1 do
+        local dt = d:type()
+        if dt == 'property_declaration' then
+            local static = false
+            for _, k in inext, d, -1 do if k:type() == 'static_modifier' then static = true end end
+            if not static then
+                for _, el in inext, d, -1 do
+                    if el:type() == 'property_element' then
+                        local nm = el:field('name')[1]
+                        if nm and node_text(nm, src) == prop then return typed(d:field('type')[1]) end
+                    end
+                end
+            end
+        elseif dt == 'method_declaration' then
+            local mn = d:field('name')[1]
+            if mn and node_text(mn, src):lower() == '__construct' then
+                local ps = d:field('parameters')[1]
+                for _, p in (ps and inext or function () end), ps, -1 do
+                    if p:type() == 'property_promotion_parameter' then
+                        local nm = p:field('name')[1]
+                        if nm and node_text(nm, src) == prop then return typed(p:field('type')[1]) end
+                    end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 local function php_is_write(c, n)
@@ -513,6 +699,18 @@ return {
             if o and o:type() == 'variable_name'
                 and node_text(o, src) == '$this' then
                 kind = 'self'
+            elseif o and o:type() == 'variable_name' then
+                -- (a TYPED parameter receiver, CART-1967: keyed by its declared class, the class veto decides)
+                local tw, hedge = php_param_class(calln, node_text(o, src), src)
+                if tw then return php_key_class(calln, src, tw) .. '::' .. name, hedge, nil, nil, tw end
+            elseif o and o:type() == 'member_access_expression' then
+                -- (a TYPED PROPERTY of the enclosing class, `$this->repo->m()`, CART-1967)
+                local base, pn = o:field('object')[1], o:field('name')[1]
+                if base and base:type() == 'variable_name' and node_text(base, src) == '$this'
+                    and pn and pn:type() == 'name' then
+                    local tw = php_prop_class(calln, '$' .. node_text(pn, src), src)
+                    if tw then return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw end
+                end
             end
         elseif t == 'scoped_call_expression' then
             local s = calln:field('scope')[1]
