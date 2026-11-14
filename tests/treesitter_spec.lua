@@ -7064,6 +7064,27 @@ test('php: a class-keyed call with no target walks its class chain, case-insensi
     eq(want, targets(rd), 'relink agrees')
 end)
 
+-- CART-2075. A java parameter or local that shadows a field is that binding, not the field: `U(int size) { check(size);
+-- this.size = size; }` READS the parameter and WRITES the field through `this` — the use edge keeps the write and drops the
+-- read; a method's local of the field's name (`int size = 3; check(size)`) charges the field nothing; a method with no
+-- shadow still reads the field.
+test('java: a parameter or local shadowing a field is not a use of it; this.f still writes it (CART-2075)', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/U.java', 'w'))
+    fd:write(table.concat({ 'package p;', 'public class U {', '  int size;', '  static void check(Object c) {}',
+        '  U(int size) { check(size); this.size = size; }', '  void g() { check(size); }',
+        '  void h() { int size = 3; check(size); }', '}' }, '\n') .. '\n')
+    fd:close()
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local rw = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and e.to:match('::var:size@') then rw[e.from:match('::([%w_]+::[%w_]+)@')] = e.rw end
+    end
+    eq({ ['U::U'] = 2, ['U::g'] = 1 }, rw, 'U writes the field (rw 2, no read), g reads it, h does not touch it')
+end)
+
 -- CART-2071. A bare read of a record component is the component, never its implicit accessor: `check(count)` in a method
 -- of `record R(int count)` passed the synthetic R::count as a callback (a ref edge to a method no line names), because the
 -- component's binder spans its declaration and the accessor is minted at that name. An explicit `r.count()` still calls it.

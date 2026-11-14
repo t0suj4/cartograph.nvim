@@ -6389,6 +6389,12 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     -- Bare ordinals, as buf.rdw
                     local ak, asp = akind[name], aspan[name]
                     local mb = select(3, c:start())
+                    -- (a MEMBER name is reached through a receiver — `this.size = size` writes the FIELD — and no local
+                    -- binds it, CART-2075)
+                    local ismem = false
+                    if memk ~= nil then
+                        ismem = (type(memk) == 'number' and n:named_child(memk) or n:field(memk)[1]) == c
+                    end
                     for j = #a, 1, -1 do
                         local r = a[j]
                         if r == false or r <= sr then
@@ -6396,12 +6402,15 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                             if not (sp and mb >= sp[1] and mb < sp[2] and nt ~= 'variable_list') then
                                 -- (only a SHADOW: a local / parameter over a MODULE binding of the name further out —
                                 -- a java field's own scope, or php, whose scope model holds no module bindings, keep
-                                -- their linking)
+                                -- their linking. ★ A java FIELD is such an outer binding too (CART-2075): `U(int size) {
+                                -- check(size); }` reads the parameter, and had made `use U::U -> var:size`)
                                 local outer = false
                                 if ak[j] == 'local' or ak[j] == 'param' then
-                                    for k = j - 1, 1, -1 do if ak[k] == 'module' then outer = true; break end end
+                                    for k = j - 1, 1, -1 do
+                                        if ak[k] == 'module' or ak[k] == 'field' then outer = true; break end
+                                    end
                                 end
-                                if outer then
+                                if outer and not ismem then
                                     local l = buf.inb
                                     if not l then l = {}; buf.inb = l end
                                     l[#l + 1] = nm + 1 -- (this mention's ordinal: nm is bumped below)
