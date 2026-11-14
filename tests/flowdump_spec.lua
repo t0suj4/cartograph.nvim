@@ -3779,3 +3779,32 @@ test('flowdump: a 5.2 pairs / ipairs loop iterates the handler\'s triple, and ta
     eq(0, n, 'and nothing is tagged lowered')
     vim.fn.delete(root, 'rf')
 end)
+
+-- (CART-1971, flowpath FLOW-0152: the dump states the RUNTIME its profile states — `jit.version` / `_VERSION` — because a
+-- finalizer's error is caught on LuaJIT 2.1 from 1c27912 on and propagates on PUC 5.1; absent when the profile states none)
+test('flowdump: the dump states the profile\'s Lua runtime, and nothing when it states none (CART-1971)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['m.lua'] = 'local t = {}\nreturn t\n' })
+    store.ingest(ts.extract(root))
+    local P = require 'cartograph.spec.profile'
+    local old, oldp = P.load, store.data.profile
+    local function run(prof)
+        P.load = function (nm, ...) if nm == 'stub' then return prof end return old(nm, ...) end
+        store.data.profile = prof and 'stub' or nil
+        local okr, R = pcall(flowtype.solve, store, { open = false, dump = true })
+        P.load, store.data.profile = old, oldp
+        if not okr then error(R, 0) end
+        return vim.json.decode(R.dump)
+    end
+    eq('LuaJIT 2.1.1774638290', run({ lua_runtime = 'LuaJIT 2.1.1774638290' }).runtime)
+    eq(nil, run(nil).runtime, 'no profile: no runtime claimed')
+    eq(nil, run({ lua_version = '5.2' }).runtime, 'a version is not a runtime')
+    -- (the shipped profiles: nvim's is MEASURED by tools/nvimdistill.lua, Factorio's declared, its 1.1 delta inherits it)
+    local nv = P.load('nvim')
+    ok(nv and type(nv.lua_runtime) == 'string' and nv.lua_runtime:match('^LuaJIT 2%.1%.%d+$'),
+        'nvim states its LuaJIT build: ' .. tostring(nv and nv.lua_runtime))
+    eq('Lua 5.2', P.load('lua-factorio').lua_runtime)
+    eq('Lua 5.2', P.load('lua-factorio-11').lua_runtime)
+    eq('5.2', P.load('lua-factorio-11').lua_version, 'Factorio 1.1 is Lua 5.2 too')
+    vim.fn.delete(root, 'rf')
+end)

@@ -205,6 +205,9 @@ return {
     -- (the LANGUAGE version Factorio embeds — its semantics differ from 5.1 / LuaJIT's: an ordering comparison runs either
     -- operand's __lt / __le, CART-1802)
     lua_version = '5.2',
+    -- (the RUNTIME, as a dump states it — `_VERSION` of Factorio's embedded interpreter, a PUC 5.2 derivative: a
+    -- finalizer's error is not caught the way LuaJIT 2.1's is, CART-1971 / flowpath FLOW-0152)
+    lua_runtime = 'Lua 5.2',
     version = api_version or '2.0', stamp = 'hand-authored',
     types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab,

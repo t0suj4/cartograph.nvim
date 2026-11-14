@@ -13,7 +13,9 @@
 -- layer is FLOW C.3. The answers in the dump are that run's.
 --
 -- FORMAT 1 (CORE.md §5, with these decisions — revisable with the reader):
---   { format = 1, lang = 'lua', ver = 51 (the profile's lua_version: 52 for Factorio's 5.2), cartograph = <sha|nil>,
+--   { format = 1, lang = 'lua', ver = 51 (the profile's lua_version: 52 for Factorio's 5.2), runtime = <the profile's
+--     lua_runtime: "LuaJIT 2.1.<t>" for nvim, "Lua 5.2" for Factorio; absent when the profile states none, CART-1971>,
+--     cartograph = <sha|nil>,
 --     cartograph_via = 'git' | 'env' | 'file' | nil, corpus = { root, sha }, mode = 'closed', instances = false,
 --   (cartograph: the PRODUCER's commit — the repo flowtype.lua is in, or, from a .git-less snapshot, CARTOGRAPH_COMMIT /
 --   <root>/.cartograph-commit / lua/cartograph/COMMIT as git archive fills it (M.producer, CART-1997); cartograph_via says
@@ -1259,8 +1261,11 @@ function M.build(rec, X, sink)
     -- (the solve's real mode — open or closed: it had been written "closed" whatever the solve was, CART-1777)
     -- (`ver`: the analysed code's Lua version, its profile's lua_version — 51 when it declares none; flowpath's
     -- core keys comparison semantics on it, and certifies 51 only, CART-1810)
-    put(('{"format":1,"lang":"lua","ver":%d,"cartograph":%s,"cartograph_via":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
-        X.LUAVER or 51,
+    -- (`runtime`: the interpreter the profile states — LuaJIT's `jit.version`, or `_VERSION` — present only when it
+    -- states one; flowpath reads a finalizer's error as CAUGHT on LuaJIT 2.1 from commit 1c27912 on, CART-1971 /
+    -- FLOW-0152)
+    put(('{"format":1,"lang":"lua","ver":%d,%s"cartograph":%s,"cartograph_via":%s,"corpus":{"root":%s,"sha":%s},"mode":%s,"instances":false,'):format(
+        X.LUAVER or 51, X.LUARUNTIME and ('"runtime":' .. jstr(X.LUARUNTIME) .. ',') or '',
         X.sha and jstr(X.sha) or 'null', X.sha_via and jstr(X.sha_via) or 'null', type(X.corpus) == 'string' and jstr(X.corpus) or 'null', X.corpus_sha and jstr(X.corpus_sha) or 'null',
         jstr(X.MODE or 'closed')))
     put('"names":{"fields":['); putl(fields); put('],"functions":['); putl(fns); put(']},')

@@ -99,6 +99,9 @@ end
 
 return {
     schema = 1, runtime = 'lua-factorio-11', lang = 'lua',
+    -- (1.1 embeds the same Lua 5.2 as 2.0: the language version and the runtime are the base's, CART-1971 — the delta
+    -- had dropped both, so a tree solved under this profile read as 5.1)
+    lua_version = base.lua_version, lua_runtime = base.lua_runtime,
     version = api_version or '1.1', stamp = 'hand-authored delta over lua-factorio',
     types = types, free = copy(base.free), namespaces = namespaces, nsset = nsset,
     vocab = vocab,

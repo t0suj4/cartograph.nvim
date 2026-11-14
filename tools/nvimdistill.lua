@@ -135,6 +135,10 @@ for fld, cls in pairs(typed_field) do copy_class(cls, fld) end
 for a, b in pairs(field_alias) do copy_class(b, a) end
 local prof = {
     schema = 1, runtime = 'nvim', lang = 'lua', version = version,
+    -- THE LUA RUNTIME the code runs on (CART-1971, flowpath FLOW-0152): the interpreter of the Neovim this distils from,
+    -- MEASURED — `jit.version` ("LuaJIT 2.1.<commit time>"), or `_VERSION` for a PUC build. Finalizer errors are caught
+    -- by LuaJIT 2.1 from 1c27912 on and propagate on PUC 5.1 / LuaJIT 2.0, so a dump states it
+    lua_runtime = (jit and jit.version) or _VERSION,
     stamp = ('distilled from the LuaLS annotations of %s (nvim %s)'):format(RUNTIME, version),
     sig_kind = 'annotation', sig_source = RUNTIME,
     sigs = sigs,

@@ -2801,6 +2801,8 @@ local function build(store, opts)
         G7.LUA52 = lv ~= nil and lv >= 5.2
         G7.LUAVER = lv and math.floor(lv * 10 + 0.5) or 51 -- (the dump's `ver`: 51 unless the profile says, CART-1810)
         G7.LUAVSTATED = lv ~= nil -- (CART-1926: a 5.4-only route is followed unless the profile states an older version)
+        -- (the RUNTIME the profile states — `jit.version` / `_VERSION`, the dump's `runtime`, CART-1971; nil: unknown)
+        G7.LUARUNTIME = okp and prf and type(prf.lua_runtime) == 'string' and prf.lua_runtime or nil
         -- (a behaviour of Lua `v` and later — 52, 53 … — holds unless the profile STATES an older version: an unstated one
         -- covers every version's behaviour, CART-2014)
         function G7.since(v) return not (G7.LUAVSTATED and G7.LUAVER < v) end
@@ -8179,7 +8181,7 @@ local function build(store, opts)
             GYIELD = GYIELD, GRESARG = GRESARG, FENVP = G7.ENVL[1].FENVP, EXTCALL = G7.EXTCALL, XA = G7.XA, XRES = G7.XRES, STRLIB = G7.ENVL[1].STRLIB, verdicts = verdicts,
             -- (refl-scope, CART-1817 stage 3: the region tops, what each held, which escaped — the dump's rtop / rcells / rroots)
             RTOP = G7.RCAP and G7.RTOP or nil, RHB = G7.RHB, RESCT = G7.RESCT, REG = G7.REG,
-            LUAVER = G7.LUAVER, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, FNTP = G7.FNTP, FNTO = G7.FNTO, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
+            LUAVER = G7.LUAVER, LUARUNTIME = G7.LUARUNTIME, GNEXCL = G7.GNEXCL, CHUNKINIT = G7.CHUNKINIT, CHUNKVA = G7.CHUNKVA, REQRAISE = G7.REQRAISE, HANDLERCALLS = G7.HANDLERCALLS + G7.HOOKCALLS, LIBSITES = G7.LIBSITES, PKGL = G7.PKGL, UPVCALLS = G7.UPVCALLS, FNMT = G7.FNMT, FNTP = G7.FNTP, FNTO = G7.FNTO, TYPEMTCALLS = G7.TYPEMTCALLS, GETINFOS = G7.GETINFOS, TYPEMTS = G7.TYPEMTS, LOCCALLS = G7.LOCCALLS, FRAMELOCALS = G7.frame_locals, SETFENVS = G7.SETFENVS, G0SITES = G7.G0SITES, G0P = G7.ENVL[1].G0P, PKGMODS = (G7.EXP['pkg-modules'] and next(G7.MODFILE or NOTHING) ~= nil) or nil, -- (CART-1815: only where a module was linked)
             escaped = escaped, fields_hit = field_hit, -- (the store rule's reach, CART-1744)
             LOCP = G7.LOCP, named = named, LOCALS = G7.LOCALS, PFN = G7.PFN, -- (CART-1987: who declares each variable)
             GREADS = (function () local t = {}; for _, e in ipairs(G7.ENVL or NOTHING) do t[#t + 1] = e.GREAD end; return t end)(), -- (each env's CACHED global reads: program-wide, CART-1987)
