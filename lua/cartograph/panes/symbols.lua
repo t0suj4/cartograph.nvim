@@ -3407,7 +3407,7 @@ function M.attach(win)
     -- the 2D plane's mechanism) moved the cursor and left every dependent stale: 14 of 23 steps of W3's gate S0.
     -- Now one debounced notification carries the settled position (M.cursor, M.on_cursor) and `settle` is its first
     -- dependent. CursorMoved on this buffer publishes (typed motion, and the synthetic arrivals show / lens / landing
-    -- fire, exactly as before); a move nvim never delivers is published by the mover itself (step, below).
+    -- fire, exactly as before); a move nvim never delivers is caught at SafeState and delivered (CART-2098, below).
     local gen = 0
     local settle -- the dependents' body, defined right below
     local function publish_cursor()
@@ -3425,7 +3425,25 @@ function M.attach(win)
     M._publish_cursor = publish_cursor
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
-        callback = function () M._undelivered = nil; publish_cursor() end,
+        callback = function () M._delivered_row = row(); publish_cursor() end,
+    })
+    -- ★ ONE PATH FOR EVERY MOVE NVIM DOES NOT DELIVER (CART-2098). A key run inside nvim_win_call from another window
+    -- (the plane forwards j / k, G, gg, a search that way), an RPC call or a timer moves this cursor and fires no
+    -- CursorMoved: nvim fires it only for the window current when its main loop checks. SafeState is that loop going
+    -- idle, after ANY of them (probed in an --embed child: forwarded G / gg / search, nvim_exec_lua, a timer — the
+    -- pane's CursorMoved 0 times, SafeState every time, already seeing the new row). So the row CursorMoved last
+    -- delivered is recorded above, and a different row at SafeState was moved behind nvim's back: the pane fires its
+    -- buffer's CursorMoved once — an output for every listener on the pane, and the handler above publishes it.
+    -- Typed motion in this window: nvim delivers every move of the current window before SafeState, so the rows agree
+    -- and nothing here fires — as before. (This replaces CART-2097's per-mapping mark in step.)
+    M._delivered_row = row()
+    vim.api.nvim_create_autocmd('SafeState', {
+        group = vim.api.nvim_create_augroup('cartograph.symbols.cursor', { clear = true }),
+        callback = function ()
+            if not (vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == M.buf) then return end
+            if row() == M._delivered_row then return end
+            vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf }) -- (the handler records + publishes)
+        end,
     })
     -- debounced (publish_cursor): focus (or statement highlight) follows where the cursor SETTLES
     function settle(r)
@@ -4630,7 +4648,7 @@ function M.attach(win)
         restore_loc(so.block_loc)
         sync_focus_to_view()
     end
-    local function step_rows(dir)
+    local function step(dir)
         M._ghost = nil -- a manual move abandons a ghosted lens node
         if M.view.level ~= 'block' and M.view.level ~= 'syms' and not M._stepout then
             return vim.cmd('normal! ' .. vim.v.count1 .. (dir == 1 and 'j' or 'k'))
@@ -4659,25 +4677,6 @@ function M.attach(win)
         elseif M.view.level == 'block' then
             step_out(dir) -- at the block edge: cross out to the parent
         end
-    end
-    -- ★ A MOVE NVIM DOES NOT DELIVER IS DELIVERED HERE (CART-2097). Run inside nvim_win_call from another window (the
-    -- 2D plane forwards keys that way), this mapping moves the cursor and nvim fires no CursorMoved for it: CursorMoved
-    -- is for the window current when the main loop checks, and by then that is the forwarder's. Inside the call this
-    -- window IS current, so the two cases cannot be told apart here — so the move is marked, ANY CursorMoved on this
-    -- buffer clears the mark (nvim's own for a typed key fires before scheduled callbacks run), and a mark still set on
-    -- the next tick was not delivered: publish it, and emit the buffer's CursorMoved as an output for everyone else
-    -- listening on the pane. Typed j / k: nvim delivers, the mark is cleared, nothing here fires — as before.
-    local function step(dir)
-        local before = row()
-        step_rows(dir)
-        if not vim.api.nvim_win_is_valid(win) or row() == before then return end
-        local mark = {}
-        M._undelivered = mark
-        vim.schedule(function ()
-            if M._undelivered ~= mark or not vim.api.nvim_win_is_valid(win) then return end
-            M._undelivered = nil
-            vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf }) -- (the handler publishes)
-        end)
     end
     vim.keymap.set('n', keys.down, function () step(1) end,
         { buffer = M.buf, desc = 'cartograph: next row (steps out at a block edge)' })

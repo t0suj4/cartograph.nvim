@@ -1,104 +1,140 @@
--- CART-2097: the symbols pane's cursor dependents (hover preview, source follow, highlight, emit_view) follow the
--- PUBLISHED list cursor, not CursorMoved — so a key forwarded into the pane from another window (nvim_win_call +
--- `normal`, the 2D plane's mechanism, W3 gate S0) updates them. nvim fires CursorMoved only for the window current when
--- its main loop checks, so a forwarded j moved the cursor and left every dependent stale (14 of 23 gate steps).
+-- CART-2097 / CART-2098: the symbols pane's cursor dependents (hover preview, source follow, highlight, emit_view)
+-- follow the PUBLISHED list cursor, and a move nvim does not deliver — a key forwarded into the pane from another window
+-- by nvim_win_call (the 2D plane's mechanism, W3 gate S0) — is caught at SafeState and delivered on ONE path. nvim fires
+-- CursorMoved only for the window current when its main loop checks, so before this a forwarded j / G / gg / search moved
+-- the cursor and left every dependent stale.
 --
--- No autocmd is fired by hand on the FORWARDED path: the mapping runs inside nvim_win_call exactly as the plane runs it.
--- The TYPED path fires CursorMoved by hand once, right after the key, because that is what nvim's main loop does for a
--- typed key and the spec runner has no main loop — it pins that a delivered move adds nothing of the pane's own.
+-- ★ THE INSTRUMENT IS A REAL MAIN LOOP. SafeState is nvim's main loop going idle and the spec runner has none, so this
+-- drives an `--embed` child over RPC exactly as the plane is driven: keys arrive by nvim_input, a forwarded key is a
+-- mirror window's mapping that runs nvim_win_call into the pane. Nothing fires an autocmd by hand. Each forwarded key is
+-- compared with the SAME key TYPED into the pane, from the same start — typed input is the reference.
 
-local ts      = require 'cartograph.providers.treesitter'
-local store   = require 'cartograph.store'
-local symbols = require 'cartograph.panes.symbols'
-local source  = require 'cartograph.panes.source'
-local config  = require 'cartograph.config'
+local repo = vim.fn.getcwd()
 
-local function setup()
-    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
-    local fd = assert(io.open(root .. '/m.lua', 'w'))
-    fd:write(table.concat({
-        'local M = {}',
-        'function M.alpha(x)',
-        '    return x + 1',
-        'end',
-        'function M.beta(y)',
-        '    return y * 2',
-        'end',
-        'return M', '' }, '\n'))
-    fd:close()
-    local data = ts.extract(root); data.root = root
-    store.ingest(data)
-    local ids = {}
-    for _, n in ipairs(store.data.nodes) do ids[n.name] = n.id end
-    vim.cmd('tabnew')
-    local wsrc = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
-    vim.cmd('leftabove vsplit')
-    local wsym = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
-    symbols.CURSOR_SETTLE_MS = 0
-    symbols.show('file', 'm.lua')
-    vim.wait(100, function () return false end, 5) -- the landing settles
-    local ra
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_node[r] == ids['M.alpha'] then ra = r end
-    end
-    ok(ra and symbols.line_node[ra + 1] == ids['M.beta'], 'alpha and beta are adjacent rows: '
-        .. vim.inspect(vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)))
-    vim.api.nvim_win_set_cursor(wsym, { ra, 2 }) -- (no CursorMoved: the start is not a move)
-    local seen = { cm = 0, emits = 0, pubs = {} }
-    local au = vim.api.nvim_create_autocmd('CursorMoved', { buffer = symbols.buf,
-        callback = function () seen.cm = seen.cm + 1 end })
-    local unview = symbols.on_view(function () seen.emits = seen.emits + 1 end)
-    local uncur = symbols.on_cursor(function (c) seen.pubs[#seen.pubs + 1] = c end)
-    store.set_context(nil)
-    local function done()
-        vim.api.nvim_del_autocmd(au); unview(); uncur()
-        symbols.CURSOR_SETTLE_MS = 60
-        vim.cmd('tabclose'); vim.fn.delete(root, 'rf')
-    end
-    return { ids = ids, wsrc = wsrc, wsym = wsym, ra = ra, seen = seen, done = done }
+local CHILD = [==[
+local root = ...
+local ts, store = require 'cartograph.providers.treesitter', require 'cartograph.store'
+local symbols, source = require 'cartograph.panes.symbols', require 'cartograph.panes.source'
+local data = ts.extract(root); data.root = root
+store.ingest(data)
+local wsrc = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+vim.cmd('leftabove vsplit')
+local wsym = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+symbols.CURSOR_SETTLE_MS = 0
+symbols.show('file', 'm.lua')
+vim.cmd('belowright split')
+local wmir = vim.api.nvim_get_current_win()
+local mbuf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_win_set_buf(wmir, mbuf)
+_G.T = { cm = 0, pubs = 0, wsym = wsym, wmir = wmir }
+vim.api.nvim_create_autocmd('CursorMoved', { buffer = symbols.buf, callback = function () T.cm = T.cm + 1 end })
+symbols.on_cursor(function () T.pubs = T.pubs + 1 end)
+-- the mirror's forwarding mappings: <F5>..<F9> run G / gg / a search / j / k IN the pane, focus staying here
+local FWD = { ['<F5>'] = 'G', ['<F6>'] = 'gg', ['<F7>'] = '/M.gamma\r', ['<F8>'] = 'j', ['<F9>'] = 'k' }
+for lhs, keys in pairs(FWD) do
+    vim.keymap.set('n', lhs, function ()
+        vim.api.nvim_win_call(wsym, function () vim.cmd('normal ' .. keys) end)
+    end, { buffer = mbuf })
+end
+function T.start(where, at) -- the same start for every key (row 1, or the LAST row for at = -1), then the focus
+    vim.api.nvim_win_set_cursor(wsym, { at == -1 and vim.api.nvim_buf_line_count(symbols.buf) or 1, 0 })
+    vim.api.nvim_set_current_win(wsym) -- (current, so nvim itself delivers the start)
+    T.where = where
+end
+function T.focus() vim.api.nvim_set_current_win(T.where == 'typed' and wsym or wmir); T.cm, T.pubs = 0, 0 end
+function T.snap()
+    local r = vim.api.nvim_win_get_cursor(wsym)[1]
+    return { row = r, node = symbols.line_node[r] or vim.NIL,
+        published = symbols.cursor and symbols.cursor.row or vim.NIL,
+        context = store.context and store.context.node or vim.NIL,
+        highlight = vim.inspect(store.highlight), cm = T.cm, pubs = T.pubs,
+        mirror_current = vim.api.nvim_get_current_win() == wmir }
+end
+return true
+]==]
+
+local function child(root)
+    local xdg = vim.fn.tempname(); vim.fn.mkdir(xdg, 'p')
+    local env = { XDG_STATE_HOME = xdg, XDG_CACHE_HOME = xdg, XDG_DATA_HOME = xdg, XDG_CONFIG_HOME = xdg }
+    local ch = vim.fn.jobstart({ 'nvim', '--embed', '--headless', '-u', 'NONE', '--noplugin',
+        '--cmd', 'set rtp^=' .. repo }, { rpc = true, env = env })
+    assert(ch > 0, 'jobstart failed')
+    vim.rpcrequest(ch, 'nvim_exec_lua', CHILD, { root })
+    return ch, xdg
 end
 
-test('list cursor: a j FORWARDED by nvim_win_call from another window updates the hover, the published cursor, emit_view and the pane\'s CursorMoved (CART-2097)', function ()
+local function fixture()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    local src = { 'local M = {}' }
+    for _, n in ipairs({ 'alpha', 'beta', 'gamma', 'delta', 'epsilon' }) do
+        vim.list_extend(src, { 'function M.' .. n .. '(x)', '    return x', 'end' })
+    end
+    src[#src + 1] = 'return M'
+    fd:write(table.concat(src, '\n') .. '\n'); fd:close()
+    return root
+end
+
+-- one key, from the common start, through `where` ('typed' into the pane, or 'forwarded' from the mirror)
+local function run(ch, where, keys, at)
+    local function lua(code) return vim.rpcrequest(ch, 'nvim_exec_lua', code, {}) end
+    vim.rpcrequest(ch, 'nvim_exec_lua', 'T.start(...)', { where, at or 1 })
+    vim.wait(150, function () return false end, 10) -- the start settles
+    lua('T.focus()')
+    vim.wait(50, function () return false end, 10)
+    vim.rpcrequest(ch, 'nvim_input', keys)
+    vim.wait(250, function () return false end, 10)
+    return lua('return T.snap()')
+end
+
+test('list cursor: G, gg, a search, j and k FORWARDED by nvim_win_call update the published cursor and its dependents exactly as typed (CART-2098, CART-2097)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
-    local t = setup()
-    vim.api.nvim_set_current_win(t.wsrc) -- the forwarder's window is current, as in the plane
-    vim.api.nvim_win_call(t.wsym, function () vim.cmd('normal ' .. config.keys.down) end)
-    eq(t.ra + 1, vim.api.nvim_win_get_cursor(t.wsym)[1], 'the forwarded key moved the pane cursor')
-    vim.wait(500, function () return #t.seen.pubs > 0 end, 5)
-    eq(1, #t.seen.pubs, 'one settled publication')
-    eq(t.ids['M.beta'], t.seen.pubs[1].node, 'the published cursor names the row it settled on')
-    eq(t.ids['M.beta'], symbols.cursor and symbols.cursor.node)
-    eq(t.ids['M.beta'], store.context and store.context.node, 'the hover preview followed')
-    eq(1, t.seen.emits, 'emit_view ran for the new selection')
-    eq(1, t.seen.cm, 'the pane emitted its CursorMoved for the undelivered move, once')
-    eq(t.wsrc, vim.api.nvim_get_current_win(), 'focus never left the forwarder')
-    -- a forwarded count, and the move back
-    vim.api.nvim_win_call(t.wsym, function () vim.cmd('normal ' .. config.keys.up) end)
-    vim.wait(500, function () return #t.seen.pubs > 1 end, 5)
-    eq(t.ids['M.alpha'], store.context and store.context.node, 'k forwarded: the preview followed back')
-    t.done()
+    local root = fixture()
+    local ch, xdg = child(root)
+    local CASES = { { 'G', '<F5>' }, { 'gg', '<F6>', -1 }, { '/M.gamma<CR>', '<F7>' }, { 'j', '<F8>' } }
+    local hovered = 0
+    for _, c in ipairs(CASES) do
+        local typed, fwd = run(ch, 'typed', c[1], c[3]), run(ch, 'forwarded', c[2], c[3])
+        local what = ('%s (typed) vs %s (forwarded)'):format(c[1], c[2])
+        ok(fwd.mirror_current, what .. ': focus stayed in the forwarder')
+        eq(typed.row, fwd.row, what .. ': the same row')
+        eq(fwd.row, fwd.published, what .. ': the forwarded move was PUBLISHED')
+        eq(typed.node, fwd.node, what)
+        eq(typed.context, fwd.context, what .. ': the hover preview followed')
+        eq(typed.highlight, fwd.highlight, what .. ': the highlight followed')
+        eq(1, fwd.pubs, what .. ': one publication')
+        eq(1, fwd.cm, what .. ': the pane delivered its CursorMoved once')
+        -- (not just equal: a file-level node row's hover preview IS that node — typed and forwarded agreeing on a
+        -- STALE preview would pass every check above)
+        if fwd.node ~= vim.NIL then hovered = hovered + 1; eq(fwd.node, fwd.context, what .. ': the preview is the row') end
+    end
+    ok(hovered >= 2, 'the search and j land on node rows (G and gg on the header / footer): ' .. hovered)
+    -- gg from the start row is no move: nothing to publish
+    local still = run(ch, 'forwarded', '<F6>')
+    eq(0, still.pubs, 'a forwarded key that does not move publishes nothing')
+    -- and a pair: j then k forwarded back
+    vim.rpcrequest(ch, 'nvim_exec_lua', 'T.start(...)', { 'forwarded', 1 })
+    vim.wait(150, function () return false end, 10)
+    vim.rpcrequest(ch, 'nvim_exec_lua', 'T.focus()', {})
+    vim.rpcrequest(ch, 'nvim_input', '<F8><F8><F9>')
+    vim.wait(250, function () return false end, 10)
+    local s = vim.rpcrequest(ch, 'nvim_exec_lua', 'return T.snap()', {})
+    eq(s.row, s.published, 'j j k forwarded: the published row is where the cursor ended')
+    vim.fn.jobstop(ch); vim.fn.delete(root, 'rf'); vim.fn.delete(xdg, 'rf')
 end)
 
-test('list cursor: a TYPED j that nvim delivers is published once from its CursorMoved — the pane adds no event of its own (CART-2097)', function ()
+test('list cursor: TYPED motion is delivered by nvim alone — the pane adds no CursorMoved and publishes once (CART-2098)', function ()
     if not parser_available('lua') then skip 'no lua parser' end
-    local t = setup()
-    vim.api.nvim_set_current_win(t.wsym)
-    vim.cmd('normal ' .. config.keys.down)                        -- the mapping, as a typed key runs it
-    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf }) -- what nvim's main loop fires next
-    vim.wait(500, function () return #t.seen.pubs > 0 end, 5)
-    vim.wait(50, function () return false end, 5)                  -- (room for a stray second event)
-    eq(1, t.seen.cm, 'only nvim\'s CursorMoved: nothing emitted by the pane')
-    eq(1, #t.seen.pubs, 'one publication')
-    eq(t.ids['M.beta'], store.context and store.context.node, 'the hover preview followed, as before')
-    -- a j that does not move (the last row) publishes nothing
-    local last = vim.api.nvim_buf_line_count(symbols.buf)
-    vim.api.nvim_win_set_cursor(t.wsym, { last, 0 })
-    local n = #t.seen.pubs
-    vim.api.nvim_set_current_win(t.wsrc)
-    vim.api.nvim_win_call(t.wsym, function () vim.cmd('normal ' .. config.keys.down) end)
-    vim.wait(100, function () return false end, 5)
-    eq(n, #t.seen.pubs, 'no move, no publication')
-    t.done()
+    local root = fixture()
+    local ch, xdg = child(root)
+    for _, c in ipairs({ { 'j' }, { 'G' }, { 'gg', -1 }, { '/M.gamma<CR>' } }) do
+        local keys = c[1]
+        local s = run(ch, 'typed', keys, c[2])
+        eq(1, s.cm, keys .. ': nvim\'s one CursorMoved, nothing of the pane\'s')
+        eq(1, s.pubs, keys .. ': one publication')
+        eq(s.row, s.published, keys)
+    end
+    vim.fn.jobstop(ch); vim.fn.delete(root, 'rf'); vim.fn.delete(xdg, 'rf')
 end)
