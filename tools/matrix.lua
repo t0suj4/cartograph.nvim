@@ -71,6 +71,7 @@ do
         if a == '--row' then opts.row = true
         elseif a == '--save' then opts.save = true
         elseif a == '--quick' then opts.quick = true
+        elseif a == '--weights' then opts.weights = true
         elseif a == '--jobs' then
             i = i + 1
             opts.jobs = tonumber(arg[i])
@@ -781,6 +782,47 @@ end
 
 -- ── orchestrator ────────────────────────────────────────────────────────
 local reg = dofile(here .. '/corpora.lua')
+-- ★ AN UNDECLARED CORPUS IS WEIGHED BY ITS SOURCE, NOT AS A FLAT 500 MB (CART-0235). 27 of 35 corpora declare no
+-- budget_mb, and the flat default assumed an unmeasured corpus CHEAP — the dangerous side, since cheap means
+-- co-scheduled. The declared budgets run 80-162 MB per MB of the source the providers READ (median 116, openfirmware's
+-- forth the outlier at 785); budgets are ~2x peak, and wow at 81 MB of source predicted 4.7 GB of budget against a
+-- measured 4,077 MB peak. So: source MB x 116, never below the old 500. A SCHEDULING WEIGHT ONLY — never the `mem`
+-- gate's threshold, which needs a measurement (openfirmware shows the ratio can be ~6x off). Derived once per corpus.
+local MB_BUDGET_PER_SOURCE_MB = 116
+local derived_weights, wbench = {}, nil
+local function derived_weight(name)
+    local w = derived_weights[name]
+    if w then return w.mb, w.src end
+    local okw, src = pcall(function ()
+        if not wbench then wbench = dofile(here .. '/bench.lua'); wbench.bootstrap() end
+        local c = wbench.corpus(name)
+        local files, _, tok = require('cartograph.providers.treesitter').list_files(c.root, c.subdirs)
+        local bytes = 0
+        for _, list in ipairs({ files or {}, tok or {} }) do
+            for _, f in ipairs(list) do
+                local st = vim.uv.fs_stat(c.root .. '/' .. f)
+                if st then bytes = bytes + st.size end
+            end
+        end
+        return bytes / 2 ^ 20
+    end)
+    local mb = okw and src and math.max(500, math.floor(src * MB_BUDGET_PER_SOURCE_MB + 0.5)) or 500
+    derived_weights[name] = { mb = mb, src = okw and src or nil }
+    return mb, okw and src or nil
+end
+if opts.weights then
+    -- (what admission charges each named corpus, and where the figure came from)
+    for _, name in ipairs(names) do
+        if reg[name] and reg[name].budget_mb then
+            say(('%-14s %6d MB  declared budget_mb'):format(name, reg[name].budget_mb))
+        else
+            local mb, src = derived_weight(name)
+            say(('%-14s %6d MB  derived: %s MB of source x %d (floor 500)'):format(name, mb,
+                src and ('%.2f'):format(src) or '?', MB_BUDGET_PER_SOURCE_MB))
+        end
+    end
+    os.exit(0)
+end
 
 if #names == 0 then
     -- default roster: every corpus with PINNED EXPECTED COUNTS — the push-time
@@ -923,7 +965,8 @@ for _, n in ipairs(names) do if not HEAVY[n] then pending[#pending + 1] = n end 
 -- overlap (the pair that OOM'd). --mem-mb overrides.
 local total_mb = (vim.uv.get_total_memory() or (8 * 2 ^ 30)) / 2 ^ 20
 local MEM_BUDGET = opts.mem_mb or math.floor(total_mb * 0.5)
-local function weight(name) return (reg[name] and reg[name].budget_mb) or 500 end
+local function weight(name) return (reg[name] and reg[name].budget_mb) or (derived_weight(name)) end
+
 
 local procs = {} -- name -> raw vim.SystemCompleted (parsed after the pool drains)
 -- ★ `procs` IS SET IN on_exit, so its absence means "did not FINISH", not "did not START".
