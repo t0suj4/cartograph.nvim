@@ -140,6 +140,25 @@ test('lspserve: a single root never touches the session, and still answers', fun
     vim.fn.delete(a, 'rf')
 end)
 
+-- CART-0679 ("check lspserve for the same two omissions"): it extracted cold on every start and never ran the editor's
+-- post-passes. The SQL table the php fixture embeds is a workspace symbol only after them.
+test('lspserve: the editor\'s post-passes run — an embedded SQL table is a workspace symbol (CART-0679)', function ()
+    if not ready() or not pcall(vim.treesitter.get_string_parser, '', 'php') then skip('no php parser') end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    vim.fn.system({ 'cp', '-r', repo('tests/fixtures/phpproj') .. '/.', root })
+    local input = table.concat({
+        frame { jsonrpc = '2.0', id = 1, method = 'workspace/symbol', params = { query = 'table items' } },
+        frame { jsonrpc = '2.0', id = 2, method = 'shutdown', params = vim.empty_dict() },
+        frame { jsonrpc = '2.0', method = 'exit' },
+    }, '')
+    local out = vim.fn.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l', repo('tools/lspserve.lua'), root }, input)
+    local by = responses(out)
+    ok(has(by[1] and by[1].result, 'table items'), 'the SQL table is a symbol: ' .. out:sub(1, 400))
+    ok(out:find('SQL tables', 1, true), 'and the post-pass said so on stderr')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lspserve: a duplicate root is REFUSED at startup', function ()
     if not ready() then skip('no treesitter') end
     -- CART-0837 at this entry point too: argv has no init.lua-shaped guard in

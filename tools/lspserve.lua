@@ -50,9 +50,23 @@ do
         seen[key] = true
         -- extract BEFORE begin, so the band's `root` is `data.root` verbatim —
         -- `owning` matches by string containment against it
-        local ok, data = pcall(ts.extract, r)
+        -- ★ WARM FIRST, THEN THE EDITOR'S POST-PASSES (CART-0679, the ticket's "check lspserve for the same two
+        -- omissions"): it extracted cold on every start and never ran cartograph.postpass, as mcpserve did. The cache
+        -- holds the extraction; the passes run on every start. Saved synchronously: a background save in a process
+        -- that may exit soon would leave the next start cold.
+        local cachem = require 'cartograph.cache'
+        local data, note = cachem.open(r)
+        if note then io.stderr:write(('cartograph lspserve: %s\n'):format(tostring(note))) end
+        local ok = true
+        if not data then
+            ok, data = pcall(ts.extract, r)
+            if ok then pcall(cachem.save, data) end
+        end
         if not ok then io.stderr:write('extract failed (' .. r .. '): ' .. tostring(data) .. '\n'); os.exit(1) end
         data.root = data.root or r
+        require('cartograph.postpass').run(data, { say = function (msg)
+            io.stderr:write(('cartograph lspserve: %s\n'):format(msg))
+        end })
         if session then session.begin(data.root) end
         store.ingest(data)
         io.stderr:write(('cartograph lspserve: %s (%d nodes)\n'):format(data.root, #data.nodes))

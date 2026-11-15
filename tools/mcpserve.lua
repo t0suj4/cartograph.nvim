@@ -192,6 +192,16 @@ for _, r in ipairs(roots) do
         os.exit(1)
     end
     data.root = data.root or r
+    -- ★ THE SAME ENRICHMENT THE EDITOR OPEN RUNS (CART-0679): cartograph.postpass — cross-language links, embedded
+    -- SQL tables, the framework / deployment / contract layers. The server ingested the bare extraction, so an agent
+    -- asked "who touches this table" of a graph that had no tables (ghost: 6 SQL tables and 77 cross-language links
+    -- missing). The cache holds the extraction only, so the passes run on every start, warm or cold: ~1-2 s against
+    -- a 30-60 s cold fold. A thin index has no calls for them to read, so it is left as it is.
+    if not index_only then
+        require('cartograph.postpass').run(data, { say = function (msg)
+            io.stderr:write(('cartograph mcpserve: %s\n'):format(msg))
+        end })
+    end
     if session then band_of_root[data.root] = session.begin(data.root) end
     store.ingest(data)
     io.stderr:write(('cartograph mcpserve: %s (%d nodes%s%s)\n')

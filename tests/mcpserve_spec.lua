@@ -831,6 +831,25 @@ test('mcpserve: the handshake completes and tools/list advertises every verb', f
     end
 end)
 
+-- CART-0679: the server ingested the BARE extraction and never ran the editor's post-passes (cartograph.postpass), so an
+-- agent asking "who touches this table" got a graph with no tables. The php fixture embeds SQL over two tables.
+test('mcpserve: the editor\'s post-passes run — an embedded SQL table is a node over the wire (CART-0679)', function ()
+    if not ready() or not parser_available('php') then skip('no php parser') end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    vim.fn.system({ 'cp', '-r', repo('tests/fixtures/phpproj') .. '/.', root })
+    local c, err = mcp.connect { cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l',
+        repo('tools/mcpserve.lua'), root }, timeout = 60000 }
+    ok(c ~= nil, 'mcpserve did not come up: ' .. tostring(err))
+    local found = c:call('node_find', { query = 'table items' })
+    c:close()
+    vim.fn.delete(root, 'rf')
+    ok(found and found.ok, 'node_find answered: ' .. vim.inspect(found))
+    local ids = {}
+    for _, r in ipairs(found.result or {}) do ids[#ids + 1] = r.id end
+    ok(vim.tbl_contains(ids, 'sql::table:items'), 'the SQL table entity is in the served graph: ' .. vim.inspect(ids))
+end)
+
 test('mcpserve: a successful call returns the envelope, decoded, over the wire', function ()
     if not ready() then skip('no treesitter') end
     local c = client(false)
