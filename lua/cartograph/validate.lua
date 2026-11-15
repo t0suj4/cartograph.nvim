@@ -24,6 +24,7 @@ M.NODE_FIELDS = {
     order = true,
     -- extraction facts
     params = true, locals = true, arrow = true, torn = true, decl = true, macro = true, cbarg = true,
+    variadic = true, -- a varargs def: params are the fixed prefix (CART-0676)
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
     flocal = true,   -- C/C++: file-local by linkage (static, a source-file macro), CART-1081

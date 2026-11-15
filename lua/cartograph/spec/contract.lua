@@ -338,6 +338,7 @@ M.SLOTS = {
     -- (CART-0305). A hook rather than a `body_type` string: the body can be nested
     -- arbitrarily deep, and a spec that must descend two levels should say how.
     body_of = 'ANALYSIS', params_of = 'ANALYSIS',
+    arity_overloads = 'ANALYSIS', variadic_def = 'ANALYSIS', -- (CART-0676)
     -- node types that BIND names (loop variables). df records them as `use` and
     -- never as `def`, so without this a loop-bound receiver reads as a free name —
     -- which put a local into externals' "real porting work" group until declared.

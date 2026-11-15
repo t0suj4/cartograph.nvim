@@ -4993,6 +4993,58 @@ local function resolve_receiver_type(cv, data, exact, tail)
     return n
 end
 
+--- ARITY OVERLOADS (CART-0676): a call refused `ambiguous` whose candidates are ALL overloads of the ONE class its
+--- key names (`Class::m`) is decided by its ARGUMENT COUNT, in a language that declares this overload model
+--- (spec.arity_overloads) and marks its varargs defs (spec.variadic_def -> node.variadic, whose params are the fixed
+--- prefix). THE SOUND SUBSET, and only it:
+---   · exactly one FIXED overload takes this count and no VARARGS one accepts it -> that overload;
+---   · no fixed overload takes it and exactly one varargs overload accepts it (count >= its prefix) -> that one;
+---   · anything else stays refused: a fixed AND a varargs overload both accepting the count is the trap (a varargs
+---     def read as a fixed number is a fabricated resolution), and overloads differing only in parameter TYPE
+---     (f(String) vs f(int)) share a count and keep refusing.
+--- Only a COMPLETE candidate list is read (tsutil.complete): a truncated one may hide the real overload. A call
+--- with a spread argument has no knowable count. A tail join across classes is never decided here — choosing by
+--- arity between two classes would be guessing the receiver's type.
+function M._resolve_arity(cv, node_index, addref)
+    local cget, cset = cv.get, cv.set
+    local n = 0
+    for i = 1, cv.n do
+        local r = cget(i, 'refused')
+        local full = cget(i, 'full')
+        if type(r) == 'table' and r.rule == 'ambiguous' and full and tsutil.complete(r) then
+            local _, sp = elang_for(cget(i, 'file'))
+            local argv = sp and sp.arity_overloads and full:match('^[%w_$]+::[%w_$]+$') and cget(i, 'argv')
+            if argv then
+                local argc, spread = #argv, false
+                for _, a in ipairs(argv) do if a.k == 'spread' then spread = true end end
+                local fixed, var, same = {}, {}, not spread
+                for _, id in ipairs(r.cands) do
+                    local nd = node_index[id]
+                    if not (nd and nd.name == full) then same = false; break end
+                    local np = #(nd.params or {})
+                    if nd.variadic then
+                        if argc >= np then var[#var + 1] = nd end
+                    elseif argc == np then fixed[#fixed + 1] = nd end
+                end
+                local pick = same and ((#fixed == 1 and #var == 0 and fixed[1])
+                    or (#fixed == 0 and #var == 1 and var[1])) or nil
+                if pick then
+                    cset(i, 'to', pick.id)
+                    cset(i, 'refused', nil)
+                    local cfn = cget(i, 'fn')
+                    if cfn then
+                        local cline = cget(i, 'line')
+                        addref(cfn, pick.id, cget(i, 'at') or { start = { line = cline, char = 0 },
+                            ['end'] = { line = cline, char = 0 } }, false)
+                    end
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
@@ -5012,6 +5064,10 @@ local RESOLVE_PASSES = {
         return resolve_registry(x.cv, x.node_index, x.addref, x.scope_of, x.consts, x.exact) end },
     { name = 'reassign', run = function (x) -- REWRITE stage (see header)
         return resolve_reassign(x.cv, x.node_index, x.addref) end },
+    -- ★ ARITY SEPARATES OVERLOADS OF ONE CLASS (CART-0676). Ahead of `returns`, because the return-type rounds need
+    -- the base resolved: `getBean(X.class)` refused ambiguous between getBean(Class) and getBean(Class, String), so
+    -- the shipped class-literal inference never ran, on cross_db's top unresolved callee (882 sites).
+    { name = 'arity', run = function (x) return M._resolve_arity(x.cv, x.node_index, x.addref) end },
     { name = 'returns', run = function (x)
         local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref, x.data)
         x.ret_resolved, x.ret_rounds = retn, rounds
@@ -8394,6 +8450,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
+                    -- (a VARARGS def: its params are the FIXED prefix and it accepts any count above it, CART-0676)
+                    variadic = (spec.variadic_def and spec.variadic_def(defn)) or nil,
                     -- in-function local bindings (js family; local-shadow gate)
                     locals = not aname and fn_locals(defn, spec, src) or nil,
                     -- an arrow inherits `this` lexically; a regular function

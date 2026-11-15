@@ -125,3 +125,52 @@ test('javatyped: a type variable is its BOUND, not the class of the same name; u
     eq(S, to[7], 'a static nested class: Session IS the class')
     eq(F, to[8], 'an inner class sees the outer type variable')
 end)
+
+-- CART-0676: a service locator overloaded ON ARITY — getBean(Class<T>) and getBean(Class<T>, String) — refused every
+-- one-argument site as ambiguous, so the shipped class-literal return inference never ran (cross_db's top unresolved
+-- callee). Overloads of ONE class are decided by the argument count; varargs and same-arity type overloads keep refusing.
+test('javatyped: an ARITY overload of one class is decided by the argument count — varargs and type overloads still refuse (CART-0676)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, t)
+        vim.fn.mkdir(vim.fs.dirname(root .. '/' .. rel), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('src/p/Loc.java', table.concat({
+        'package p;',
+        'public class Loc {',
+        '    public static <T> T getBean(Class<T> requiredType) { return null; }',
+        '    public static <T> T getBean(Class<T> requiredType, String name) { return null; }',
+        '    public static void log(String fmt, Object... args) { }',
+        '    public static void log(String fmt) { }',
+        '    public static void typed(String s) { }',
+        '    public static void typed(int i) { }',
+        '}', '' }, '\n'))
+    w('src/p/Dao.java', 'package p;\npublic class Dao { public int fieldLength(String f) { return 1; } }\n')
+    w('src/p/Use.java', table.concat({
+        'package p;',
+        'public class Use {',
+        '    void f() {',
+        '        Loc.getBean(String.class);',               -- 4: one argument -> the 1-arity overload
+        '        Loc.getBean(String.class, "x");',          -- 5: two -> the 2-arity one
+        '        Loc.log("a");',                            -- 6: fixed AND varargs accept 1 -> refused (the trap)
+        '        Loc.log("a", 1, 2);',                      -- 7: only the varargs accepts 3
+        '        Loc.typed("s");',                          -- 8: same arity, differ by TYPE -> refused
+        '        Loc.getBean(Dao.class).fieldLength("c");', -- 9: the base resolves, so return inference types Dao
+        '    }',
+        '}', '' }, '\n'))
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local at = {}
+    for _, c in ipairs(data.calls) do
+        if c.file == 'src/p/Use.java' then at[(c.line + 1) .. ':' .. c.callee] = c end
+    end
+    eq('src/p/Loc.java::Loc::getBean@2', at['4:getBean'].to)
+    eq('src/p/Loc.java::Loc::getBean@3', at['5:getBean'].to)
+    eq(nil, at['6:log'].to, 'a fixed and a varargs overload both accept one argument: refused')
+    eq('ambiguous', at['6:log'].refused and at['6:log'].refused.rule)
+    eq('src/p/Loc.java::Loc::log@4', at['7:log'].to, 'only the varargs overload accepts three')
+    eq(nil, at['8:typed'].to, 'same arity, differing by type: refused')
+    eq('src/p/Loc.java::Loc::getBean@2', at['9:getBean'].to)
+    eq('src/p/Dao.java::Dao::fieldLength@1', at['9:fieldLength'].to, 'and the class literal now types the chained call')
+end)

@@ -1068,6 +1068,18 @@ return {
     ]=],
     params_field = 'parameters',
     params_of = java_compact_params, -- a compact constructor's are its record's (CART-0379)
+    -- ARITY OVERLOADS (CART-0676): Java resolves an overload by argument count first (JLS 15.12.2 phases 1-2, fixed
+    -- arity, before phase 3, varargs), so a count decides between overloads of one class when only one fits. A
+    -- `T... xs` def is VARIADIC: its recorded params are the fixed prefix (the spread parameter's name sits under a
+    -- variable_declarator the shared param reader does not descend), and it accepts any count above it.
+    arity_overloads = true,
+    variadic_def = function (defn)
+        local ps = defn:field('parameters')[1]
+        for _, c in (ps and inext or function () end), ps, -1 do
+            if c:type() == 'spread_parameter' then return true end
+        end
+        return false
+    end,
     body_field = 'body',
     -- a CONSTRUCTOR is a function the shared table never named: it is 12.5% of
     -- java's sampled def population and every one of them was invisible to
