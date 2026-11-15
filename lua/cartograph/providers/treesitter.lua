@@ -5842,6 +5842,10 @@ M.EXCLUDE_DIRS = EXCLUDE_DIRS
 local function list_files(root, subdirs, tp)
     tp = tp or transport
     local out, minified, tokens = {}, {}, {}
+    -- ★ AN EXTENSION NOTHING CLAIMS IS COUNTED, NOT DROPPED (CART-1607): apollo-11's 175 `.agc` files fell through every
+    -- claim with no counter, and graph_info answered files 0 / unparsed 0 over a non-empty tree. Fourth return:
+    -- extension (lower case, '' for none) -> in-scope files no spec, container or dialect claims
+    local unclaimed = {}
     local seen_real = {} -- external symlink targets already walked (cycles/dups)
     -- stack languages (forth/postscript) can't have a faithful grammar even in
     -- principle, so they're a SEPARATE provider — but they share this walk, and
@@ -5895,6 +5899,9 @@ local function list_files(root, subdirs, tp)
                     out[#out + 1] = r
                 elseif dialect_of(r) and want(r) then
                     tokens[#tokens + 1] = r
+                elseif in_scope(r) then
+                    local ext = (name:match('%.([^.]+)$') or ''):lower()
+                    unclaimed[ext] = (unclaimed[ext] or 0) + 1
                 end
             end
         end
@@ -5903,7 +5910,7 @@ local function list_files(root, subdirs, tp)
     table.sort(out)
     table.sort(minified)
     table.sort(tokens)
-    return out, minified, tokens
+    return out, minified, tokens, unclaimed
 end
 -- the cache diffs the tree with the same walk/exclusion rules extraction uses.
 -- Third return = the stack-language files, for the token provider; every

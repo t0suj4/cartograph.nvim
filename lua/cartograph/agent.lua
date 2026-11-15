@@ -340,6 +340,22 @@ local function build_graph(store)
         else calls.unresolved = calls.unresolved + 1 end
     end
     local thin = store.is_index_only and store.is_index_only() or false
+    -- ★ WHAT THE WALK SAW AND NOTHING CLAIMED (CART-1607): a tree of an unsupported language read as `files 0,
+    -- unparsed 0` — silence, not an answer. The walk's own count by extension, largest first (8 kept, the total
+    -- beside), read lazily and memoized per ROOT on the store (a root-keyed field: the band-safe shape, CART-0823); a
+    -- root that is no directory (an MCP or loaded graph) counts nothing.
+    local ufiles, ulist = 0, {}
+    if type(d.root) == 'string' and d.root ~= '' then
+        local m = store._unclaimed_memo
+        if not (m and m.root == d.root) then
+            local ok, _, _, _, u = pcall(require('cartograph.providers.treesitter').list_files, d.root)
+            m = { root = d.root, u = ok and u or {} }
+            store._unclaimed_memo = m
+        end
+        for ext, k in pairs(m.u or {}) do ufiles = ufiles + k; ulist[#ulist + 1] = { ext = ext, files = k } end
+        table.sort(ulist, function (a, b) if a.files ~= b.files then return a.files > b.files end return a.ext < b.ext end)
+        for i = #ulist, 9, -1 do ulist[i] = nil end
+    end
     return {
         root = nn(d.root), provider = nn(d.provider),
         index = thin and 'index-only' or 'full',
@@ -348,7 +364,8 @@ local function build_graph(store)
         counts = { nodes = #(d.nodes or {}), edges = #(d.edges or {}),
             calls = #(d.calls or {}), files = files },
         -- THE FRONTIER: what was NOT looked at, stated positively
-        frontier = { unparsed_files = unparsed, examples = unparsed_files, calls = calls },
+        frontier = { unparsed_files = unparsed, examples = unparsed_files, calls = calls,
+            unclaimed_files = ufiles, unclaimed = ulist },
     }
 end
 

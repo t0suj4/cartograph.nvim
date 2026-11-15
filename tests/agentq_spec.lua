@@ -567,3 +567,33 @@ test('mentions: a DEFINED name the index skipped is a frontier naming the defini
     -- a name defined nowhere and mentioned nowhere is still absent
     eq('absent', agent.answer(store, 'mentions', { name = 'nowhere_at_all' }).absence)
 end)
+
+-- CART-1607: an extension nothing claims fell through the walk with no counter — apollo-11's 175 `.agc` files gave
+-- graph_info `files 0, unparsed 0`, silence over a non-empty tree. The walk counts them and the frontier says so.
+test('graph_info: files no spec claims are COUNTED by extension in the frontier, never silently dropped (CART-1607)', function ()
+    local function root_with(files)
+        local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/sub', 'p')
+        for rel, t in pairs(files) do local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+        return root
+    end
+    local agent = require 'cartograph.agent'
+    -- a tree of an unsupported language only: zero files parsed, and the frontier names what was there
+    local r1 = root_with({ ['a.agc'] = 'TC 1\n', ['b.agc'] = 'TC 2\n', ['sub/c.agc'] = 'TC 3\n', ['NOTES'] = 'x\n' })
+    local d1 = ts.extract(r1); d1.root = r1
+    store.ingest(d1)
+    local g = agent.answer(store, 'graph_info', {}).graph
+    eq(0, g.counts.files)
+    eq(4, g.frontier.unclaimed_files)
+    eq({ { ext = 'agc', files = 3 }, { ext = '', files = 1 } }, g.frontier.unclaimed)
+    vim.fn.delete(r1, 'rf')
+    -- a claimed file is not counted; another root re-walks (the memo is per root)
+    if parser_available('lua') then
+        local r2 = root_with({ ['m.lua'] = 'local M = {}\nreturn M\n', ['README.md'] = '# x\n' })
+        local d2 = ts.extract(r2); d2.root = r2
+        store.ingest(d2)
+        local g2 = agent.answer(store, 'graph_info', {}).graph
+        eq(1, g2.counts.files)
+        eq({ { ext = 'md', files = 1 } }, g2.frontier.unclaimed)
+        vim.fn.delete(r2, 'rf')
+    end
+end)
