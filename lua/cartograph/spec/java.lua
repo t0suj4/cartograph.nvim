@@ -1461,20 +1461,39 @@ return {
         local segs = {}
         for seg in path:gmatch('[%w_]+') do segs[#segs + 1] = seg end
         if #segs == 0 then return nil end
-        local full = table.concat(segs, '/') .. '.java'
-        local tail, cands = '/' .. full, {}
-        for _, f in ipairs(java_basenames(files)[segs[#segs] .. '.java'] or {}) do
-            if f == full or f:sub(-#tail) == tail then cands[#cands + 1] = f end
-        end
-        if #cands == 1 then return cands[1] end
-        if #cands > 1 then
-            local own = ctx and ctx.srcroot
-            if own then
-                for _, c in ipairs(cands) do
-                    if c:sub(1, #c - #full) == own then return c end
+        -- segs[1..n] by the WHOLE-PATH rule: the file, or nil + `true` when several candidates and no own-root pick
+        local function whole(n)
+            local full = table.concat(segs, '/', 1, n) .. '.java'
+            local tail, cands = '/' .. full, {}
+            for _, f in ipairs(java_basenames(files)[segs[n] .. '.java'] or {}) do
+                if f == full or f:sub(-#tail) == tail then cands[#cands + 1] = f end
+            end
+            if #cands == 1 then return cands[1] end
+            if #cands > 1 then
+                local own = ctx and ctx.srcroot
+                if own then
+                    for _, c in ipairs(cands) do
+                        if c:sub(1, #c - #full) == own then return c end
+                    end
                 end
+                return nil, true
             end
             return nil
+        end
+        local hit, amb = whole(#segs)
+        if hit then return hit end
+        if amb then return nil end
+        -- ★ A MEMBER OF AN IN-TREE CLASS (CART-1054). `import a.b.Outer.Inner;` names a nested class living in
+        -- a/b/Outer.java, and so does `import static a.b.Outer.m;` — no file spells the whole path, and 17,094 such
+        -- imports over seven java corpora lost their edge. Drop TRAILING segments while each is CLASS-shaped (upper
+        -- case first, as Java names classes and the members a static import names may not be — the last segment is
+        -- exempt) and resolve the longest prefix by the SAME whole-path rule. ★ THE GUARD: a lower-case segment is a
+        -- PACKAGE, so the walk stops there — an external `org.foo.Bar` can never become an in-tree `org/foo.java`.
+        for n = #segs - 1, 2, -1 do
+            if not segs[n]:match('^_*%u') then break end
+            local h, a = whole(n)
+            if h then return h end
+            if a then return nil end
         end
         -- no file spells the whole package: the index root may sit INSIDE a source root
         -- (`src/main/java/com/example` indexed alone holds com.example.core.Registry as

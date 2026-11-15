@@ -14,8 +14,11 @@
 --   missed     the oracle has exactly one file, ours refused
 --   wrong      ours named a file whose declared FQN is not the import
 --   external   neither side has it (JDK, a dependency jar) — the counter that must stay large
---   nested     `import a.b.Outer.Inner`: no file, but a.b.Outer is declared in the tree (neither side
---              resolves a member class today; counted apart so it does not pass as external)
+--   nested     `import a.b.Outer.Inner`: no file, but a.b.Outer is declared in the tree. Since CART-1054 ours
+--              resolves the member to Outer.java, so the ORACLE answers it too — the longest prefix a file's
+--              own declaration names, case-blind (ours walks class-shaped segments only, so the two can
+--              differ): nested_agree / nested_missed / nested refused|named (an outer declared twice), and a
+--              different file is `wrong`
 -- ★ The oracle is a regex over the first `package` line; a file without one is in the default
 -- package. It does not know which module can SEE which (that is the POM layer's job).
 -- ⚠ ONE SHARED INPUT, SAID: ours is handed the importer's source root (`spec.import_context`, which
@@ -79,8 +82,9 @@ for _, repo in ipairs(repos) do
             imports[f] = im
         end
     end
-    local c = { agree = 0, ambiguous_refused = 0, ambiguous_named = 0, missed = 0, wrong = 0, external = 0, nested = 0 }
-    local ex = { missed = {}, wrong = {}, ambiguous_named = {}, ambiguous_refused = {} }
+    local c = { agree = 0, ambiguous_refused = 0, ambiguous_named = 0, missed = 0, wrong = 0, external = 0,
+        nested_agree = 0, nested_missed = 0, nested_refused = 0, nested_named = 0 }
+    local ex = { missed = {}, wrong = {}, ambiguous_named = {}, ambiguous_refused = {}, nested_missed = {} }
     local total = 0
     for _, f in ipairs(list) do
         for _, fq in ipairs(imports[f] or {}) do
@@ -97,13 +101,21 @@ for _, repo in ipairs(repos) do
             elseif truth then
                 k = (ours == truth[1]) and 'agree' or ours and 'wrong' or 'missed'
             else
-                k = ours and 'wrong' or 'external'
-                if k == 'external' then -- a member class: `import a.b.Outer.Inner` lives in Outer.java
-                    local outer = fq:match('^(.*)%.[^.]+$')
-                    while outer do
-                        if fqn_files[outer] then k = 'nested'; break end
-                        outer = outer:match('^(.*)%.[^.]+$')
-                    end
+                -- not a declared FQN: the oracle's MEMBER answer is the longest prefix a file declares (CART-1054)
+                local outer, ofiles = fq:match('^(.*)%.[^.]+$'), nil
+                while outer do
+                    if fqn_files[outer] then ofiles = fqn_files[outer]; break end
+                    outer = outer:match('^(.*)%.[^.]+$')
+                end
+                if not ofiles then
+                    k = ours and 'wrong' or 'external'
+                elseif #ofiles == 1 then
+                    k = (ours == ofiles[1]) and 'nested_agree' or ours and 'wrong' or 'nested_missed'
+                else
+                    k = ours and 'nested_named' or 'nested_refused'
+                    if ours and decl[ours] ~= outer then k = 'wrong' end
+                    local otail = outer:gsub('%.', '/') .. '.java'
+                    if k == 'nested_named' and ours:sub(1, #ours - #otail) ~= ctx[f].srcroot then k = 'wrong' end
                 end
             end
             c[k] = c[k] + 1
@@ -114,9 +126,11 @@ for _, repo in ipairs(repos) do
     for _, l in pairs(fqn_files) do if #l > 1 then amb = amb + 1 end end
     print(('%s: %d java file(s), %d unread; %d single-type import(s) (+%d static, +%d on-demand skipped); %d FQN(s) declared in 2+ files  (%.1fs)')
         :format(repo, #list, unread, total, n_static, n_star, amb, (vim.uv.hrtime() - t0) / 1e9))
-    print(('  agree %d  missed %d  wrong %d  ambiguous: refused %d, named %d  external %d  (member class of an in-tree class %d)')
-        :format(c.agree, c.missed, c.wrong, c.ambiguous_refused, c.ambiguous_named, c.external, c.nested))
-    for _, k in ipairs({ 'missed', 'wrong', 'ambiguous_named', 'ambiguous_refused' }) do
+    print(('  agree %d  missed %d  wrong %d  ambiguous: refused %d, named %d  external %d')
+        :format(c.agree, c.missed, c.wrong, c.ambiguous_refused, c.ambiguous_named, c.external))
+    print(('  member of an in-tree class (CART-1054): agree %d  missed %d  outer declared twice: refused %d, named %d')
+        :format(c.nested_agree, c.nested_missed, c.nested_refused, c.nested_named))
+    for _, k in ipairs({ 'missed', 'wrong', 'ambiguous_named', 'ambiguous_refused', 'nested_missed' }) do
         for _, e in ipairs(ex[k]) do print('    ' .. k, e[1], e[2], '->', e[3], '| truth', e[4]) end
     end
 end

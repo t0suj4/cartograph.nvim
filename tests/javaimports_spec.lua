@@ -227,3 +227,35 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
     eq(J .. 'p/a/Outer.java::I::d@4', got['Use:Impl::d'], 'a default method reached through Outer.I: the head resolves through the import')
     eq(J .. 'p/k/K.java::K::kk@1', got['Use:Impl::kk'], 'and past it: Outer.I\'s own supertype, keyed by its simple name')
 end)
+
+-- CART-1054: `import a.b.Outer.Inner;` names a nested class living in a/b/Outer.java, and `import static a.b.Outer.m;`
+-- a member of it — no file spells either path, and 17,094 such imports over seven corpora lost their edge. Trailing
+-- CLASS-SHAPED segments are dropped and the prefix resolves by the same whole-path rule; a lower-case segment is a
+-- package, so an external `org.foo.Bar` never lands on an in-tree `org/foo.java`.
+test('javaimports: a MEMBER of an in-tree class resolves to its outer class file; a package-shaped prefix never does (CART-1054)', function ()
+    if not has_java() then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, t)
+        vim.fn.mkdir(vim.fs.dirname(root .. '/' .. rel), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    local J = 'src/main/java/'
+    w(J .. 'a/b/Outer.java', 'package a.b;\npublic class Outer {\n  public static class Inner { public static class Deep {} }\n  public static void m() {}\n}\n')
+    w(J .. 'org/foo.java', 'package org;\nclass foo {}\n') -- (a lower-case class: the guard's decoy)
+    w(J .. 'c/Use.java', table.concat({
+        'package c;',
+        'import a.b.Outer.Inner;',
+        'import a.b.Outer.Inner.Deep;',
+        'import static a.b.Outer.m;',
+        'import org.foo.Bar;',
+        'public class Use { void f() { m(); } }', '' }, '\n'))
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'import' and e.from == J .. 'c/Use.java' then got[#got + 1] = (e.bind or '-') .. ' -> ' .. e.to end
+    end
+    table.sort(got)
+    eq({ 'Deep -> ' .. J .. 'a/b/Outer.java', 'Inner -> ' .. J .. 'a/b/Outer.java', 'm -> ' .. J .. 'a/b/Outer.java' }, got,
+        'the nested class, a doubly nested one and a static member reach Outer.java; org.foo.Bar reaches nothing')
+end)
