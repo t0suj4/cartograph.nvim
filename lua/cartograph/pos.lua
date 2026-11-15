@@ -63,6 +63,10 @@ local function to_byte(text, col0, unit)
     end
     local enc = ENC[unit]
     if not enc then return nil, 'unknown-unit' end
+    -- (str_byteindex with strict=false CLAMPS an index past the end to the line's length — exactly the silent guess
+    -- this module refuses, so the length in this unit is checked first)
+    local okn, len = pcall(vim.str_utfindex, text, enc)
+    if not okn or len == nil or col0 > len then return nil, 'out-of-line' end
     local ok, b = pcall(vim.str_byteindex, text, enc, col0, false)
     if not ok or b == nil or b > #text then return nil, 'out-of-line' end
     -- a UTF-16 index inside a surrogate pair maps onto the start of its code point: refuse instead

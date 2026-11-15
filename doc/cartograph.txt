@@ -865,6 +865,18 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
                               that varies across them and is a literal in the
                               templates, at each template line (quickfix)
 
+AGENT POSITIONS (MCP)                             *cartograph-agent-positions*
+
+The agent surface (tools/mcpserve.lua, the MCP host) speaks 1-based lines and
+1-based CHARACTER columns since agent protocol 2. Before it, a column was a
+1-based BYTE column, which an agent counting a line's characters misread on
+any non-ASCII line. This was a deliberate client break, and it is visible:
+every answer's `graph` carries `protocol` (2) and `positions`
+({ line = 1, col = 1, unit = 'char' }), and the server's serverInfo version
+is 0.2. A client that reads or sends columns must check
+`graph.positions.unit`. Inside the editor, positions convert through
+`require('cartograph.pos')` and its named profiles; nothing guesses a base.
+
 ==============================================================================
 4. KEYS                                                       *cartograph-keys*
 

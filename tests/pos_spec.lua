@@ -41,6 +41,8 @@ test('pos: refusals — mid-character, out-of-line, unknown base / unit, a surro
     eq('mid-character', why)
     _, why = pos.to(pos.new(0, 99, 'GRAPH'), 'AGENT', text)
     eq('out-of-line', why)
+    _, why = pos.to(pos.new(1, 99, 'AGENT'), 'GRAPH', text) -- a CHARACTER column past the line: refused, not clamped
+    eq('out-of-line', why)
     _, why = pos.to({ line = 1, col = 2 }, 'GRAPH', text)
     eq('unknown-base', why)
     _, why = pos.to({ line = 1, col = 2, lb = 1, cb = 1 }, 'GRAPH', text)

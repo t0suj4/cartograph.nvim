@@ -87,7 +87,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 | Question | Instrument |
 |---|---|
 | This graph: provider, counts, each verb's capability and why it is unavailable (`unavailable_rule`), the frontier | MCP `graph_info` |
-| How did the call at file:line resolve, or which rule refused it? | MCP `why { file, line }` — no `col`: EVERY call starting on the line, in column order, each row with its `col`, then the enclosing definition as a context row (a call-free line says so in a note `no-call-on-line`); `col` = that one position (CART-0684) |
+| How did the call at file:line resolve, or which rule refused it? | MCP `why { file, line }` — no `col`: EVERY call starting on the line, in column order, each row with its `col`, then the enclosing definition as a context row (a call-free line says so in a note `no-call-on-line`); `col` = that one position (CART-0684). Columns are 1-based CHARACTERS since agent protocol 2 (every answer's `graph.positions`; CART-2086, CHANGELOG.md) |
 | How many call sites landed on each resolution rung, for one function or the graph? | MCP `ladder` |
 | The graph's epistemic state as counts: edges by tier, calls by disposition, refusals by rule | MCP `census` |
 | Do all corpora still produce their pinned counts / the saved graph, and do the oracles agree? | `tools/matrix.lua [<corpus>...] [--cols counts,struct,dfpar,fold,silent,cache,par] [--save] [--jobs N]` |

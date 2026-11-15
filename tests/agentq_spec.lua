@@ -505,7 +505,8 @@ test('why: no col answers EVERY call on the line in column order, the def beside
     local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(src); fd:close()
     local data = ts.extract(root); data.root = root
     store.ingest(data)
-    vim.fn.delete(root, 'rf')
+    -- (the fixture stays on disk until the end: since agent protocol 2 a column is converted to CHARACTERS through
+    -- the line's text, CART-2086)
     local agent = require 'cartograph.agent'
     local d = agent.answer(store, 'why', { file = 'm.lua', line = 4 })
     local shape = {}
@@ -532,6 +533,7 @@ test('why: no col answers EVERY call on the line in column order, the def beside
     local function has(dd, k) for _, n in ipairs(dd.notes or {}) do if n.kind == k then return true end end end
     ok(has(agent.answer(store, 'cone', { node = fid }), 'defaulted-direction'), 'an omitted direction is named')
     ok(not has(agent.answer(store, 'cone', { node = fid, direction = 'out' }), 'defaulted-direction'), 'a given one is not')
+    vim.fn.delete(root, 'rf')
 end)
 
 -- CART-1008: the mention index skips a 1-2 character name (its documented rule) and a MEMBER / PROPERTY key
@@ -596,4 +598,35 @@ test('graph_info: files no spec claims are COUNTED by extension in the frontier,
         eq({ { ext = 'md', files = 1 } }, g2.frontier.unclaimed)
         vim.fn.delete(r2, 'rf')
     end
+end)
+
+-- CART-2086 (the USER's decision 2026-11-15): the agent's column is a 1-based CHARACTER column since protocol 2 — it
+-- was a 1-based BYTE column, misread by any agent counting characters on a non-ASCII line. The break is VISIBLE: every
+-- answer's graph carries protocol + positions.
+test('why: columns are 1-based CHARACTERS (protocol 2), converted through the line, and every answer says so (CART-2086)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local L2 = 'function M.g() local s = "é"; return b(s) end' -- `é` is 2 bytes: b's byte column is one past its char column
+    local src = table.concat({ 'local M = {}', L2, 'local function b(x) return x end', 'return M' }, '\n') .. '\n'
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(src); fd:close()
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local agent = require 'cartograph.agent'
+    local bbyte = L2:find('b%(')                            -- 1-based BYTE column of `b(`
+    local bchar = vim.fn.strchars(L2:sub(1, bbyte - 1)) + 1 -- its 1-based CHARACTER column
+    ok(bchar == bbyte - 1, 'the fixture really differs by one: ' .. bchar .. ' vs ' .. bbyte)
+    local d = agent.answer(store, 'why', { file = 'm.lua', line = 2 })
+    eq(2, d.graph.protocol, 'the envelope names the protocol')
+    eq({ line = 1, col = 1, unit = 'char' }, d.graph.positions, 'and the position contract')
+    local brow
+    for _, r in ipairs(d.result) do if r.callee == 'b' then brow = r end end
+    ok(brow, 'the call to b is a row')
+    eq(bchar, brow.col, 'the row\'s col is the CHARACTER column')
+    local p = agent.answer(store, 'why', { file = 'm.lua', line = 2, col = bchar })
+    eq('call', p.result[1].kind, 'the character column addresses the call')
+    eq('b', p.result[1].callee)
+    local bad, st = agent.answer(store, 'why', { file = 'm.lua', line = 2, col = 999 })
+    eq('usage', st, 'a column past the line is a loud usage error, never clamped')
+    ok(tostring(bad.error.reason):find('CHARACTER', 1, true), bad.error.reason)
+    vim.fn.delete(root, 'rf')
 end)

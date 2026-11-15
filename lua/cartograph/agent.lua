@@ -314,6 +314,14 @@ end
 -- Memoized per store generation: it rides on every document, and the call sweep
 -- is O(calls).
 
+-- ★ THE AGENT WIRE'S POSITION CONTRACT, VERSIONED (CART-2086, the USER's decision 2026-11-15 13:22). Columns on this
+-- surface are 1-based CHARACTER columns since PROTOCOL 2 — they were 1-based BYTE columns, which an agent counting a
+-- line's characters misread on any non-ASCII line. The change is a deliberate client break, so it is made VISIBLE:
+-- every answer's `graph` carries `protocol` and `positions`, mcpserve's serverInfo version moved, and CHANGELOG.md /
+-- doc/cartograph.txt say so. A client that reads columns must check `graph.positions.unit == 'char'`.
+M.PROTOCOL = 2
+M.POSITIONS = { line = 1, col = 1, unit = 'char' }
+
 local function build_graph(store)
     local d = store.data or {}
     local files, unparsed, unparsed_files = 0, 0, {}
@@ -358,6 +366,8 @@ local function build_graph(store)
     end
     return {
         root = nn(d.root), provider = nn(d.provider),
+        -- (the wire contract every answer carries, so a client can refuse a protocol it does not speak, CART-2086)
+        protocol = M.PROTOCOL, positions = M.POSITIONS,
         index = thin and 'index-only' or 'full',
         generation = store.generation or 0,
         partial = nn(d.partial),
@@ -1215,6 +1225,12 @@ end
 -- transport. It is also the verb that FORCED `tier_basis = 'mixed'` — its call
 -- branch carries a rung, its def branch deliberately carries none.
 
+-- the text of 1-based line `line1` of `file`, or nil (what cartograph.pos needs to change a column's unit)
+local function line_text(store, file, line1)
+    local lines = store.content({ file = file })
+    return lines and lines[line1] or nil
+end
+
 local function v_why(store, args)
     local file, why, hits = resolve_file(store, args.file)
     if not file then return unknown_file(store, args.file, why, hits, 'file') end
@@ -1240,15 +1256,18 @@ local function v_why(store, args)
         local rows, notes, ts = {}, {}, {}
         for _, c in ipairs(calls) do
             local r = lsp.why_call(store, c)
-            r.line, r.col = line, atr.sc(c.at) + 1
+            -- (the agent's column is a 1-based CHARACTER column, protocol 2: converted from the stored byte column
+            -- through the line's text; a column that will not convert is left out, never guessed — CART-2086)
+            r.line = line
+            r.col = require('cartograph.pos').col(require('cartograph.pos').of_range(c.at), 'AGENT', line_text(store, file, line))
             rows[#rows + 1] = r
             if r.status == 'resolved' or r.status == 'hedged' then ts[#ts + 1] = r.tier
             elseif r.status == 'refused' then
                 notes[#notes + 1] = { kind = 'refusal-is-the-answer', premise = r.rule, col = r.col,
-                    why = ('the call at col %d was REFUSED between %d candidate(s) — the answer is "a rule declined", NOT "it calls nothing"'):format(r.col, r.candidates or 0) }
+                    why = ('the call at col %s was REFUSED between %d candidate(s) — the answer is "a rule declined", NOT "it calls nothing"'):format(r.col, r.candidates or 0) }
             else
                 notes[#notes + 1] = { kind = 'frontier-is-the-answer', col = r.col,
-                    why = ('a call is recorded at col %d and the resolver produced no target and no refusal — nothing was concluded about it'):format(r.col) }
+                    why = ('a call is recorded at col %s and the resolver produced no target and no refusal — nothing was concluded about it'):format(r.col) }
             end
         end
         -- the enclosing definition: the innermost node covering the first call (or the line's start)
@@ -1273,11 +1292,18 @@ local function v_why(store, args)
     end
     local col = math.floor(tonumber(args.col) or 1)
     local subject = { kind = 'position', file = file, line = line, col = col }
-    -- the handler speaks LSP: 0-based line/character, and a uri. Our surface is
-    -- 1-based (agentq's), so the conversion lives HERE, at the seam.
+    -- `col` is a 1-based CHARACTER column (protocol 2, CART-2086); storage is 0-based BYTES. Converted through the
+    -- line's own text by cartograph.pos, which REFUSES a column past the line rather than clamp it.
+    local P = require 'cartograph.pos'
+    local g, gwhy = P.to(P.new(math.max(1, line), math.max(1, col), 'AGENT'), 'GRAPH', line_text(store, file, line))
+    if not g then
+        return nil, ('col %d on line %d does not address a character there (%s): `col` is a 1-based CHARACTER column since agent protocol 2')
+            :format(col, line, tostring(gwhy))
+    end
+    -- the handler speaks LSP: 0-based line/character, and a uri; it reads the byte column the graph stores.
     local ans = lsp.handlers['cartograph/why'](store, {
         textDocument = { uri = vim.uri_from_fname(store.abs(file)) },
-        position = { line = math.max(0, line - 1), character = math.max(0, col - 1) },
+        position = { line = g.line, character = g.col },
     })
     if ans == nil or ans == vim.NIL then
         local mod = module_of(store, file)
@@ -4409,7 +4435,7 @@ M.VERBS = {
         args = {
             { name = 'file', type = 'string', required = true, desc = 'path relative to the graph root' },
             { name = 'line', type = 'integer', required = true, desc = '1-based line' },
-            { name = 'col', type = 'integer', desc = '1-based column; omitted = EVERY call starting on the line, in column order (each row carries its col), plus the enclosing definition as a context row' },
+            { name = 'col', type = 'integer', desc = '1-based CHARACTER column (agent protocol 2 — it was a byte column; check graph.positions); omitted = EVERY call starting on the line, in column order (each row carries its col, in characters), plus the enclosing definition as a context row' },
         },
         run = v_why,
     },
