@@ -100,7 +100,7 @@ test('refuses: a real argument-dependent refusal is declared, and graph_info pub
     for _, n in ipairs(d.notes or {}) do ok(n.kind ~= 'envelope-bug', vim.inspect(n)) end
     local by = {}
     for _, r in ipairs(agent.answer(store, 'graph_info', {}).result) do by[r.verb] = r end
-    eq({ 'undo-refused' }, by.txn_undo.refuses)
+    eq({ 'not-applied', 'not-latest', 'undo-refused', 'unknown-entry' }, by.txn_undo.refuses)
     eq({}, by.graph_info.refuses, 'an empty set is published as a claim, not omitted')
     vim.fn.delete(root, 'rf')
 end)

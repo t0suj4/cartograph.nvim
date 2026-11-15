@@ -211,9 +211,8 @@ end
 
 -- ── rollback: newest first, identity-checked, graph re-read ───────────────────────────────────────────────────────
 
---- Undo `entries` (journal entries THIS run applied), newest first. ⚠ journal.rollback pops whatever entry is LAST,
---- so each pop is checked by id first: a count that is off by one inside a `first`/`try` would otherwise undo a
---- sibling's write. After each undo the touched files are re-read (the agent's txn_undo rule — compose's rollback
+--- Undo `entries` (journal entries THIS run applied), newest first. Each is rolled back BY ID (journal.rollback refuses
+--- 'not-latest'): a count that is off by one inside a `first`/`try` would otherwise undo a sibling's write. After each undo the touched files are re-read (the agent's txn_undo rule — compose's rollback
 --- restored bytes and never refreshed the graph). -> undone, why (nil when all were undone)
 function M.rollback(store, entries)
     local journal = require 'cartograph.journal'
@@ -222,13 +221,15 @@ function M.rollback(store, entries)
         local want = entries[i]
         -- a cross-world write lives in ITS world's journal (txn.execute journals the target root)
         local root = want.root or store.data.root
-        local last = journal.last(root)
-        if not last or last.id ~= want.id then
-            return undone, ('the newest journal entry is %s, not this run\'s %s — refusing to undo a write this run did not make')
-                :format(last and tostring(last.id) or 'none', tostring(want.id))
+        -- (by id, CART-1917: the newest-entry check happens inside the call that restores, so a concurrent apply
+        -- cannot slip between a separate last() check and the pop)
+        local e, why, class = journal.rollback(root, want.id)
+        if not e then
+            if class == 'not-latest' then
+                why = ('%s — refusing to undo a write this run did not make'):format(why)
+            end
+            return undone, why
         end
-        local e, why = journal.rollback(root)
-        if not e then return undone, why end
         undone = undone + 1
         local touched = {}
         for rel in pairs(e.files or {}) do touched[#touched + 1] = rel end

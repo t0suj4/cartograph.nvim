@@ -73,7 +73,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 | The exact diff a held plan would write, nothing written | MCP `txn_preview { plan }` |
 | Hand a plan to another session (plan on a read-only host, apply on a writable one) | MCP `txn_save { plan, path }` / `txn_load { path }` |
 | Write a previewed plan, journalled and reversible | MCP `txn_apply { plan }` (needs a `--write` host) |
-| Roll back the newest applied transaction byte-exact | MCP `txn_undo` (needs a `--write` host) |
+| Roll back MY applied transaction byte-exact (not another client's on the same root) | MCP `txn_undo { journal = <the id txn_apply returned> }` (needs a `--write` host); refuses `not-latest` naming newer entries. Bare `txn_undo` = the newest entry whoever applied it, with a `not-this-host` note. CART-1917 |
 
 ## What changed?
 

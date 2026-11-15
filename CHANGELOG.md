@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-15 — `txn_undo` takes the journal id it should undo (agent surface, additive)
+
+- `txn_undo { journal = <id> }` undoes THAT entry: the `subject.journal` txn_apply returned. While a newer entry
+  stands it refuses `not-latest` and names the newer entries, so a client never rolls back another client's work
+  on the same root. A bad id refuses `unknown-entry`, an entry already rolled back refuses `not-applied` (CART-1917).
+- A bare `txn_undo` still works as before (the newest applied entry, whoever applied it) and now adds a
+  `not-this-host` note when that entry was not applied by this host.
+
 ## 2026-11-15 — LSP position encoding is negotiated (lspserve / the LSP server)
 
 - The LSP server now picks `positionEncoding` from what the client offers: `utf-8` when listed, else the LSP default

@@ -571,7 +571,7 @@ M.RUN_RULES = {
     ['unknown-plan'] = { arg = 'plan' }, ['stale-plan'] = { arg = 'plan' }, ['foreign-plan'] = { arg = 'plan' },
     ['preview-refused'] = { arg = 'plan' }, ['apply-refused'] = { arg = 'plan' }, ['recipe-schema'] = { arg = 'plan' },
     ['replan-refused'] = { arg = 'plan' }, ['no-plan-minted'] = { arg = 'plan' },
-    ['unknown-entry'] = { arg = 'journal' },
+    ['unknown-entry'] = { arg = 'journal' }, ['not-latest'] = { arg = 'journal' }, ['not-applied'] = { arg = 'journal' },
     ['unknown-tactic'] = { arg = 'tactic' }, ['cannot-run'] = { arg = 'tactic' },
     ['no-path'] = { arg = 'recipe' }, ['unreadable-path'] = { arg = 'recipe' }, ['unreadable-recipe'] = { arg = 'recipe' },
     ['cannot-plan'] = { decline = true }, ['cannot-annotate'] = { decline = true }, ['cannot-derive'] = { decline = true },
@@ -2442,6 +2442,7 @@ local function plan_site_rows(e)
     return rows
 end
 M._plans = {}
+M._applied = {} -- journal ids THIS host applied (txn_apply); a bare txn_undo notes when it pops another's (CART-1917)
 local plan_seq = 0
 
 --- Hold a freshly built plan and hand back its opaque id.
@@ -3908,6 +3909,7 @@ local function v_txn_apply(store, args)
     -- the handle live would let a caller apply the same edit twice, and the
     -- second one would be caught by a stamp CAS rather than by its own name.
     M._plans[e.id] = nil
+    M._applied[entry.id] = true -- (CART-1917: what THIS host applied, so a bare txn_undo can say when it popped another's)
     local rows = {}
     for _, rel in ipairs(sorted_keys(entry.files)) do
         local f = entry.files[rel] or {}
@@ -3919,7 +3921,7 @@ local function v_txn_apply(store, args)
     end
     local notes = ledger_notes(e.plan)
     notes[#notes + 1] = { kind = 'undo', premise = 'this write is reversible',
-        why = ('journal entry %s holds every touched file\'s exact before-content; txn_undo restores them byte-for-byte, and refuses if any of them has changed since'):format(entry.id),
+        why = ('journal entry %s holds every touched file\'s exact before-content; txn_undo { journal = %q } restores them byte-for-byte, and refuses if any of them has changed since, or if a newer entry was applied after it'):format(entry.id, entry.id),
         evidence = { journal = entry.id } }
     return {
         subject = { plan = e.id, journal = entry.id, verb = nn(entry.verb),
@@ -3930,17 +3932,32 @@ end
 
 -- ── verb: txn_undo ──────────────────────────────────────────────────────────
 
-local function v_txn_undo(store)
+local function v_txn_undo(store, args)
     local journal = require 'cartograph.journal'
     local root = (store.data or {}).root
-    local entry, why = journal.rollback(root)
-    if not entry then
+    local id = args and args.journal
+    if id == '' then id = nil end
+    local entry, why, class = journal.rollback(root, id)
+    if not entry and class == 'unknown-entry' then
+        return refuse('unknown-entry', why, 'call journal_list and pass the `id` of an applied entry')
+    elseif not entry and class == 'not-applied' then
+        return refuse('not-applied', why, 'call journal_list and pass the `id` of an applied entry')
+    elseif not entry and class == 'not-latest' then
+        return refuse('not-latest', why,
+            'roll the newer entries back first (each by its own id), or leave this one: it is not undone out of order, because restoring its before-content would erase what the newer ones wrote')
+    elseif not entry then
         return refuse('undo-refused',
             ('nothing was restored: %s'):format(tostring(why)),
             'the journal refuses a rollback that would clobber edits made since the apply — inspect the entry with journal_get, reconcile the drifted files yourself, and the entry stays available')
     end
     local touched = sorted_keys(entry.files)
     local notes = {}
+    if not id and not M._applied[entry.id] then
+        -- (CART-1917: a BARE undo pops the newest entry whoever applied it — say so when it was not this host's)
+        notes[#notes + 1] = { kind = 'not-this-host', premise = 'a bare txn_undo rolls back the newest applied entry',
+            why = ('journal entry %s was not applied by this host — another client or session on the same root applied it; pass `journal` to undo only your own'):format(entry.id),
+            evidence = { journal = entry.id } }
+    end
     -- the graph must be re-read or every later answer describes bytes that are
     -- no longer on disk; a refusal here is reported, never swallowed
     local okr, rok, rwhy = pcall(require('cartograph.refresh').files, touched)
@@ -5000,12 +5017,15 @@ M.VERBS = {
     },
     txn_undo = {
         answers = 'review-apply',
-        refuses = { 'undo-refused' },
-        summary = 'roll back the newest applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since',
-        subject = 'graph',
+        refuses = { 'not-applied', 'not-latest', 'undo-refused', 'unknown-entry' },
+        summary = 'roll back an applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since. Pass `journal` (the id txn_apply returned) to undo YOUR entry: it is refused (not-latest, naming them) while newer entries stand. Bare, it rolls back the newest applied entry WHOEVER applied it — safe only when this host is the root\'s one client; a note says when that entry was not this host\'s',
+        subject = 'journal',
         tier_basis = 'observation', mutates = true,
         absences = { 'absent' },
-        args = {},
+        args = {
+            { name = 'journal', type = 'string', required = false,
+                desc = 'the journal entry id txn_apply returned (subject.journal); omitted = the newest applied entry, whoever applied it' },
+        },
         run = v_txn_undo,
     },
 }

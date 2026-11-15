@@ -246,9 +246,36 @@ end
 --- contain EXACTLY what the apply wrote (after_hash) — drifted files
 --- refuse the whole rollback, listing them. On success files are
 --- restored byte-exact and the entry flips to 'rolled_back'.
---- Returns (entry, nil) or (nil, why).
-function M.rollback(root)
+--- Returns (entry, nil) or (nil, why, class).
+---
+--- ★ `id` NAMES THE ENTRY THE CALLER MEANS (CART-1917). Without it this undoes the newest applied entry WHOEVER applied
+--- it: two MCP clients on one root, A applies x.lua, B applies y.lua, A's undo rolled back B's work (the drift check
+--- only looks at the files of the entry it pops). With it the entry must be the newest applied one, checked in the
+--- same call that restores (a separate last() check races a concurrent apply). Refusal classes: 'unknown-entry',
+--- 'not-applied' (rolled back or aborted already), 'not-latest' (the 4th return lists the newer applied entries).
+function M.rollback(root, id)
     local e = M.last(root)
+    if id ~= nil then
+        local target, newer = nil, {}
+        for _, x in ipairs(M.list(root)) do -- newest first
+            if x.id == id then target = x; break end
+            if x.status == 'applied' then newer[#newer + 1] = x end
+        end
+        if not target then
+            return nil, ('no journal entry %s for this root'):format(tostring(id)), 'unknown-entry'
+        end
+        if target.status ~= 'applied' then
+            return nil, ('journal entry %s is %s, not applied: there is nothing of it to roll back')
+                :format(tostring(id), tostring(target.status)), 'not-applied'
+        end
+        if #newer > 0 then
+            local names = {}
+            for _, x in ipairs(newer) do names[#names + 1] = ('%s (%s)'):format(tostring(x.id), tostring(x.verb or '?')) end
+            return nil, ('journal entry %s is not the newest applied one: %d newer entr(ies) must be rolled back first — %s')
+                :format(tostring(id), #newer, table.concat(names, ', ')), 'not-latest', newer
+        end
+        e = target
+    end
     if not e then return nil, 'nothing applied to roll back' end
     local drifted = {}
     for rel, f in pairs(e.files) do

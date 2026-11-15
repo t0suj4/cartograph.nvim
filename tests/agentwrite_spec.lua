@@ -346,6 +346,56 @@ test('agentwrite: apply → journal_get → undo, and the tree comes back byte-e
     eq('undo-refused', none.refusal.rule)
 end)
 
+-- CART-1917: two clients on one root. A applies, B applies after it; A's undo BY ID is refused while B's entry stands
+-- (naming it), nothing is restored; a BARE undo pops the newest entry — B's — and says it was not this host's.
+test('agentwrite: txn_undo by journal id refuses NOT-LATEST while a newer entry stands; a bare undo names another host\'s entry (CART-1917)', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['src.lua'] = SRC_LUA, ['use.lua'] = USE_LUA }
+    ingest(root)
+    local orig = { src = read(root, 'src.lua'), use = read(root, 'use.lua') }
+    local function apply(name, dest)
+        local p = call('txn_plan_moveset', { seed = { idof(name) }, dest = dest })
+        eq(true, p.ok, name .. ' planned: ' .. vim.inspect(p.refusal))
+        eq(true, call('txn_preview', { plan = p.subject.plan }).ok)
+        local a = call('txn_apply', { plan = p.subject.plan })
+        eq(true, a.ok, name .. ' applied: ' .. vim.inspect(a.refusal))
+        return a.subject.journal
+    end
+    local ja = apply('M.dbl', 'lib/a.lua')                 -- client A
+    local after_a = { src = read(root, 'src.lua'), use = read(root, 'use.lua') }
+    local jb = apply('M.keep', 'lib/b.lua')                -- client B, on the same root
+    agent._applied[jb] = nil                                -- (B is ANOTHER host: this one did not apply it)
+    local after_b = read(root, 'src.lua')
+
+    local r = call('txn_undo', { journal = ja })
+    eq(false, r.ok, 'A\'s undo is refused while B\'s entry stands')
+    eq('not-latest', r.refusal.rule)
+    ok(r.refusal.reason:find(jb, 1, true), 'naming the newer entry: ' .. r.refusal.reason)
+    eq(after_b, read(root, 'src.lua'), 'nothing restored')
+    eq(1, vim.fn.filereadable(root .. '/lib/b.lua'), 'B\'s file stands')
+
+    local unk = call('txn_undo', { journal = 'no-such-entry' })
+    eq('unknown-entry', unk.refusal and unk.refusal.rule)
+
+    local bare = call('txn_undo', {})
+    eq(true, bare.ok, 'a bare undo pops the newest: ' .. vim.inspect(bare.refusal))
+    eq(jb, bare.subject.journal, 'which is B\'s')
+    local noted = false
+    for _, n in ipairs(bare.notes or {}) do if n.kind == 'not-this-host' then noted = true end end
+    ok(noted, 'and it says the entry was not this host\'s: ' .. vim.inspect(bare.notes))
+    eq(after_a.src, read(root, 'src.lua'))
+
+    local own = call('txn_undo', { journal = ja })
+    eq(true, own.ok, 'with B gone, A undoes its own by id: ' .. vim.inspect(own.refusal))
+    for _, n in ipairs(own.notes or {}) do ok(n.kind ~= 'not-this-host', 'an undo by id is never the bare warning') end
+    eq(orig.src, read(root, 'src.lua'), 'src.lua restored byte-exact')
+    eq(orig.use, read(root, 'use.lua'))
+
+    local twice = call('txn_undo', { journal = ja })
+    eq('not-applied', twice.refusal and twice.refusal.rule, 'a rolled-back entry is not rolled back twice')
+end)
+
 test('agentwrite: a read-only host refuses every mutating verb, and graph_info says so', function ()
     if not ready() then skip('no treesitter') end
     permit(false)

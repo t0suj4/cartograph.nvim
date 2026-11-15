@@ -296,7 +296,7 @@ The order is the order of trust, and it is enforced:
    `txn_plan_annotate` — propose. Writes nothing.
 2. `txn_preview` — diff it. Writes nothing.
 3. `journal_list` / `journal_get` — read the history.
-4. `txn_apply`, then `txn_undo` if needed.
+4. `txn_apply`, then `txn_undo { journal = <its subject.journal> }` if needed.
 
 ⚠ **THIS IS NOT ALL THE WRITE VERBS CARTOGRAPH HAS.** Measured at `730a2c9` — the five
 planners above reach exactly three modules: `moveapply`, `optapply`, `cloneextract`.
@@ -392,7 +392,7 @@ the world you planned against**:
 3. **Preview.** Not optional — apply refuses `unpreviewed`. Preview re-checks the
    generation itself; `dryrun` does not, so a stale plan would otherwise diff
    today's disk against yesterday's offsets and print a confident, wrong patch.
-4. **Apply**, then `txn_undo` if needed.
+4. **Apply**, then `txn_undo { journal = <its subject.journal> }` if needed.
 5. **Now re-derive.** The apply bumped the graph's generation, and a plan handle
    **dies with the generation it was planned against** — so every other plan you
    were holding is now dead, and every `id` you were holding has moved. Go back to
