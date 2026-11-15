@@ -26,6 +26,13 @@
 -- `self`. So a consumer aligning argv with params by position must know the language and the form
 -- (callrec.method: true for a Lua `:` call), as fabcensus's one-hop pin does; a `.` call to a `:` function shifts
 -- every index by one.
+-- ⚠ AND WHAT SLOT 1 HOLDS ON A METHOD CALL IS PROVIDER-DEPENDENT (CART-0248): the tree-sitter provider writes the
+-- `{ k = 'expr' }` PLACEHOLDER above, while the lua-ls CLI graph writes the receiver's OWN shape there
+-- (`{ k = 'local', name = 't', l = 21 }`). Both are kept (the CLI fact is real and the placeholder is cheap: the fold
+-- exists because argv was 69 MB on server), so slot 1's POSITION is specified and its CONTENT is not. Read the
+-- receiver from `full` (callrec.full), never from argv[1]; a consumer that needs argv[1]'s shape must ask both ways,
+-- as the swallowed-type repair does since CART-0241 (it had read the CLI shape and repaired 0 of 1,987 tree-sitter
+-- findings).
 
 local M = {}
 
