@@ -242,6 +242,10 @@ function M.ingest(data, opts)
     -- gate's flaky 0 in the parallel suite (a spec that marked a member, a later spec that refreshed, width_spec last).
     -- The same root re-ingested (a refresh) keeps the set: members FOLLOW their ids. init.open loads the new root's own.
     local function rootkey(r) return (tostring(r or '')):gsub('/+$', '') end
+    -- ★ AND SO ARE THE PREVIEW CONTEXT AND THE HIGHLIGHT (CART-2102): ranges into another project's files. Kept, the
+    -- next source pane to attach rendered them against the new graph and crashed (bytecol.lua:77). A refresh of the
+    -- SAME root keeps them: their node ids follow.
+    if rootkey(prev_root) ~= rootkey(data and data.root) then M.context, M.highlight = nil, nil end
     if rootkey(prev_root) ~= rootkey(data and data.root) and M.workset
         and (next(M.workset.ids) or #(M.workset.pending or {}) > 0 or #(M.workset.refs or {}) > 0) then
         M.workset = { ids = {}, refs = {}, pending = {}, last = nil }

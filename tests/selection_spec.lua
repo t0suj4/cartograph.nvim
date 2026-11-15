@@ -16,9 +16,6 @@ local function setup()
     fd:close()
     local data = ts.extract(root); data.root = root
     store.ingest(data)
-    -- (an earlier spec's context AND the source pane's current node survive an ingest of another root: CART-2102)
-    store.set_context(nil); store.set_highlight(nil)
-    source.cur, source.ctx = nil, nil
     local ids = {}
     for _, n in ipairs(store.data.nodes) do ids[n.name] = n.id end
     vim.cmd('tabnew')

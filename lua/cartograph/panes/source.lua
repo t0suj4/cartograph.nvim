@@ -339,6 +339,7 @@ end
 -- now rides extractapply like every other write verb, so the commit is
 -- :CartographApply and the undo is :CartographUndo (CART-0125).
 function M.extract(line1, line2, name)
+    M._fresh()
     local node = M.cur
     if not node then return vim.notify('cartograph: no function focused', vim.log.levels.WARN) end
     if store.txn then
@@ -357,6 +358,7 @@ function M.extract(line1, line2, name)
         set_lines(M.buf, lines)
         scroll_top(M.win_top)
         vim.fn.confirm('(press Enter)', '&Ok', 1)
+        M._fresh()
         set_lines(M.buf, body_lines(M.cur))
         scroll_top(M.win_top)
     end
@@ -413,6 +415,7 @@ end
 --- column under the cursor (nil on a header row, or in a generated alternate view, whose rows are not source), the word
 --- there, and the base of those numbers. nil when the buffer renders nothing.
 function M.cursor_address(win)
+    M._fresh()
     local node = M.ctx or M.cur
     if not node then return nil end
     win = win or M.win_top
@@ -459,6 +462,16 @@ function M.attach(win)
 end
 M.CURSOR_SETTLE_MS = 60 -- (the settle window; a spec may lower it)
 
+--- ★ THE RENDERED NODES ARE OBJECTS OF ONE GRAPH (CART-2102). M.cur / M.ctx are node records, and a record's packed
+--- range indexes the store it came from: after an ingest — a refresh, or ANOTHER root — the old object read past the
+--- new store (bytecol.lua:77 from attach -> context(nil) -> body_lines). So every reader re-resolves them BY ID (a hash
+--- lookup): the same id follows into the new graph, a gone one becomes nil. Not keyed on store.generation — a
+--- module-level generation cache is what the band fence forbids (session_spec), and the lookup is cheaper than the check.
+function M._fresh()
+    if M.cur then M.cur = M.cur.id and store.node(M.cur.id) or nil end
+    if M.ctx then M.ctx = M.ctx.id and store.node(M.ctx.id) or nil end
+end
+
 ---@param id string?
 function M.render(id)
     local node = store.node(id)
@@ -488,6 +501,7 @@ function M.labels(file, items)
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return 0 end
     M.clear_labels()
     if M._view then return 0 end
+    M._fresh()
     local shown = M.ctx or M.cur
     if not shown or shown.file ~= file then return 0 end
     local n, first = 0, nil
@@ -520,6 +534,7 @@ function M.highlight(hl)
     -- them, so painting one here would highlight an arbitrary row
     if M._view then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
+    M._fresh()
     local shown = M.ctx or M.cur
     if not hl or not shown or hl.file ~= shown.file then return end
     apply_hl(M.buf, shown, hl.ranges)
@@ -533,6 +548,7 @@ end
 ---@param ctx {node:string, ranges:table?}?
 function M.context(ctx)
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
+    M._fresh()
     local prev = M.ctx
     M.ctx = ctx and store.node(ctx.node) or nil
     M._view, M._view_rows = nil, nil
