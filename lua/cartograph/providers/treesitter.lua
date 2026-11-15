@@ -8064,7 +8064,7 @@ function M.extract(root, opts)
     -- stamps: what each parsed file's truth is keyed to (mtime+size — a
     -- display-honesty gate for edits that arrive OUTSIDE nvim, not an
     -- eviction key, so no content hash needed). store.stale() compares.
-    local data = { schema = 1, root = root, provider = 'treesitter',
+    local data = { schema = 1, root = root, provider = 'treesitter', pos_base = require('cartograph.at').BASE,
         capabilities = { calls = true, litdata = true, df = 'lite' },
         -- CARRIED ON THE GRAPH so a later re-parse agrees with the build (CART-0410).
         -- Analysis re-parses (expr, lens, optimize) run long after extraction and often

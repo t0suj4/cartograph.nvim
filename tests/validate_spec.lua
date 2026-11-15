@@ -10,11 +10,28 @@ local function node(id, kind, extra)
 end
 
 test('validate: a clean graph is OK', function ()
-    local r = validate.check({ nodes = { node('m.lua', 'module'), node('a') },
+    local r = validate.check({ pos_base = require('cartograph.at').BASE,
+        nodes = { node('m.lua', 'module'), node('a') },
         edges = { { from = 'm.lua', to = 'a', kind = 'reg', at = { R } } },
         calls = { { callee = 'x', file = 'm.lua', line = 3 } } })
     ok(r.ok, 'clean')
     eq(2, r.checked.nodes)
+end)
+
+-- CART-2086 (user decision 2026-11-15): a graph DECLARES its position base or is rejected; a graph that predates the
+-- declaration is stamped ONCE, explicitly and reported — never guessed silently.
+test('validate: a graph without a declared position base is REJECTED; stamp_base stamps it once and says so (CART-2086)', function ()
+    local function graph() return { nodes = { node('m.lua', 'module') }, edges = {}, calls = {} } end
+    local g = graph()
+    local r = validate.check(g)
+    ok(not r.ok and r.violations.pos_base, 'no pos_base -> a pos_base violation')
+    local msg = validate.stamp_base(g, 'a test dump')
+    ok(msg and msg:find('STAMPED', 1, true) and msg:find('a test dump', 1, true), 'the stamp is REPORTED, naming the origin: ' .. tostring(msg))
+    eq(true, g.pos_base_stamped.assumed, 'and the graph keeps the record that it was an assumption')
+    ok(validate.check(g).ok, 'a stamped graph validates')
+    eq(nil, validate.stamp_base(g, 'again'), 'ONCE: a graph that declares a base is never re-stamped')
+    local bad = graph(); bad.pos_base = { line = 1, col = 0, unit = 'byte' }
+    ok(validate.check(bad).violations.pos_base, 'a base that is not the storage base is rejected too')
 end)
 
 -- (CART-0717: a producer minted a node field the closed schema never learned, and `valid` stayed RED on self and zig —

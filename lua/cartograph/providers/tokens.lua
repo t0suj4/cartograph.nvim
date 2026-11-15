@@ -380,7 +380,7 @@ end
 
 function M.extract(root, opts)
     local uv = vim.uv or vim.loop
-    local data = { schema = 1, root = root, provider = 'tokens',
+    local data = { schema = 1, root = root, provider = 'tokens', pos_base = require('cartograph.at').BASE,
         capabilities = { calls = 'aggregated' },
         nodes = {}, edges = {}, calls = {}, stamps = {} }
     local nodes, edges, calls = data.nodes, data.edges, data.calls

@@ -24,7 +24,7 @@ local CHART = {
 
 test('helmgraph: every values key a VAR at its line; every template read a USE sited at the read; undefined and relative reads counted', function ()
     ready()
-    local data = { root = tree(CHART), nodes = {}, edges = {} }
+    local data = { root = tree(CHART), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     local s = G.attach(data)
     local keys = {}
     for _, n in ipairs(data.nodes) do if n.hv == 'key' then keys[#keys + 1] = n.name .. '@' .. (n.range.start.line + 1) end end
@@ -53,7 +53,7 @@ end)
 
 test('helmgraph: the cockpit\'s VAR view of a values key lists the templates that read it', function ()
     ready()
-    local data = { root = tree(CHART), nodes = {}, edges = {} }
+    local data = { root = tree(CHART), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     G.attach(data)
     data.schema = 1
     store.ingest(data)

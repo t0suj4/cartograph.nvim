@@ -215,7 +215,7 @@ test('k8s: every OBJECT is its own node (a region of its file) and the soft edge
         '        envFrom:', '        - configMapRef:', '            name: web-config',          -- 17-19
         '---', 'apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: web-config',           -- 20-24
         '---', 'apiVersion: v1', 'kind: Service', 'metadata:', '  name: web', 'spec:', '  selector:', '    app: web' }, '\n') .. '\n' -- 25-32
-    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     K.attach(data)
     local objs = {}
     for _, n in ipairs(data.nodes) do if n.k8 == 'object' then objs[#objs + 1] = { n.id, n.kind, n.range.start.line + 1, n.range['end'].line + 1 } end end
@@ -246,7 +246,7 @@ test('k8s: a REQUEST-PATH TRACE from a workload — env names the peer -> its Se
         '---', 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: api', 'spec:',      -- 29-34
         '  template:', '    metadata:', '      labels:', '        app: api', '    spec:',           -- 35-39
         '      containers:', '      - name: api', '        image: api', '        ports:', '        - containerPort: 8080' }, '\n') .. '\n' -- 40-44
-    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     K.attach(data)
     local ts = assert(K.traces(data, 'all.yaml::Deployment/web'))
     local function hops(t) return vim.tbl_map(function (h) return { h.text, h.line } end, t.hops) end
@@ -274,7 +274,7 @@ test('k8s: the trace is a VERB — k8s_traces addressed by Kind/name or by file 
         '---', 'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', '  name: api', 'spec:',      -- 27-32
         '  template:', '    metadata:', '      labels:', '        app: api', '    spec:',           -- 33-37
         '      containers:', '      - name: api', '        image: api', '        ports:', '        - containerPort: 8080' }, '\n') .. '\n' -- 38-42
-    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     K.attach(data)
     local agent = require 'cartograph.agent'
     local store = { data = data }
@@ -321,7 +321,7 @@ test('k8s: DEBUG and MANAGEMENT LISTENERS a container is started with — JDWP o
         '        - "-Dcom.sun.management.jmxremote.port=9011"',                                          -- 44 (auth on by default)
         '      - name: b', '        image: b', '        args:',                                           -- 45-47
         '        - "-Dcom.sun.management.jmxremote.authenticate=false"' }, '\n') .. '\n'                -- 48 (no port: local attach)
-    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {} }
+    local data = { root = tmproot({ ['all.yaml'] = text }), nodes = {}, edges = {}, pos_base = require('cartograph.at').BASE }
     local s = K.attach(data)
     eq({
         { 'debug-listener', 16, 'Deployment/cdc init container seed starts a JDWP debugger listening on all interfaces (0.0.0.0:8000): remote code execution for anything that reaches the pod' },

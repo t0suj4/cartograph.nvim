@@ -232,6 +232,19 @@ M.CALL_FIELDS = {
 
 local SAMPLES = 5 -- violations kept per rule
 
+--- STAMP A GRAPH THAT PREDATES THE BASE DECLARATION, ONCE (CART-2086). Explicit and REPORTED: returns the sentence the
+--- caller must show (nil when the graph already declares one). `origin` says where the graph came from, so the report
+--- names it. The stamp is an ASSUMPTION — that the producer stored at.BASE, as every cartograph producer does — and
+--- `data.pos_base_stamped` keeps it on the graph so nothing later mistakes it for a declaration.
+function M.stamp_base(data, origin)
+    if type(data) ~= 'table' or type(data.pos_base) == 'table' then return nil end
+    local B = require('cartograph.at').BASE
+    data.pos_base = { line = B.line, col = B.col, unit = B.unit }
+    data.pos_base_stamped = { origin = origin or '?', assumed = true }
+    return ('position base STAMPED on a graph from %s that declared none: assumed {line=%d, col=%d, unit=%s} (cartograph storage); if its producer used another base, its positions are wrong'):format(
+        tostring(origin or '?'), B.line, B.col, B.unit)
+end
+
 --- Validate a neutral-schema data table. Returns a report:
 ---   { ok = bool, checked = {nodes=,edges=,calls=},
 ---     violations = { rule -> { n = count, sites = {msg,...} } } }
@@ -251,6 +264,19 @@ function M.check(data)
             and type(r['end'].line) == 'number'
             and type(r['end'].char) == 'number'
             and r.start.line <= r['end'].line
+    end
+
+    -- ★ THE GRAPH DECLARES ITS POSITION BASE (CART-2086, user decision 2026-11-15): a graph without `pos_base`, or
+    -- with one that is not at.BASE, is REJECTED — its ranges' numbers mean nothing without it. A graph that predates
+    -- the declaration is stamped ONCE, explicitly and reported (M.stamp_base), never guessed silently.
+    do
+        local B, pb = require('cartograph.at').BASE, data.pos_base
+        if type(pb) ~= 'table' then
+            flag('pos_base', 'the graph declares no position base (data.pos_base); stamp it explicitly with validate.stamp_base')
+        elseif pb.line ~= B.line or pb.col ~= B.col or pb.unit ~= B.unit then
+            flag('pos_base', ('the graph declares base {line=%s, col=%s, unit=%s}, storage is {line=%d, col=%d, unit=%s}'):format(
+                tostring(pb.line), tostring(pb.col), tostring(pb.unit), B.line, B.col, B.unit))
+        end
     end
 
     local ids = {}

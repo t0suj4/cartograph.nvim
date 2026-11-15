@@ -26,6 +26,7 @@ verb's section is the question it answers, so two verbs in one section are alter
 |---|---|
 | Find a definition by name (exact, tail `M.foo ~ foo`, substring), each row saying how it matched | MCP `node_find { query }` |
 | Which definitions contain this file:line, innermost first? | MCP `node_at { file, line }` |
+| (in-process) Convert a source position between bases / units (0- vs 1-based line, byte vs character vs UTF-16 column) without guessing | `require('cartograph.pos')`: `pos.new(line, col, profile)` (a profile is REQUIRED: GRAPH = at.BASE {0,0,byte}, NVIM_CURSOR, DIAGNOSTIC, QUICKFIX, AGENT {1,1,char}, FLOW_ROW, HUMAN, `pos.lsp(enc)`), `pos.to(p, profile, line_text?)` — refuses `needs-line-text` / `mid-character` / `out-of-line` / `unknown-base` / `unknown-unit`; `pos.line`, `pos.col`, `pos.of_range`. A graph declares `pos_base` (validate rejects one without; `validate.stamp_base` stamps a legacy graph ONCE and returns the report) (CART-2086) |
 | (in-process) Where is the SOURCE PANE's cursor — node, file line, column, word — without a key press? | `store.source_cursor` / `store.on_source_cursor(fn)` (published on a settled move, deduped; `base = { line = 0, col = 0, unit = 'byte' }`; line nil on a header row) — `require('cartograph.panes.source').cursor_address(win)` computes it on demand (CART-2089) |
 
 ## Who uses it?

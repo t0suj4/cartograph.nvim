@@ -57,6 +57,10 @@ function M.extract(name, opts)
     end
     data.schema = data.schema or 1
     data.provider = data.provider or ('mcp:' .. name)
+    -- a server that does not declare its position base is stamped ONCE, and the stamp is REPORTED (CART-2086): its
+    -- ranges are read as cartograph storage, and a server using another base must declare it
+    local stamped = require('cartograph.validate').stamp_base(data, 'the MCP server ' .. name)
+    if stamped then vim.notify('cartograph: ' .. stamped, vim.log.levels.WARN) end
     -- a URI root keeps the graph off the filesystem's rules (no stale
     -- stat checks, no path normalization) and keys the cache stably
     data.root = data.root or ('mcp://' .. name)

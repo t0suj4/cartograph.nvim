@@ -113,7 +113,7 @@ function M.open(dump_path, opts)
     -- `roots` (self://) rides along so abspath resolves labelled keys even
     -- while the modules are still stubs.
     local function stub_ingest(files, roots, provider)
-        local stub = { schema = 1, root = target, provider = provider or 'treesitter',
+        local stub = { schema = 1, root = target, provider = provider or 'treesitter', pos_base = require('cartograph.at').BASE,
             roots = roots, partial = { done = 0, total = #files },
             nodes = {}, edges = {}, calls = {}, stamps = {} }
         for _, f in ipairs(files) do

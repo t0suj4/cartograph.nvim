@@ -19,6 +19,9 @@ function M.load(path)
     local txt = f:read('a')
     f:close()
     local data = vim.json.decode(txt)
+    -- a dump written before graphs declared their position base is stamped ONCE, and SAYS so (CART-2086)
+    local stamped = require('cartograph.validate').stamp_base(data, 'the dump ' .. path)
+    if stamped then vim.notify('cartograph: ' .. stamped, vim.log.levels.WARN) end
     -- a dump carries no file stamps; record disk state AT LOAD. Drift
     -- between dump generation and now is undetectable (the photograph's
     -- honest limitation); drift after load is caught by stale().

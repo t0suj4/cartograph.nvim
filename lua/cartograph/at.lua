@@ -21,6 +21,12 @@
 
 local M = {}
 
+-- ★ THE ONE DECLARED STORAGE BASE (CART-2086, the user-approved design): every stored range is a 0-based LINE and a
+-- 0-based BYTE column (tree-sitter's node:range(), kept as is). Declared ONCE here instead of a tag per value (the fold
+-- packs ranges into u32 columns, 16 B a range); a graph carries it as `data.pos_base`, validate.lua rejects a graph
+-- without it, and a position LEAVING storage is converted through cartograph.pos's named profiles.
+M.BASE = { line = 0, col = 0, unit = 'byte' }
+
 -- LE-u32 pack/read shared with the other folded stores (the bytecol primitive):
 -- fixed width for RANDOM access — varint would need offsets; coordinates are read
 -- by index, not scanned. 1-based, matching the interner's 1-based range indices.

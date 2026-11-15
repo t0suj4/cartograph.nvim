@@ -537,7 +537,7 @@ function M.extract(root, o)
     -- measured worker turnaround.
     local ordered = M.order(files, attention(root, abs))
 
-    local acc = { schema = 1, root = root, provider = o.provider or 'treesitter',
+    local acc = { schema = 1, root = root, provider = o.provider or 'treesitter', pos_base = require('cartograph.at').BASE,
         roots = o.roots, packs = o.packs, -- so the parent's relink applies them
         -- the profile OVERRIDE rides to every worker exactly like packs (CART-0217):
         -- one explicit value decided in the parent, so no worker re-derives it and
