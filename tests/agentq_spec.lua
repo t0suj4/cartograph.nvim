@@ -533,3 +533,37 @@ test('why: no col answers EVERY call on the line in column order, the def beside
     ok(has(agent.answer(store, 'cone', { node = fid }), 'defaulted-direction'), 'an omitted direction is named')
     ok(not has(agent.answer(store, 'cone', { node = fid, direction = 'out' }), 'defaulted-direction'), 'a given one is not')
 end)
+
+-- CART-1008: the mention index skips a 1-2 character name (its documented rule) and a MEMBER / PROPERTY key
+-- (`jQuery.getJSON = function`), so a defined name could come back as a confident "0 files mention this". A name is
+-- written where it is defined: a definition whose file the index does not list means the INDEX skipped it.
+test('mentions: a DEFINED name the index skipped is a frontier naming the definition, never "absent" (CART-1008)', function ()
+    if not (parser_available('lua') and parser_available('javascript')) then skip 'no lua/javascript parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    -- (an OBJECT-LITERAL key is the shape still skipped; `jQuery.getJSON = function` is indexed since the ticket was filed)
+    w('a.js', 'var hooks = { getScript: function (u) { return u; }, setProp: function (v) { return v; } };\n')
+    w('c.js', 'var setProp = 1;\nconsole.log(setProp);\n')
+    w('m.lua', 'local M = {}\nfunction M.ab() return 1 end\nfunction M.solo() return 2 end\nreturn M\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    vim.fn.delete(root, 'rf')
+    local agent = require 'cartograph.agent'
+    -- a member-defined name no other file writes: the index skipped it
+    local g = agent.answer(store, 'mentions', { name = 'getScript' })
+    eq('frontier', g.absence, vim.inspect(g.absence_why))
+    eq('name-not-indexed', g.absence_why.premise)
+    eq('getScript', g.absence_why.evidence.defs[1].name)
+    ok(g.absence_why.why:find('member / property key', 1, true), g.absence_why.why)
+    -- a 2-character name: the documented length rule, said as such
+    local s = agent.answer(store, 'mentions', { name = 'ab' })
+    eq('frontier', s.absence); ok(s.absence_why.why:find('3+ characters', 1, true), s.absence_why.why)
+    -- indexed elsewhere, skipped in its defining file: the list stands, a note says it is not every writer
+    local t = agent.answer(store, 'mentions', { name = 'setProp' })
+    eq(1, #t.result); eq('c.js', t.result[1].file)
+    local note
+    for _, n in ipairs(t.notes or {}) do if n.kind == 'defining-file-not-indexed' then note = n end end
+    ok(note and note.evidence.defs[1].file == 'a.js', 'the skipped defining file is named: ' .. vim.inspect(t.notes))
+    -- a name defined nowhere and mentioned nowhere is still absent
+    eq('absent', agent.answer(store, 'mentions', { name = 'nowhere_at_all' }).absence)
+end)

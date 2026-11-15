@@ -1835,7 +1835,44 @@ local function v_mentions(store, args)
             why = ('%d of %d mentioning file(s) hold a call by this name that RESOLVED to a definition; the residual mentions the name and resolves to nothing by it — that residual is the honest shape of name-level evidence'):format(nres, #rows),
             evidence = { resolved_files = nres, mentioning_files = #rows } }
     end
-    if #rows > 0 then return { result = rows, notes = notes } end
+    -- ★ A NAME THE INDEX WAS BUILT FOR AND SKIPPED (CART-1008). A name a file DEFINES is written in that file, so it must
+    -- be in at least that file's index entry; when it is not, "0 files mention this" is a statement about the INDEX,
+    -- not the code. Two causes, measured: the documented >=3-character rule (`w`, `go`, `cb` — 92% of our own gap), and
+    -- a MEMBER / PROPERTY definition (`jQuery.getJSON = function`, `{ get = … }`, `M.handlers['x/y']`), whose key the
+    -- identifier pass does not record — 26.5% of jquery's nameable defs. CART-1007's residual gate passed TRIVIALLY on
+    -- such a name. A definition is matched by its TAIL (`jQuery.getJSON` for `getJSON`); a confined question is left
+    -- alone, since the defining file may sit outside the scope.
+    local skipped, nskipped = {}, 0
+    if not ev.confined and args.name and args.name ~= '' then
+        local inset, x = {}, args.name
+        for _, r in ipairs(rows) do inset[r.file] = true end
+        for _, n in ipairs(store.data and store.data.nodes or {}) do
+            local nm = n.name
+            if nm and n.file and not inset[n.file] and n.kind ~= 'module' and n.kind ~= 'region' and n.kind ~= 'external'
+                and not nm:find('#cb$') and not nm:find('#ret$')
+                and (nm == x or (#nm > #x and nm:sub(-#x) == x and nm:sub(-#x - 1, -#x - 1):match('[%.:#>]'))) then
+                nskipped = nskipped + 1
+                if #skipped < 8 then skipped[#skipped + 1] = { id = n.id, name = nm, file = n.file } end
+            end
+        end
+    end
+    local skip_why = #(args.name or '') < 3
+        and 'the mention index records identifiers of 3+ characters only (its documented rule)'
+        or 'the mention index records identifier occurrences, and this name is defined as a member / property key (`T.name = function`, `{ name = … }`) or a bracket string, which it does not record'
+    if #rows > 0 then
+        if nskipped > 0 then
+            notes[#notes + 1] = { kind = 'defining-file-not-indexed', premise = 'index-coverage',
+                why = ('%d definition(s) of this name sit in files the index does NOT list for it — %s — so the list above is not every file that writes the name'):format(nskipped, skip_why),
+                evidence = { defs = skipped, n = nskipped } }
+        end
+        return { result = rows, notes = notes }
+    end
+    if nskipped > 0 then
+        return { result = {}, absence = 'frontier', absence_why = {
+            premise = 'name-not-indexed',
+            why = ('no indexed file lists this name, yet %d definition(s) of it exist — a name is written where it is defined, so this says the INDEX skipped it: %s. Not "no file mentions it"'):format(nskipped, skip_why),
+            evidence = { defs = skipped, n = nskipped, indexed_files = ev.indexed } }, notes = notes }
+    end
     local g = M.graph(store)
     if g.frontier.unparsed_files > 0 then
         -- ★ CLOSE THE FRONTIER BY BYTES (F19, CART-1386). An unparsed file (a vendored *.min.js) is outside the index but

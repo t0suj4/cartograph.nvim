@@ -32,7 +32,7 @@ verb's section is the question it answers, so two verbs in one section are alter
 | Question | Instrument |
 |---|---|
 | Who calls this, each row with its resolution tier and the resolvers that landed it (`prov`)? | MCP `edges_callers { node | ref | file+line }` |
-| Which FILES mention this identifier — the name-level question that still answers when resolution refused? | MCP `mentions { name, from? }` (refuses `no-mention-index` on a graph without one) |
+| Which FILES mention this identifier — the name-level question that still answers when resolution refused? | MCP `mentions { name, from? }` (refuses `no-mention-index` on a graph without one). The index skips names under 3 characters and OBJECT-LITERAL keys (`{ getScript: function … }`): a name the graph DEFINES that its own file's index entry lacks answers `frontier` / `name-not-indexed` naming the definitions, never `absent`; a non-empty list missing a defining file carries a `defining-file-not-indexed` note (CART-1008) |
 
 ## What does it use?
 
