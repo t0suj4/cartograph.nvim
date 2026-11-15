@@ -164,6 +164,26 @@ test('coverage: the door opens onto the constructs, named by grammar node type',
     ok(marked > 0, 'each row carries its own source range, not just a line')
 end)
 
+-- CART-2087: line_site.line is 0-BASED (gf, descend and region_at add 1); the unread altitude stored the 1-based line it
+-- prints, so gf opened one line below the construct. Every row's line must be the start of its own range.
+test('coverage: an unread row\'s line_site.line is the 0-based start of its range — gf lands ON the construct (CART-2087)',
+    function ()
+    local id = project()
+    local rows = render('unread', id)
+    local want = {}
+    for _, u in ipairs(xl.lint(store, id).unread or {}) do want[u.line] = true end
+    local checked = 0
+    for i = 2, #rows do
+        local s = symbols.line_site[i]
+        if s and s.range then
+            eq(atr.sl(s.range), s.line, 'row ' .. i .. ': line is the range start (0-based)')
+            ok(want[s.line + 1], ('row %d: gf opens line %d, an unread construct\'s own line'):format(i, s.line + 1))
+            checked = checked + 1
+        end
+    end
+    ok(checked > 0, 'the fixture has unread rows carrying a range')
+end)
+
 test('coverage: every unread entry has both halves — the type and the range',
     function ()
     local id = project()

@@ -2487,9 +2487,12 @@ local function render_unread(ctx, fn_id)
         ctx.line_stmt[#ctx.lines] = u.line
         -- the node's own byte-range, so the source pane marks the CONSTRUCT and not
         -- merely its line: every expr node carries .at by construction
+        -- (line_site.line is 0-BASED on every altitude — gf, descend and region_at all add 1 — and u.line is the
+        -- 1-based line this row PRINTS: it was stored here as-is, so gf / descend opened ONE LINE BELOW the construct.
+        -- STOPGAP, CART-2087: the start of the construct's own range; the typed offset (CART-2086) is the real fix)
         if u.at then
             ctx.line_site[#ctx.lines] = { fn = fn_id, file = node.file,
-                line = u.line, range = u.at }
+                line = atr.sl(u.at), range = u.at }
         end
     end
     if #set == 0 then
