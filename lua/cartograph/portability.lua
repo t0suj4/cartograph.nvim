@@ -65,6 +65,7 @@ local M = {}
 -- (forward: callers above its definition reach it — CART-1418 found it a GLOBAL function, shadowed further down by
 -- a stray nil `local ext_lang`)
 local ext_lang
+local file_lang -- (CART-0818; defined beside ext_lang below)
 
 --- Does `prof` provide `name`? Returns the EVIDENCE (which part of the profile
 --- answered) or nil. Several sources because profile artifacts differ: a
@@ -375,8 +376,7 @@ function M.stage_map(store, prof)
     local files = {}
     for _, n in ipairs(data.nodes or {}) do
         if n.file then
-            local ext = n.file:match('%.([%w]+)$')
-            local lang = ext and ext_lang()[ext:lower()]
+            local lang = file_lang(n.file)
             if lang and (not prof.lang or lang == prof.lang) then files[n.file] = true end
         end
     end
@@ -1450,8 +1450,7 @@ function M.unknown_reason(prof, name, where, rctx)
     if prof.lang then
         local known, mine = false, false
         for _, f in ipairs(files) do
-            local ext = type(f) == 'string' and f:match('%.([%w]+)$')
-            local lang = ext and ext_lang()[ext:lower()]
+            local lang = type(f) == 'string' and file_lang(f)
             if lang then
                 known = true
                 if lang == prof.lang then mine = true end
@@ -1555,6 +1554,18 @@ end
 
 -- ext -> language, from the specs themselves (memoised: the spec table does not
 -- change within a process)
+-- a file's language AS THE RESOLVER READS IT (CART-0818): the provider's elang_for, which folds typescript / tsx into
+-- javascript — the language a profile's `lang` names. The extraction registry below says `typescript` for a `.ts`, so
+-- a javascript profile's stage partition dropped every TypeScript file and unknown_reason bucketed their names as
+-- `other-language`. The registry stays as the fallback when the provider cannot load.
+function file_lang(f)
+    local ok, ts = pcall(require, 'cartograph.providers.treesitter')
+    if ok and ts.elang_for then return ts.elang_for(f) end
+    local ext = f:match('%.([%w]+)$')
+    return ext and ext_lang()[ext:lower()]
+end
+M._file_lang = file_lang
+
 local _ext_lang
 function ext_lang()
     if _ext_lang then return _ext_lang end

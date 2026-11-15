@@ -872,6 +872,25 @@ test('portability: a file NO entry reaches has no stage, and the report says so'
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0818: the audit asked "is this file the profile's language?" from the EXTRACTION registry, where `.ts` is
+-- `typescript` and `.tsx` is `tsx`; the resolver folds both into javascript, the language a node profile names. So a
+-- javascript profile's stage partition dropped every TypeScript file (ghost: 73 `.test.ts` entry files invisible) and
+-- unknown_reason bucketed their names as another language's. Both now read the resolver's own answer.
+test('portability: a .ts / .tsx file IS a javascript profile\'s — the stage partition and unknown_reason see it (CART-0818)', function ()
+    local port = require 'cartograph.portability'
+    local prof = { lang = 'javascript', stages = { { name = 'test', entry = { '%.test%.ts$' } } } }
+    local st = { data = { nodes = {
+        { id = 'a', file = 'test/a.test.ts' }, { id = 'h', file = 'test/helper.tsx' },
+        { id = 'j', file = 'src/x.js' }, { id = 'p', file = 'tool.py' },
+    }, edges = { { kind = 'import', from = 'test/a.test.ts', to = 'test/helper.tsx' } } } }
+    local sm = port.stage_map(st, prof)
+    eq('test', sm.entries['test/a.test.ts'], 'a .test.ts spec file is an ENTRY')
+    ok(sm.by_file['test/helper.tsx'] and sm.by_file['test/helper.tsx'].test, 'and the .tsx it imports is placed')
+    eq({ 'src/x.js' }, sm.orphans, 'the .js file is in the partition (an orphan), the .py file is not in it at all')
+    eq('unclaimed-bare', port.unknown_reason(prof, 'it', 'test/a.test.ts'), 'a .ts name is this profile\'s business')
+    eq('other-language', port.unknown_reason(prof, 'open', 'tool.py'), 'a .py name still is not')
+end)
+
 test('portability: a profile with NO stages behaves exactly as before', function ()
     local pm = require 'cartograph.spec.profile'
     -- every other shipped profile: no partition declared, so no map, no new bucket,

@@ -2176,6 +2176,11 @@ local function elang_for(file)
     FILE_ELANG[file] = { lang or false, spec or false }
     return lang, spec
 end
+--- a file's RESOLUTION language — typescript / tsx folded into javascript, a `.h` as the tree decided, a disclaimed
+--- template none. ★ EXPORTED SO NO SECOND COPY GROWS (CART-0818): it was local, so portability answered "is this file
+--- the profile's language?" from the EXTRACTION registry, where `.ts` is `typescript`, and dropped every TypeScript
+--- file from a javascript profile's stage partition (ghost: 73 `.test.ts` entry files invisible).
+function M.elang_for(file) return (elang_for(file)) end
 -- ★ THE NAME JOIN, PARTITIONED BY LANGUAGE (profile of resolve_setup on hive's metastore, CART-1056). `admits` rejects
 -- a candidate from another language unconditionally, so filtering the list first is the same answer, but it was paid
 -- per call and per candidate: a thrift C++ `read` walked ~5,750 `read` defs, most of them Java and PHP, to keep its
