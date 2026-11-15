@@ -1619,9 +1619,10 @@ M.REASON_TEXT = {
     ['absent'] = 'ABSENT FROM THE TARGET — the documented class for this global is'
         .. ' FULLY enumerated (methods and attributes) and does not hold the name.'
         .. ' This is the group that is real porting work.',
-    ['other-language'] = 'ANOTHER LANGUAGE — seen in files this profile does not'
-        .. ' describe, so it is not the profile\'s business. Scoring them here was'
-        .. ' noise: exclude those files, or score them against their own runtime.',
+    ['other-language'] = 'ANOTHER LANGUAGE — seen ONLY in files this profile does not'
+        .. ' describe, so it is not the profile\'s business: NOT SCORED, and in no count'
+        .. ' above (CART-0211). Listed so nothing is dropped silently; score them against'
+        .. ' their own runtime.',
     ['receiver-typed'] = 'RECEIVER-TYPED, UNADJUDICATED — the artifact models'
         .. ' global-rooted calls only, so these have no representation in it at all,'
         .. ' and no class table for THIS environment version was available to match'
@@ -1831,7 +1832,7 @@ function M.audit(store, runtime, opts)
     local req = M.requires(store)
     local res = { runtime = runtime, lang = prof.lang, version = prof.version,
         size = M.profile_size(prof), provided = 0, unknown = 0, entries = {},
-        out_of_region = {} }
+        out_of_region = {}, other_language = 0, other_language_calls = 0 }
     -- THE STAGE PARTITION (CART-0216), only when the profile declares one. Its
     -- population is the CALL SITES, not this requirement set: a name the profile
     -- provides never reaches requires() (it mints or is refused), so the axis has to
@@ -1923,7 +1924,15 @@ function M.audit(store, runtime, opts)
                 if s.name == name then entry.region = 'out-of-region'; break end
             end
         end
-        if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
+        -- ★ A NAME SEEN ONLY IN ANOTHER LANGUAGE'S FILES IS NOT SCORED (CART-0211). A mixed repo is the normal case
+        -- (grocy and sylius are php with js; Von-Neumann's lua tree holds a zipper.py), and counting those names as
+        -- "cannot adjudicate" inflated the unknown count (8 of 59 there) and deflated every coverage %. The entry
+        -- stays, under its reason, so nothing is dropped silently; the counts are provided + unknown + other_language
+        if w then res.provided = res.provided + 1
+        elseif why == 'other-language' then
+            res.other_language = res.other_language + 1
+            res.other_language_calls = res.other_language_calls + n
+        else res.unknown = res.unknown + 1 end
     end
     table.sort(res.entries, function (a, b)
         if a.provided ~= b.provided then return not a.provided end -- unknown first
@@ -3737,6 +3746,10 @@ function M.report(store, runtime, opts)
         L[#L + 1] = ('portability — %s%s: %d of %d external name(s) provided')
             :format(res.runtime, res.version and (' ' .. tostring(res.version)) or '',
                 res.provided, res.provided + res.unknown)
+    end
+    if (res.other_language or 0) > 0 then
+        L[#L + 1] = ('  (%d name(s), %d call(s) seen only in files of another language are NOT scored — not in the'
+            .. ' count above)'):format(res.other_language, res.other_language_calls)
     end
     L[#L + 1] = ('  the profile claims %d symbols; a verdict is only as good as that')
         :format(res.size)

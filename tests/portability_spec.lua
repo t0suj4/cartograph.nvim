@@ -248,8 +248,8 @@ test('portability: audit and requires agree, because it is ONE set', function ()
         '    Wombat.frob(1)', '  end', 'end' }
     local req = port.requires(store)
     local res = port.audit(store, 'ruby-rails')
-    eq(req.total, res.provided + res.unknown,
-        'the audit scores exactly the requirement set — no third walk to drift')
+    eq(req.total, res.provided + res.unknown + res.other_language,
+        'the audit scores exactly the requirement set — no third walk to drift (another language\'s names counted apart, CART-0211)')
     vim.fn.delete(root, 'rf')
 end)
 
@@ -1116,6 +1116,41 @@ test('portability: the report groups by reason and claims no porting work',
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0211: a name seen ONLY in a file of another language (Von-Neumann's lua tree holds a zipper.py) is not the
+-- profile's business, and counting it as "cannot adjudicate" inflated the unknown count and deflated the coverage %.
+-- It is counted apart and disclosed; a name ALSO seen in our own language stays ours.
+test('portability: another language\'s names are NOT SCORED — counted apart, disclosed, still listed (CART-0211)', function ()
+    if not (parser_available('lua') and parser_available('python')) then
+        skip 'no lua/python parser'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0"}')
+    w('control.lua', 'return { go = function ()\n  thing.one(); bare_three()\nend }\n')
+    w('zipper.py', 'import json\ndef load(p):\n    return json.load(open(p))\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.audit(store, 'lua-factorio'))
+    local foreign, mine = {}, {}
+    for _, e in ipairs(res.entries) do
+        if e.reason == 'other-language' then foreign[e.name] = true elseif not e.provided then mine[e.name] = true end
+    end
+    ok(foreign['open'], 'the python name is listed under its reason: ' .. vim.inspect(foreign))
+    ok(mine['thing.one'], 'the lua name is still scored')
+    local nf = 0; for _ in pairs(foreign) do nf = nf + 1 end
+    eq(nf, res.other_language, 'counted apart')
+    local nm = 0; for _ in pairs(mine) do nm = nm + 1 end
+    eq(nm, res.unknown, 'and not in the unknown count')
+    local text = table.concat(port.report(store, 'lua-factorio'), '\n')
+    ok(text:find(('%d name%%(s%%), %d call%%(s%%) seen only in files of another language are NOT scored')
+        :format(res.other_language, res.other_language_calls)), 'the header discloses the exclusion: ' .. text:sub(1, 600))
+    vim.fn.delete(root, 'rf')
+end)
+
 -- every unknown gets exactly one reason, so the groups partition the list rather
 -- than sampling it — otherwise a reader cannot trust the counts
 test('portability: the reason groups PARTITION the unknown names', function ()
@@ -1137,7 +1172,7 @@ test('portability: the reason groups PARTITION the unknown names', function ()
     for _, e in ipairs(res.entries) do
         if not e.provided then
             ok(e.reason ~= nil, 'every unknown carries a reason: ' .. e.name)
-            counted = counted + 1
+            if e.reason ~= 'other-language' then counted = counted + 1 end
         end
     end
     eq(res.unknown, counted)
