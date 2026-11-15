@@ -150,7 +150,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 | Question | Instrument |
 |---|---|
 | Which entry point owns each node; commons, core and the borders between them | MCP `territory` |
-| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117; `dead-function` skips a function whose VALUE is read (`escapes`: returned, passed, stored) since CART-1655 |
+| Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); a corpus-closed finding over a root that sits INSIDE a larger repository (a `.git` above it; HOME's own excluded) carries `boundary` = that project, and `lint_run` adds an `index-root-is-partial` note — a caller outside the root is indistinguishable from none (CART-0678); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117; `dead-function` skips a function whose VALUE is read (`escapes`: returned, passed, stored) since CART-1655 |
 | Which records does an erlang tree declare and never use; which fields are never named? | `tools/erlrecordcensus.lua --unused` |
 
 ## Across the wire: the XMPP triple (ejabberd × payload spec × converse.js)

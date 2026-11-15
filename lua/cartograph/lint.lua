@@ -2433,6 +2433,28 @@ for _, r in ipairs(M.rules) do
     if r.walk and not r.run then r.run = function (store) return walk_rules(store, { r })[r] end end
 end
 
+--- ★ THE INDEX ROOT IS A PREMISE OF EVERY ABSENCE VERDICT (CART-0678). A rule closed over the CORPUS (dead-function:
+--- "nothing in the graph calls this") is only as wide as the root: indexing one Maven module of an 8k-file repo alone
+--- gave 1,958 dead-function findings where the whole-repo index gave 741 for the same files, and nothing in the output
+--- told the 62% of graph-boundary artifacts from the rest. The boundary is DETECTABLE: a root that is not itself a
+--- repository's top but sits inside one (a `.git` at an ancestor) has callers the index never read. Returns nil when
+--- the root IS a repository top, is in none, or the only enclosing repository is the HOME directory's own (a dotfiles
+--- repo is not the project).
+function M.root_boundary(root)
+    if type(root) ~= 'string' or root == '' then return nil end
+    root = (vim.fn.fnamemodify(root, ':p'):gsub('/+$', ''))
+    if vim.uv.fs_stat(root .. '/.git') then return nil end
+    local home = (vim.fn.fnamemodify(vim.env.HOME or '', ':p'):gsub('/+$', ''))
+    local dir = vim.fs.dirname(root)
+    while dir and dir ~= '' and dir ~= '/' and dir ~= home do
+        if vim.uv.fs_stat(dir .. '/.git') then return { root = root, project = dir, how = 'git' } end
+        local up = vim.fs.dirname(dir)
+        if up == dir then break end
+        dir = up
+    end
+    return nil
+end
+
 --- Run all (enabled) rules over the store. Returns a flat findings list.
 ---@param store table
 ---@param opts { only:table? }?  optional set of rule names to include
@@ -2456,6 +2478,8 @@ function M.run(store, opts)
         end
     end
     local walked = #walking > 0 and walk_rules(store, walking) or {}
+    -- (a corpus-closed absence over a root inside a larger project carries that boundary, CART-0678)
+    local boundary = M.root_boundary(store.data and store.data.root)
     for _, rule in ipairs(M.rules) do
         if not only or only[rule.name] then
             if sc and not M.policies(rule, sc.grain).clip then
@@ -2482,6 +2506,9 @@ function M.run(store, opts)
                         -- nothing can tell apart, which is the provenance hole
                         -- that keeps derived reads from being minted as edges.
                         if sc then f.scope = sc.label end
+                        if boundary and rule.closed_over == 'corpus' and rule.quantifier == 'promise' then
+                            f.boundary = boundary
+                        end
                         findings[#findings + 1] = f
                     end
                 end

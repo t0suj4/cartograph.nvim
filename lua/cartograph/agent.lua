@@ -1314,6 +1314,7 @@ local function v_lint_run(store, args)
     end
     local findings, declined = lint.run(store, only and { only = only } or nil)
     local rows = {}
+    local bounded, bproj = 0, nil -- (findings over a partial index root, CART-0678)
     for _, f in ipairs(findings) do
         local rel = f.file
         if rel and store.data and store.data.root and rel:sub(1, #store.data.root + 1) == store.data.root .. '/' then
@@ -1338,10 +1339,19 @@ local function v_lint_run(store, args)
                 -- WHAT THE FINDING IS WORTH, from the rule's own declaration:
                 -- an `authoritative` witness is a bug; a `suggestive` one is a
                 -- lead. Acting on them alike is the misread this field prevents.
-                disposition = nn(r.disposition), quantifier = nn(r.quantifier) }
+                disposition = nn(r.disposition), quantifier = nn(r.quantifier),
+                -- (the root this absence was asserted over sits inside a larger project, CART-0678)
+                boundary = f.boundary and f.boundary.project or nil }
+            if f.boundary then bounded = bounded + 1; bproj = f.boundary end
         end
     end
     local notes = {}
+    if bounded > 0 then
+        notes[#notes + 1] = { kind = 'index-root-is-partial', premise = 'index-root',
+            why = ('%d finding(s) assert an ABSENCE over the whole graph (closed over the corpus), and the graph root %s sits inside the larger project %s — a caller outside the root is indistinguishable from no caller, so these are frontier-bounded: index %s to close them'):format(
+                bounded, bproj.root, bproj.project, bproj.project),
+            evidence = { root = bproj.root, project = bproj.project, how = bproj.how, findings = bounded } }
+    end
     for _, d in ipairs(declined or {}) do
         notes[#notes + 1] = { kind = 'rule-refused', premise = d.rule, why = d.why,
             evidence = { quantifier = nn(d.quantifier), closed_over = nn(d.closed_over) } }

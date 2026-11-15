@@ -802,3 +802,40 @@ test('lint redefined-function: a chunk-level field function overwritten unread i
     eq({ '18 M.meth', '2 M.unparen' }, got)
     ok(f[1].message:find('defined AGAIN at line', 1, true), f[1].message)
 end)
+
+-- CART-0678: a corpus-closed absence ("nothing calls this") is only as wide as the index ROOT. One Maven module
+-- indexed alone gave 1,958 dead-function findings where the whole repo gave 741, with nothing to tell the boundary
+-- artifacts apart. A root inside a larger project (a `.git` at an ancestor) now rides every such finding, and the
+-- agent says so; a root that IS the repository top, or a file-closed rule, carries nothing.
+test('lint: a corpus-closed finding over a root INSIDE a larger project carries the boundary; a repo-top root does not (CART-0678)', function ()
+    local top = vim.fn.tempname()
+    vim.fn.mkdir(top .. '/.git', 'p')
+    vim.fn.mkdir(top .. '/mod/sub', 'p')
+    local function dead_at(root)
+        store.ingest({ schema = 1, root = root, nodes = { mod('m.lua'), fn('m.lua', 'orphan'), fn('m.lua', 'M.run') }, edges = {}, calls = {} })
+        return lint.run(store, only('dead-function'))
+    end
+    local inner = dead_at(top .. '/mod/sub')
+    ok(#inner >= 1, 'orphan is flagged either way')
+    eq(top, inner[1].boundary and inner[1].boundary.project, 'the enclosing repository is named')
+    eq('git', inner[1].boundary.how)
+    local at_top = dead_at(top)
+    ok(#at_top >= 1 and at_top[1].boundary == nil, 'a root that IS the repository top carries no boundary')
+    -- the agent surface says it once, as a note naming root and project
+    dead_at(top .. '/mod/sub')
+    local a = require('cartograph.agent').answer(store, 'lint_run', { rules = { 'dead-function' } })
+    local note
+    for _, n in ipairs(a.notes or {}) do if n.kind == 'index-root-is-partial' then note = n end end
+    ok(note and note.evidence.project == top, 'lint_run notes the partial root: ' .. vim.inspect(a.notes))
+    eq(top, a.result[1].boundary)
+    -- a NESTED repository's top is a top, though an outer repository encloses it
+    vim.fn.mkdir(top .. '/nested/.git', 'p')
+    eq(nil, lint.root_boundary(top .. '/nested'))
+    -- HOME's own repository (dotfiles) is not the project
+    local home = vim.env.HOME
+    vim.env.HOME = top
+    local hb = lint.root_boundary(top .. '/mod/sub')
+    vim.env.HOME = home
+    eq(nil, hb, 'a repository at HOME is not the enclosing project')
+    vim.fn.delete(top, 'rf')
+end)
