@@ -1206,6 +1206,23 @@ test('moveapply (CART-0923): a callee only an INFERRED name-guess reaches is no 
     end
 end)
 
+test('moveapply (CART-0923): a CALLER only an inferred name-guess links is owed no import of the destination', function ()
+    if not ready() then skip('no lua parser') end
+    -- the ticket's shape on the other side: `obj.materialize(obj)` in other.lua reaches the moved M.materialize by its
+    -- unique NAME alone (an INFERRED edge; the `obj:m()` form is refused today); real.lua requires m and calls it — that file is owed the import, other.lua is not
+    local st = ingest_files {
+        ['m.lua'] = 'local M = {}\nfunction M.materialize(x) return x end\nreturn M\n',
+        ['other.lua'] = 'local function f(obj) return obj.materialize(obj) end\nreturn f\n',
+        ['real.lua'] = "local m = require 'm'\nlocal function g() return m.materialize(1) end\nreturn g\n",
+    }
+    local mat = node_by(st, 'M.materialize')
+    local imp = require('cartograph.impact').compute(st, { mat.id }, 'lit.lua')
+    local add = {}
+    for _, f in ipairs(imp.requires_add) do add[f] = true end
+    ok(add['real.lua'], 'the file that requires m and calls it is owed the import: ' .. vim.inspect(imp.requires_add))
+    ok(not add['other.lua'], 'a method call linked by name alone is not: ' .. vim.inspect(imp.requires_add))
+end)
+
 test('moveapply (CART-1146): a language that cannot write the rebind REFUSES by name — never the broken move', function ()
     if not parser_available('python') then skip('no python parser') end
     local st = ingest_files { ['a.py'] = 'def helper(x):\n    return x + 1\n\n\ndef user():\n    return helper(2)\n' }

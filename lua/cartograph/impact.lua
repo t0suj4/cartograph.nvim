@@ -75,11 +75,25 @@ function M.compute(store, moveset, dest)
         rewrite_files[file] = true
     end
 
-    -- requires to add: each rewrite-site file must be able to reach `dest`
+    local tier = require 'cartograph.tier'
+    -- requires to add: each rewrite-site file must be able to reach `dest`.
+    -- ★ ONLY A FILE AN EDGE ABOVE `inferred` LINKS (CART-0923, the caller side of the rule below). The ticket's eight
+    -- "X should import algebra/materialize.lua" lines were callers the unique-NAME guess linked to the moved
+    -- M.materialize — `obj.materialize(obj)` in a file that never touches the algebra. The file stays in `rewrites`
+    -- (its sites are disclosed); it is only not ADVISED an import a name match alone cannot justify.
+    local trusted_caller = {} -- file -> an edge above inferred reaches a moved symbol from it
+    if dest then
+        for _, e in ipairs(store.data.edges or {}) do
+            if e.kind == 'ref' and in_move[e.to] and not in_move[e.from] and tier.of(e) ~= 'inferred' then
+                local cn = store.node(e.from)
+                if cn and cn.file then trusted_caller[cn.file] = true end
+            end
+        end
+    end
     local add = {}
     if dest then
         for file in pairs(rewrite_files) do
-            if not imports_already(band, file, dest) then add[file] = true end
+            if trusted_caller[file] and not imports_already(band, file, dest) then add[file] = true end
         end
     end
 
@@ -88,7 +102,6 @@ function M.compute(store, moveset, dest)
     -- method calls it fabricates: moving xmppspec.term produced five "erllit should import X" lines — `text:gsub` as
     -- hazard.gsub, `node:field()` as xmppspec's own M.field (a CYCLE), `table.concat` as a test file's local —
     -- every one advice to add an import the moved code does not need.
-    local tier = require 'cartograph.tier'
     local trusted = {} -- moved id -> dep -> an edge above inferred reaches it
     if dest then
         for _, e in ipairs(store.data.edges or {}) do
