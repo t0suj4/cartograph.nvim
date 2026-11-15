@@ -3116,6 +3116,20 @@ end
 -- quiet. Fired from render() (altitude/list changed) and the cursor handler
 -- (selection changed). See [[cartograph-over-the-wire]] "the view is observable".
 M._view_subs = {}
+--- THE PUBLISHED LIST CURSOR (CART-2097): { row, level, node } once the cursor settles, however it moved — typed, a
+--- synthetic arrival, or a key forwarded into this pane from another window. Its dependents (hover preview, source
+--- follow, highlight, emit_view) run on it; M.on_cursor(fn) adds one and returns its unsubscribe.
+M.cursor = nil
+M._cursor_subs = {}
+M.CURSOR_SETTLE_MS = 60 -- (the settle window; a spec may lower it)
+function M.on_cursor(fn)
+    table.insert(M._cursor_subs, fn)
+    return function ()
+        for i, f in ipairs(M._cursor_subs) do
+            if f == fn then table.remove(M._cursor_subs, i); return end
+        end
+    end
+end
 M._last_viewkey = nil
 
 --- Subscribe to view changes. fn receives { labels, selected, level }.
@@ -3387,158 +3401,174 @@ function M.attach(win)
     local sync_focus_to_view
     local return_into_block -- undo a pending block step-out (h / the opposite key)
 
-    -- debounced: focus (or statement highlight) follows where the cursor SETTLES
+    -- ★ THE LIST CURSOR IS PUBLISHED, AND ITS DEPENDENTS FOLLOW THE PUBLICATION (CART-2097). The hover preview, the
+    -- source pane's follow, the highlight and emit_view all ran inside a CursorMoved handler, and nvim fires CursorMoved
+    -- only for the CURRENT window — so input forwarded into this pane from another window (nvim_win_call + `normal j`,
+    -- the 2D plane's mechanism) moved the cursor and left every dependent stale: 14 of 23 steps of W3's gate S0.
+    -- Now one debounced notification carries the settled position (M.cursor, M.on_cursor) and `settle` is its first
+    -- dependent. CursorMoved on this buffer publishes (typed motion, and the synthetic arrivals show / lens / landing
+    -- fire, exactly as before); a move nvim never delivers is published by the mover itself (step, below).
     local gen = 0
+    local settle -- the dependents' body, defined right below
+    local function publish_cursor()
+        if not vim.api.nvim_win_is_valid(win) then return end
+        gen = gen + 1
+        local g = gen
+        vim.defer_fn(function ()
+            if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
+            local r = row()
+            M.cursor = { row = r, level = M.view.level, node = M.line_node[r] }
+            settle(r)
+            for _, fn in ipairs(M._cursor_subs) do pcall(fn, M.cursor) end
+        end, M.CURSOR_SETTLE_MS)
+    end
+    M._publish_cursor = publish_cursor
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
-        callback = function ()
-            gen = gen + 1
-            local g = gen
-            vim.defer_fn(function ()
-                if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
-                local r = row()
-                -- deferred ascent resync: while still on the landing row this
-                -- is the ascent's own cursor placement (or no move yet) — keep
-                -- the peeked source untouched. The first move OFF it commits
-                -- the pane to the view we ascended to, then falls through to
-                -- the normal per-row hover below.
-                if M._resync then
-                    if r == M._resync.row then return end
-                    M._resync = nil
-                    sync_focus_to_view()
-                end
-                M.emit_view() -- the selected row may have changed (deduped)
-                if M.NODE_HOVER[M.view.level] then
-                    if not M.hover_node(r) then
-                        if M.view.level == 'state' and M.line_trans[r] then
-                            -- a transition's "source" is its line in the spec
-                            spec_context(M.line_trans[r])
-                        elseif M.view.level == 'axis' then
-                            -- an axis renders three row shapes and only ONE of
-                            -- them is a node row, so hover_node declines on the
-                            -- other two and nothing happened: a write site lit
-                            -- nothing, a file row lit nothing. Same defect syms
-                            -- had, same cure — preview what the row IS.
-                            local st2 = M.line_site[r]
-                            local f2 = M.line_file[r]
-                            if st2 then
-                                -- every occurrence of this writer's edge at
-                                -- once: the row is the FUNCTION, so lighting one
-                                -- range would pick a winner among equals
-                                store.set_highlight({ file = st2.file,
-                                    ranges = st2.ranges or { st2.range } })
-                            elseif f2 then
-                                local mid2 = module_id(f2)
-                                if mid2 and store.node(mid2) then
-                                    store.set_context({ node = mid2,
-                                        view = { name = 'nbhd' } })
-                                end
-                            end
-                        elseif M.view.level == 'region' and M.stmt_line(r) then
-                            -- a region's STATEMENT rows are not node rows, and this
-                            -- branch used to end here: hover_node declined and
-                            -- nothing happened, so the source kept whatever the last
-                            -- row had lit. They highlight their line, as fn does.
-                            local n = store.node(M.view.region)
-                            if n then
-                                local l = M.stmt_line(r)
-                                store.set_highlight({ file = n.file, ranges = {
-                                    { start = { line = l - 1, char = 0 },
-                                      ['end'] = { line = l, char = 0 } } } })
-                            end
+        callback = function () M._undelivered = nil; publish_cursor() end,
+    })
+    -- debounced (publish_cursor): focus (or statement highlight) follows where the cursor SETTLES
+    function settle(r)
+        -- deferred ascent resync: while still on the landing row this
+        -- is the ascent's own cursor placement (or no move yet) — keep
+        -- the peeked source untouched. The first move OFF it commits
+        -- the pane to the view we ascended to, then falls through to
+        -- the normal per-row hover below.
+        if M._resync then
+            if r == M._resync.row then return end
+            M._resync = nil
+            sync_focus_to_view()
+        end
+        M.emit_view() -- the selected row may have changed (deduped)
+        if M.NODE_HOVER[M.view.level] then
+            if not M.hover_node(r) then
+                if M.view.level == 'state' and M.line_trans[r] then
+                    -- a transition's "source" is its line in the spec
+                    spec_context(M.line_trans[r])
+                elseif M.view.level == 'axis' then
+                    -- an axis renders three row shapes and only ONE of
+                    -- them is a node row, so hover_node declines on the
+                    -- other two and nothing happened: a write site lit
+                    -- nothing, a file row lit nothing. Same defect syms
+                    -- had, same cure — preview what the row IS.
+                    local st2 = M.line_site[r]
+                    local f2 = M.line_file[r]
+                    if st2 then
+                        -- every occurrence of this writer's edge at
+                        -- once: the row is the FUNCTION, so lighting one
+                        -- range would pick a winner among equals
+                        store.set_highlight({ file = st2.file,
+                            ranges = st2.ranges or { st2.range } })
+                    elseif f2 then
+                        local mid2 = module_id(f2)
+                        if mid2 and store.node(mid2) then
+                            store.set_context({ node = mid2,
+                                view = { name = 'nbhd' } })
                         end
                     end
-                elseif M.view.level == 'states' then
-                    -- a state's "source" is the spec lines that mention it
-                    local st = M.line_state[r]
-                    if st then spec_context(st) end
-                elseif M.view.level == 'lit' then
-                    -- an entry's "source" is its line in the declaring table
-                    local e = M.line_lit[r]
-                    local v = store.node((M.view.lit or ''):match('^[^\31]*'))
-                    if e and e.needle and v then var_context(v, e.needle) end
-                elseif M.view.level == 'protos' or M.view.level == 'proto' then
-                    -- a prototype is NOT a graph node: its anchor is a module +
-                    -- a line, so hover previews the declaring line in that
-                    -- module (the FSM-anchor law satisfied by the module, whose
-                    -- id IS its file path)
-                    local l, f = M.stmt_line(r), M.line_file[r]
-                    local mid = f and module_id(f)
-                    if l and mid and store.node(mid) then
-                        store.set_context({ node = mid, ranges = {
-                            { start = { line = l - 1, char = 0 },
-                              ['end'] = { line = l, char = 0 } } } })
-                    else
-                        store.set_context(nil)
-                    end
-                elseif M.view.level == 'files' then
-                    -- A file row's "source" is not its text: a whole file is
-                    -- not a recognition anchor, and the browser already lists
-                    -- its defs one descend away. What the row HAS and the
-                    -- 30-column pane cannot hold is its PLACE — who it requires
-                    -- and who requires it. One level, both directions, whole
-                    -- (measured: 6 rows at the median, 36 at p90). Descending
-                    -- from here is then not blind, which is the point.
-                    if M.line_sep[r] then return end -- chrome: keep the preview
-                    local f = M.line_file[r]
-                    local mid = f and module_id(f)
-                    if mid and store.node(mid) then
-                        store.set_context({ node = mid, view = { name = 'nbhd' } })
-                    else
-                        store.set_context(nil)
-                    end
-                elseif M.view.level == 'syms' then
-                    -- ★ A NAME ROW HIGHLIGHTS THE NAME, WHERE IT IS. Reported: "it
-                    -- doesn't highlight the same way statements do" -- because syms
-                    -- was in the node-hover class, so hovering a resolved name TOOK
-                    -- OVER the source pane with the def it points at, throwing the
-                    -- statement you are reading off the screen. A statement row
-                    -- highlights its line; a name row highlights its own columns,
-                    -- which is the same rule at a finer grain. The def is still one
-                    -- `descend` away, which is where it belongs.
-                    local it = M.line_syms[r]
-                    local n = store.node(M.subject('def'))
-                    if n and it then
-                        store.set_highlight({ file = n.file, ranges = {
-                            { start = { line = it.sr, char = it.sc },
-                              ['end'] = { line = it.sr, char = it.ec } } } })
-                    elseif n and M.stmt_line(r) then -- the header row
+                elseif M.view.level == 'region' and M.stmt_line(r) then
+                    -- a region's STATEMENT rows are not node rows, and this
+                    -- branch used to end here: hover_node declined and
+                    -- nothing happened, so the source kept whatever the last
+                    -- row had lit. They highlight their line, as fn does.
+                    local n = store.node(M.view.region)
+                    if n then
                         local l = M.stmt_line(r)
                         store.set_highlight({ file = n.file, ranges = {
                             { start = { line = l - 1, char = 0 },
                               ['end'] = { line = l, char = 0 } } } })
                     end
-                elseif M.view.level == 'fn' or M.view.level == 'block' then
-                    local l = M.stmt_line(r)
-                    local fnid = M.view.level == 'fn' and M.view.fn
-                        or (M.view.block or ''):match('^(.-)\31')
-                    local n = fnid and store.node(fnid)
-                    if l and n then
-                        store.set_highlight({ file = n.file, ranges = {
-                            { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
-                    end
-                elseif M.view.level == 'var' or M.view.level == 'callers'
-                    or M.view.level == 'occs' or M.view.level == 'regfor' then
-                    if M.line_sep[r] then return end -- chrome: keep the preview
-                    -- hover a site -> preview it highlighted; a group row (a
-                    -- function that uses the entity several times) -> preview
-                    -- that function with EVERY occurrence highlighted at once
-                    local s = M.line_site[r]
-                    local g = M.line_group[r]
-                    if s then store.set_context({ node = s.fn,
-                        ranges = s.ranges or { s.range } })
-                    elseif g then
-                        local ranges = {}
-                        for _, st in ipairs(g.sites or {}) do
-                            if st.range then ranges[#ranges + 1] = st.range end
-                        end
-                        store.set_context({ node = g.fn,
-                            ranges = #ranges > 0 and ranges or nil })
-                    else store.set_context(nil) end
                 end
-            end, 60)
-        end,
-    })
+            end
+        elseif M.view.level == 'states' then
+            -- a state's "source" is the spec lines that mention it
+            local st = M.line_state[r]
+            if st then spec_context(st) end
+        elseif M.view.level == 'lit' then
+            -- an entry's "source" is its line in the declaring table
+            local e = M.line_lit[r]
+            local v = store.node((M.view.lit or ''):match('^[^\31]*'))
+            if e and e.needle and v then var_context(v, e.needle) end
+        elseif M.view.level == 'protos' or M.view.level == 'proto' then
+            -- a prototype is NOT a graph node: its anchor is a module +
+            -- a line, so hover previews the declaring line in that
+            -- module (the FSM-anchor law satisfied by the module, whose
+            -- id IS its file path)
+            local l, f = M.stmt_line(r), M.line_file[r]
+            local mid = f and module_id(f)
+            if l and mid and store.node(mid) then
+                store.set_context({ node = mid, ranges = {
+                    { start = { line = l - 1, char = 0 },
+                      ['end'] = { line = l, char = 0 } } } })
+            else
+                store.set_context(nil)
+            end
+        elseif M.view.level == 'files' then
+            -- A file row's "source" is not its text: a whole file is
+            -- not a recognition anchor, and the browser already lists
+            -- its defs one descend away. What the row HAS and the
+            -- 30-column pane cannot hold is its PLACE — who it requires
+            -- and who requires it. One level, both directions, whole
+            -- (measured: 6 rows at the median, 36 at p90). Descending
+            -- from here is then not blind, which is the point.
+            if M.line_sep[r] then return end -- chrome: keep the preview
+            local f = M.line_file[r]
+            local mid = f and module_id(f)
+            if mid and store.node(mid) then
+                store.set_context({ node = mid, view = { name = 'nbhd' } })
+            else
+                store.set_context(nil)
+            end
+        elseif M.view.level == 'syms' then
+            -- ★ A NAME ROW HIGHLIGHTS THE NAME, WHERE IT IS. Reported: "it
+            -- doesn't highlight the same way statements do" -- because syms
+            -- was in the node-hover class, so hovering a resolved name TOOK
+            -- OVER the source pane with the def it points at, throwing the
+            -- statement you are reading off the screen. A statement row
+            -- highlights its line; a name row highlights its own columns,
+            -- which is the same rule at a finer grain. The def is still one
+            -- `descend` away, which is where it belongs.
+            local it = M.line_syms[r]
+            local n = store.node(M.subject('def'))
+            if n and it then
+                store.set_highlight({ file = n.file, ranges = {
+                    { start = { line = it.sr, char = it.sc },
+                      ['end'] = { line = it.sr, char = it.ec } } } })
+            elseif n and M.stmt_line(r) then -- the header row
+                local l = M.stmt_line(r)
+                store.set_highlight({ file = n.file, ranges = {
+                    { start = { line = l - 1, char = 0 },
+                      ['end'] = { line = l, char = 0 } } } })
+            end
+        elseif M.view.level == 'fn' or M.view.level == 'block' then
+            local l = M.stmt_line(r)
+            local fnid = M.view.level == 'fn' and M.view.fn
+                or (M.view.block or ''):match('^(.-)\31')
+            local n = fnid and store.node(fnid)
+            if l and n then
+                store.set_highlight({ file = n.file, ranges = {
+                    { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
+            end
+        elseif M.view.level == 'var' or M.view.level == 'callers'
+            or M.view.level == 'occs' or M.view.level == 'regfor' then
+            if M.line_sep[r] then return end -- chrome: keep the preview
+            -- hover a site -> preview it highlighted; a group row (a
+            -- function that uses the entity several times) -> preview
+            -- that function with EVERY occurrence highlighted at once
+            local s = M.line_site[r]
+            local g = M.line_group[r]
+            if s then store.set_context({ node = s.fn,
+                ranges = s.ranges or { s.range } })
+            elseif g then
+                local ranges = {}
+                for _, st in ipairs(g.sites or {}) do
+                    if st.range then ranges[#ranges + 1] = st.range end
+                end
+                store.set_context({ node = g.fn,
+                    ranges = #ranges > 0 and ranges or nil })
+            else store.set_context(nil) end
+        end
+    end
 
     -- location history: each pivot snapshots the browser's place, so <C-o>
     -- restores WHERE you were (level, file, cursor row), not just what was
@@ -4600,7 +4630,7 @@ function M.attach(win)
         restore_loc(so.block_loc)
         sync_focus_to_view()
     end
-    local function step(dir)
+    local function step_rows(dir)
         M._ghost = nil -- a manual move abandons a ghosted lens node
         if M.view.level ~= 'block' and M.view.level ~= 'syms' and not M._stepout then
             return vim.cmd('normal! ' .. vim.v.count1 .. (dir == 1 and 'j' or 'k'))
@@ -4629,6 +4659,25 @@ function M.attach(win)
         elseif M.view.level == 'block' then
             step_out(dir) -- at the block edge: cross out to the parent
         end
+    end
+    -- ★ A MOVE NVIM DOES NOT DELIVER IS DELIVERED HERE (CART-2097). Run inside nvim_win_call from another window (the
+    -- 2D plane forwards keys that way), this mapping moves the cursor and nvim fires no CursorMoved for it: CursorMoved
+    -- is for the window current when the main loop checks, and by then that is the forwarder's. Inside the call this
+    -- window IS current, so the two cases cannot be told apart here — so the move is marked, ANY CursorMoved on this
+    -- buffer clears the mark (nvim's own for a typed key fires before scheduled callbacks run), and a mark still set on
+    -- the next tick was not delivered: publish it, and emit the buffer's CursorMoved as an output for everyone else
+    -- listening on the pane. Typed j / k: nvim delivers, the mark is cleared, nothing here fires — as before.
+    local function step(dir)
+        local before = row()
+        step_rows(dir)
+        if not vim.api.nvim_win_is_valid(win) or row() == before then return end
+        local mark = {}
+        M._undelivered = mark
+        vim.schedule(function ()
+            if M._undelivered ~= mark or not vim.api.nvim_win_is_valid(win) then return end
+            M._undelivered = nil
+            vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf }) -- (the handler publishes)
+        end)
     end
     vim.keymap.set('n', keys.down, function () step(1) end,
         { buffer = M.buf, desc = 'cartograph: next row (steps out at a block edge)' })
