@@ -959,6 +959,13 @@ local function fn_body(fn)
     -- fall back to `fn` itself (that walks the parameters as bogus statements)
 end
 
+--- The BODY node of a function node: the spec's positional reader (`body_of`, for a grammar that does not label its
+--- body) first, else the `body` field or a BODY-typed direct child. nil = no body block. EXPORTED so a reader that
+--- needs the body's extent (expr.body_frame, CART-2094) asks the same owner flow.build does instead of restating it.
+function M.body_node(fn, body_of)
+    return (body_of and body_of(fn)) or fn_body(fn)
+end
+
 --- ★ THE ONE OWNER OF "WHAT COUNTS AS CONTROL IN THIS LANGUAGE" (CART-0363). The base sets
 --- above are one family's SPELLING; a language spelling it otherwise had its whole body
 --- folded into a single opaque row. The spec supplies the rest, merged HERE.
@@ -1557,8 +1564,7 @@ function M.build(fnnode, src, cfg)
     -- not label the body (odin nests it inside a `procedure` wrapper). fn_body's
     -- field-then-direct-child search cannot see a GRANDCHILD, and it must not fall
     -- back to `fnnode` itself — that walks the parameters as bogus statements.
-    local body = cfg.seq and fnnode
-        or (cfg.body_of and cfg.body_of(fnnode)) or fn_body(fnnode)
+    local body = cfg.seq and fnnode or M.body_node(fnnode, cfg.body_of)
     -- a clause head's GUARD (`f(X) when X > 0 ->`) runs before the body and reads names: its own row first
     if cfg.pattern and cfg.pattern.params and not cfg.seq then
         local g = fnnode:field('guard')[1]

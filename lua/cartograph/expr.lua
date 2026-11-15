@@ -2655,6 +2655,41 @@ function M.of(store, fn_id)
         fn = fn, src = src }
 end
 
+--- The 1-based FILE lines extract.plan frames a function with (CART-2094): `fn_start`, the definition's first line,
+--- and `body_end`, the body's LAST line — where the last statement's span stops.
+---
+--- ★ body_end WAS `at.el(range)`, a 0-based value in a 1-based field. It came out right only by accident: in a grammar
+--- that closes a body with a token on its own line (lua `end`, a brace) the 0-based closer row IS the 1-based line
+--- above it. Python has no closer, so the pun dropped the body's last line: a statement ending there was extracted
+--- without its continuation, and a selection covering it was refused as "ends inside a body".
+---
+--- So it is read off the TREE, not the range: the end row of the body node's last named child (a comment counts, as it
+--- did, and so does one after the body before its closer), with the body found by flow's own `body_node`. Re-parses through the one-entry cache `M.of` uses.
+--- Refuses (nil, why) when no tree can answer — never falls back to the range.
+---@return table|nil frame { fn_start = integer, body_end = integer }, string|nil why
+function M.body_frame(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not (node and node.file and node.range) then return nil, 'no such node' end
+    local P = require 'cartograph.pos'
+    local lang = lang_of_file(node.file)
+    if not lang then return nil, "no tree for this file's language: the body's last line cannot be read" end
+    local src, lines = file_src(store, node)
+    local fn = fn_node(node, parse_root(src or '', lang, lines), lang)
+    if not fn then return nil, "the function is not in its file's tree" end
+    local body = require('cartograph.flow').body_node(fn, spec[lang].body_of)
+    local n = body and body:named_child_count() or 0
+    if n == 0 then return nil, 'the function has no body statements' end
+    local last = body:named_child(n - 1)
+    -- a comment between the body and its closer (lua's `-- …` before `end`) is the fn's child, not the body's: the
+    -- last statement's span has always reached it, so it still does
+    local nx = body:next_named_sibling()
+    while nx and tsutil.is_comment(nx) do last = nx; nx = nx:next_named_sibling() end
+    local sr, _, er, ec = last:range()
+    -- a node ending at column 0 ends on the line BEFORE (it carries that line's newline)
+    if ec == 0 and er > sr then er = er - 1 end
+    return { fn_start = P.line(P.of_range(node.range), 1), body_end = P.line(P.new(er, nil, 'GRAPH'), 1) }
+end
+
 --- The language `M.of` would use for a file, or nil when this layer does not
 --- support it. Exported because a caller that has a FILE and needs `of_text`
 --- must resolve the language the SAME way, or it verifies under a spec the

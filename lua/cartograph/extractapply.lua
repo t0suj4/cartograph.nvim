@@ -36,7 +36,6 @@
 --   local entry, err = ea.apply(store, plan)   -- journalled; parse-verified
 
 local M = {}
-local at = require 'cartograph.at'
 local txn = require 'cartograph.txn'
 
 --- Wrap a pure extract.plan into a staged transaction plan. The extract.plan's
@@ -97,8 +96,11 @@ local function frame(store, node)
     -- nil). Passing nil through is correct: flow absent ⇒ df absent (df is
     -- derived from flow.coarse), so extract.plan refuses on the df check first
     -- and no reachable extraction is lost.
-    return { lines = all, fn_start = at.sl(node.range) + 1,
-        body_end = at.el(node.range), rows = rows, reaching = reaching,
+    -- (the body's last line is read off the tree, not punned from the range's 0-based end, CART-2094)
+    local bf, bwhy = require('cartograph.expr').body_frame(store, node.id)
+    if not bf then return nil, bwhy, 'unbuilt' end
+    return { lines = all, fn_start = bf.fn_start,
+        body_end = bf.body_end, rows = rows, reaching = reaching,
         params = fl and fl.params or nil }
 end
 

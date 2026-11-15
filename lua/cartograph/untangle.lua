@@ -591,14 +591,15 @@ function M.extract_plan(store, fn_id, res, c, name)
                 'concern is scattered (interleaved with other concerns) — gather/reorder first' }
         end
     end
-    local at = require 'cartograph.at'
     local df = require('cartograph.df').get(node)
     if not (df and df.stmts and df.stmts[kmin]) then return { ok = false, reason = 'no df' } end
-    local body_end = at.el(node.range)
+    -- (the body's last line read off the tree, never the range's 0-based end in a 1-based field, CART-2094)
+    local bf, bwhy = require('cartograph.expr').body_frame(store, node.id)
+    if not bf then return { ok = false, reason = bwhy } end
     local sel = { first = df.stmts[kmin].l,
-        last = (df.stmts[kmax + 1] and df.stmts[kmax + 1].l - 1) or body_end }
+        last = (df.stmts[kmax + 1] and df.stmts[kmax + 1].l - 1) or bf.body_end }
     return require('cartograph.extract').plan {
-        df = df, sel = sel, fn_start = at.sl(node.range) + 1, body_end = body_end,
+        df = df, sel = sel, fn_start = bf.fn_start, body_end = bf.body_end,
         file_lines = store.content(node), reaching = flowmod.reaching_cfg(fl),
         -- the enclosing fn's params: no dep edge names them, and the helper lands
         -- at module scope where they are out of scope (CART-0125). fl.params only

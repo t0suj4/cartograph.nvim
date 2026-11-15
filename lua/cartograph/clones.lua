@@ -562,10 +562,12 @@ function M.classify_blocks(store, groups)
                 fl = eok and eo and eo.fl or nil
                 df = dfmod.get(node)
             end
-            if fl and df and df.stmts then
+            -- (the body's frame read off the tree, never the range's 0-based end in a 1-based field, CART-2094)
+            local bf = fl and df and df.stmts and expr.body_frame(store, node.id)
+            if bf then
                 local pok, plan = pcall(extract.plan, {
                     df = df, sel = { first = occ.from_line, last = occ.to_line },
-                    fn_start = at.sl(node.range) + 1, body_end = at.el(node.range),
+                    fn_start = bf.fn_start, body_end = bf.body_end,
                     file_lines = store.content(node),
                     reaching = flowmod.reaching_cfg(fl),
                     flow_rows = fl.stmts, fn_params = fl.params, name = 'candidate' })

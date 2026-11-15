@@ -257,3 +257,52 @@ test('extractapply: a non-function focus is refused before any analysis', functi
     ok(not p2 and w2:find('no such node'), 'an unknown id is refused')
     cleanup()
 end)
+
+-- CART-2094: body_end was `at.el(range)`, a 0-based value in a 1-based field — right only while a closer (`end`, `}`)
+-- sits on its own line below the body. Python has none, so the body's last line was dropped: a statement ending there
+-- was extracted WITHOUT its continuation, and the selection that covered it was refused. Pinned on BOTH sides: the
+-- lua / js values must not move, python's must gain its last line.
+test('extractapply: the body frame is read off the tree — a python body keeps its last line, lua / js do not move (CART-2094)', function ()
+    for _, l in ipairs({ 'python', 'lua', 'javascript' }) do
+        if not parser_available(l) then skip('no ' .. l .. ' parser') end
+    end
+    local expr = require 'cartograph.expr'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(n, t) local f = assert(io.open(root .. '/' .. n, 'w')); f:write(t); f:close() end
+    w('m.py', table.concat({
+        'def f(a):',          -- 1
+        '    x = a + 1',      -- 2
+        '    y = x * 2',      -- 3
+        '    z = g(x,',       -- 4
+        '          y)',       -- 5  the body's LAST line: no closer below it
+        '' }, '\n'))
+    w('m.lua', table.concat({
+        'local function f(a)',          -- 1
+        '    local x = a + 1',          -- 2
+        '    -- a trailing comment',    -- 3  (the fn's child, not the block's: still inside the last span)
+        'end',                          -- 4
+        'local function h(a) local q = a end', -- 5  a one-liner: the old pun said 4, ABOVE the function
+        'return f', '' }, '\n'))
+    w('m.js', 'function f(a) {\n  const x = a + 1;\n  const z = g(x,\n    x);\n}\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local function frame(file, name)
+        for _, n in ipairs(store.data.nodes) do
+            if n.file == file and n.name == name then return expr.body_frame(store, n.id), n.id end
+        end
+    end
+    eq({ fn_start = 1, body_end = 5 }, (frame('m.py', 'f')), 'python: the last body line is the def\'s last line')
+    eq({ fn_start = 1, body_end = 3 }, (frame('m.lua', 'f')), 'lua: the line above `end`, trailing comment included (unchanged)')
+    eq({ fn_start = 5, body_end = 5 }, (frame('m.lua', 'h')), 'a one-liner: its own line')
+    eq({ fn_start = 1, body_end = 4 }, (frame('m.js', 'f')), 'js: the line above `}` (unchanged)')
+
+    -- end to end: the multi-line last statement extracts WHOLE, and a selection stopping short of it is refused
+    local _, pyf = frame('m.py', 'f')
+    local p, why = ea.plan(store, pyf, { first = 4, last = 5 }, 'helper')
+    ok(p, 'the whole last statement plans: ' .. tostring(why))
+    eq({ first = 4, last = 5 }, p.replace)
+    ok(vim.tbl_contains(p.new_fn, '          y)'), 'the continuation moves with it: ' .. vim.inspect(p.new_fn))
+    local short = ea.plan(store, pyf, { first = 4, last = 4 }, 'helper')
+    eq(nil, short, 'a selection that ends inside the last statement is refused, not truncated')
+    vim.fn.delete(root, 'rf')
+end)
