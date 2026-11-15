@@ -26,3 +26,19 @@ test('dfparity: a go body parses into the same statement partition on both sides
     eq(nil, cats['partition-mismatch'], 'no partition mismatch')
     eq(nil, cats['unpaired'], 'no unpaired statement')
 end)
+
+-- CART-2100: flow made php's `list($p, $q) = …` / `[$x, $y] = …` a def-position wrapper (CART-1667) and the INDEPENDENT
+-- builder was never told, so dfparity read every destructuring as both a df- and a flow-over-collect (mantisbt +4 / +4,
+-- red at HEAD for a month). Bisected to 8781adcb; this pins the builder's half.
+test('dfparity: php destructuring defines its names in the independent builder too — no divergence (CART-2100)', function ()
+    if not parser_available('php') then skip 'no php parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.php', 'w'))
+    fd:write('<?php\nfunction f($pair) {\n  list($p, $q) = $pair;\n  [$x, $y] = $pair;\n  return $p + $q + $x + $y;\n}\n')
+    fd:close()
+    local data = require('cartograph.providers.treesitter').extract(root, { legacy_df = true, cold = true })
+    local r = dofile('tools/dfparity.lua').check(data) -- (before the delete: check() re-reads the file)
+    vim.fn.delete(root, 'rf')
+    eq(1, r.nfn, 'the function was compared')
+    eq({}, r.cats or {}, 'the builder and flow agree on both destructuring forms')
+end)

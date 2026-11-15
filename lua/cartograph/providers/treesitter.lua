@@ -6384,7 +6384,10 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- its lone named child IS the inner declarator.
                 dfk = defpos and (nt == 'variable_list'
                     or nt == 'variable_name' or nt == 'reference_declarator'
-                    or nt == 'expression_list') -- go's target list (CART-1896): only ever reached in def position
+                    or nt == 'expression_list' -- go's target list (CART-1896): only ever reached in def position
+                    -- php `list($p, $q) = …` / `[$p, $q] = …`: flow made it a def-position wrapper in CART-1667 and
+                    -- this builder was never told, so dfparity read 4 mantisbt rows as BOTH over-collects (CART-2100)
+                    or nt == 'list_literal')
             end
         end
         local i, c = 0, n:named_child(0) -- (named children only: every per-child action below needs a named one — a mention, a statement, a df use — and the 40% that are tokens were 7.9 M node handles per corpus run, CART-1664)

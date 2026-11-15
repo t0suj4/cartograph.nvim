@@ -151,7 +151,9 @@ M.EXPECTED = {
     -- is why nothing else noticed: this moves the coarse PARTITION and nothing else.
     -- recalib 2026-11-15 (CART-2099, `i++` DEFINES i): df-over-collects 35 -> 36. The one new row is a closure body the
     -- legacy builder descends (BugFilterQuery.class.php:1635, `function (…) use (&$t_param_index) { … $t_param_index++ }`),
-    -- the closure-leak class. ⚠ HEAD was already 39 / flow-over 17 against this pin, unattributed: CART-2100, NOT blessed.
+    -- the closure-leak class. (CART-2100: the +4 / +4 HEAD showed beyond this was 8781adcb, CART-1667 — flow made php's
+    -- `list($p, $q) = …` a def-position wrapper and the legacy builder was never told, so 4 config_api /
+    -- relationship_graph_api destructurings read as BOTH over-collects. The builder now mirrors it: back on the pin.)
     php = { ['df-over-collects'] = 36, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
@@ -247,8 +249,11 @@ M.EXPECTED = {
     -- recalib 2026-11-15 (CART-2099, `i++` DEFINES i): df-over-collects +6 (9 rows new, 2 gone), every new one the
     -- legacy builder's documented imprecision now visible because `++` defines: six `return new Itr() { … keyId++ … }`
     -- anonymous-class bodies (swisshash), one lambda body, and two enhanced-for loop variables it still counts as uses.
-    -- ⚠ HEAD was already 1973 / flow-over 323 against this pin, unattributed: CART-2100, NOT blessed (1972 + 6).
-    libs = { OTHER = 3, ['df-over-collects'] = 1978, disjoint = 2, ['flow-over-collects'] = 322,
+    -- recalib 2026-11-15 (CART-2100, attributed by bisection): +1 / +1 at e28da676, CART-0379 — a java record's COMPACT
+    -- constructor became a minted function with its own flow rows, and RotationMatrix's (geo SimplificationErrorCalculator
+    -- .java:280) holds `for (double[] doubles : matrix)`: an enhanced-for loop variable flow defines and the legacy builder
+    -- reads, the class documented above as flow-correct. The rest of that commit's churn (5 in / 4 out) is the same classes.
+    libs = { OTHER = 3, ['df-over-collects'] = 1979, disjoint = 2, ['flow-over-collects'] = 323,
         ['partition-mismatch'] = 1083 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
