@@ -111,14 +111,17 @@ function M.family(store, args)
     end
     local allsites = {}
     for _, a in ipairs(R.accesses or {}) do for site in pairs(a.sites) do allsites[site] = true end end
+    -- (a site label is flowtype's `tbl:<file>:<row>:<col>`, 0-based on both axes: GRAPH; the entry is typed 1-based on
+    -- both, bytes: QUICKFIX. They meet through cartograph.pos, never a hand `+ 1`, CART-2095)
+    local P = require 'cartograph.pos'
     for _, w in ipairs(want) do
         local best, bestc
         for site in pairs(allsites) do
             local f, l, c = site:match('^tbl:(.-):(%d+):(%d+)$')
-            if f == w.file and tonumber(l) + 1 == w.line then
-                c = tonumber(c)
-                if w.col then if c + 1 == w.col then best, bestc = site, c end
-                elseif not bestc or c < bestc then best, bestc = site, c end
+            local q = f == w.file and P.to(P.new(tonumber(l), tonumber(c), 'GRAPH'), 'QUICKFIX')
+            if q and q.line == w.line then
+                if w.col then if q.col == w.col then best, bestc = site, q.col end
+                elseif not bestc or q.col < bestc then best, bestc = site, q.col end
             end
         end
         if not best then return nil, ('no table constructor the analysis follows at %s'):format(w.spec), 'ill-posed' end

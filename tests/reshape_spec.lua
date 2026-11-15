@@ -29,3 +29,28 @@ test('reshape: a position read in code loaded from a literal is a frontier, not 
     eq('frontier', class, 'a frontier: ' .. tostring(why))
     ok(tostring(why):find('loaded from a string literal', 1, true), 'naming the loaded code: ' .. tostring(why))
 end)
+
+-- CART-2095: a family entry is `file:LINE` (the outermost constructor starting there) or `file:LINE:COL`, 1-based bytes —
+-- matched against flowtype's 0-based `tbl:` site labels through cartograph.pos. The COL form had no spec.
+test('renamefield: file:LINE picks the outermost constructor, file:LINE:COL (1-based) the one starting there (CART-2095)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local line2 = 'function M.pt(a, b) return { o = { a }, p = { b } } end'
+    local root = tree({
+        ['lua/pt.lua'] = 'local M = {}\n' .. line2 .. '\nreturn M\n',
+        ['lua/use.lua'] = 'local P = require "pt"\nlocal r = P.pt(1, 2)\nreturn r.o, r.p\n' })
+    store.ingest(ts.extract(root))
+    local rf = require 'cartograph.renamefield'
+    local outer = assert(line2:find('{ o', 1, true))
+    local inner = assert(line2:find('{ b', 1, true))
+    local function site(spec)
+        local fam, why = rf.family(store, { family = { spec } })
+        ok(fam, spec .. ': ' .. tostring(why))
+        return next(fam.fam)
+    end
+    eq('tbl:lua/pt.lua:1:' .. (outer - 1), site('lua/pt.lua:2'), 'the outermost')
+    eq('tbl:lua/pt.lua:1:' .. (outer - 1), site('lua/pt.lua:2:' .. outer), 'COL names the outer one exactly')
+    eq('tbl:lua/pt.lua:1:' .. (inner - 1), site('lua/pt.lua:2:' .. inner), 'COL names an inner one exactly')
+    local none = rf.family(store, { family = { 'lua/pt.lua:2:' .. (inner - 1) } })
+    eq(nil, none, 'one column off names no constructor')
+    vim.fn.delete(root, 'rf')
+end)

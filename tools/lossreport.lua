@@ -75,16 +75,19 @@ function M.anchors(data, callcover, files)
             local ok, rec = pcall(flow.record, n)
             if ok and rec then
                 for _, s in ipairs(rec.stmts or {}) do
-                    -- `l` and `c` are both 1-based
-                    if s.l and s.c then
-                        add(n.file, s.l - 1, s.c - 1, s.l - 1, s.c - 1, true)
+                    -- a row is FLOW_ROW (1-based line and column); this report keys by the tree's 0-based
+                    -- start, so the row converts through cartograph.pos (CART-2095)
+                    local g = s.c and require('cartograph.pos').to(flow.row_pos(s), 'GRAPH')
+                    if g then
+                        add(n.file, g.line, g.col, g.line, g.col, true)
                         if s.t then
                             local rk = R[n.file]; if not rk then rk = {}; R[n.file] = rk end
-                            local names = rk[(s.l - 1) .. ':' .. (s.c - 1) .. ':' .. s.t] or {}
+                            local key = g.line .. ':' .. g.col .. ':' .. s.t
+                            local names = rk[key] or {}
                             for _, list in ipairs({ s.def, s.use, s.rmw }) do
                                 for _, nm in ipairs(list or {}) do names[nm] = true end
                             end
-                            rk[(s.l - 1) .. ':' .. (s.c - 1) .. ':' .. s.t] = names
+                            rk[key] = names
                         end
                     end
                 end

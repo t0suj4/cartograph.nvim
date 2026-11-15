@@ -22,7 +22,8 @@ M.PROFILES = {
     DIAGNOSTIC  = { lb = 0, cb = 0, unit = 'byte' },   -- vim.diagnostic lnum / col, extmarks
     QUICKFIX    = { lb = 1, cb = 1, unit = 'byte' },   -- setqflist lnum / col
     AGENT       = { lb = 1, cb = 1, unit = 'char' },   -- the MCP agent surface (user's decision 2026-11-15, CART-2086)
-    FLOW_ROW    = { lb = 1, cb = 1, unit = 'byte' },   -- flow / df statement rows (s.l, s.c)
+    FLOW_ROW    = { lb = 1, cb = 1, unit = 'byte' },   -- flow / df statement rows (s.l, s.c): flow.row_pos
+    FLOW_DUMP   = { lb = 1, cb = 0, unit = 'byte' },   -- flowtype's walk (R.pl, R.pc) and every flowdump position (CART-1994)
     HUMAN       = { lb = 1 },                          -- labels a person reads (vnums): a line only
 }
 --- LSP's profile depends on the NEGOTIATED positionEncoding; never assumed.

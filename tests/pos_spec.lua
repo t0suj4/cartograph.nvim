@@ -94,3 +94,30 @@ test('clangd: a wire range is STORED in bytes through the client\'s encoding, ne
     eq(nil, clangd._wire_at({ offset_encoding = 'utf-16' }, rd, 'missing.c', wire), 'no line text: dropped, never stored wrong')
     vim.fn.delete(root, 'rf')
 end)
+
+-- CART-2095: three conventions over the same source — storage (GRAPH 0/0), flow rows (FLOW_ROW 1/1: s.l, s.c) and
+-- flowtype's walk / the flowdump format (FLOW_DUMP 1/0). A row is read through flow.row_pos and converted by pos.to.
+test('pos: a flow row is a FLOW_ROW position; it converts to storage, the flowdump convention and the agent (CART-2095)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local text = '    local é = 1; g(é)'  -- `g` starts at 0-based byte 18, character 17
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local function f()\n' .. text .. '\nend\nreturn f\n'); fd:close()
+    local ts, store = require 'cartograph.providers.treesitter', require 'cartograph.store'
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local id
+    for _, n in ipairs(store.data.nodes) do if n.name == 'f' and n.kind == 'function' then id = n.id end end
+    local eo = require('cartograph.expr').of(store, id)
+    local row
+    for _, s in ipairs(eo.fl.stmts) do if s.c and s.c > 6 then row = s end end
+    ok(row, 'the second statement on the line has its own row: ' .. vim.inspect(eo.fl.stmts))
+    local flow = require 'cartograph.flow'
+    local p = flow.row_pos(row)
+    eq({ line = 2, col = 19, lb = 1, cb = 1, unit = 'byte' }, p, 'the row as stored: 1-based line, 1-based byte column')
+    eq({ line = 1, col = 18, lb = 0, cb = 0, unit = 'byte' }, pos.to(p, 'GRAPH'), 'storage: the tree\'s own start')
+    eq({ line = 2, col = 18, lb = 1, cb = 0, unit = 'byte' }, pos.to(p, 'FLOW_DUMP'), 'flowtype / flowdump: the column from 0')
+    eq({ line = 2, col = 18, lb = 1, cb = 1, unit = 'char' }, pos.to(p, 'AGENT', text), 'the agent: 1-based characters')
+    eq(nil, (flow.row_pos({ c = 3 })), 'a row without a line is no position')
+    vim.fn.delete(root, 'rf')
+end)

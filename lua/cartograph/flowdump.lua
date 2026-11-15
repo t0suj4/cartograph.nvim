@@ -89,7 +89,8 @@
 --     positions = { files = [file ...], at = [[fn, index, file, line, col] ...] } — CART-1994 (flowpath FLOW-0074): the
 --       SOURCE POSITION of every dumped instruction that may run code (load / loadDyn / store / storeDyn / copyKeyed /
 --       call / pcall / op / resume): index 0-based in fn's body, file an index into `files` (a literal load's chunk is
---       its `load:<file>:<line>:<col>` label, its lines the loaded text's), line 1-based, col 0-based — an expression's
+--       its `load:<file>:<line>:<col>` label, its lines the loaded text's), line 1-based, col 0-based (cartograph.pos
+--       FLOW_DUMP; a flow row is FLOW_ROW, 1-based on both: convert with pos.to, CART-2095) — an expression's
 --       start; a store's, its statement's; an operator's handlers share the expression. init's synthetic instructions
 --       and what the solve emits after the walk have none
 --     gaps = [ { fn, kind, vars, at } ... ], answers = [ { call = [file, line, col], kind, targets, partial, contracts,

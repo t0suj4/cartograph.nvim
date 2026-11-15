@@ -189,12 +189,21 @@ local LABELED = { labeled_statement = true }
 -- seam alongside pfield/df_ids/method.
 
 local function line(n) return (select(1, n:range())) + 1 end
--- start COLUMN (1-based, matching line's convention). Carried on every fine row
+-- start COLUMN (1-based, matching line's convention: the FLOW_ROW profile, read through M.row_pos). Carried on every fine row
 -- so same-line entities — minified/generated blobs, chained one-liners — are
 -- ORDERED and JUMP-LOCATABLE by (l,c); coarse stays line-only (df parity). The
 -- fold's width-narrowing keeps `c` u16 normally and auto-upgrades to u32 only for
 -- the extreme minified line (e.g. a 113k-col bundle). ([[cartograph-df-strangler]])
 local function startcol(n) return (select(2, n:range())) + 1 end
+
+--- A row's start as a typed cartograph.pos value (CART-2095). Rows keep their packed 1-based (l, c), the FLOW_ROW
+--- profile, while flowtype's walk and the flowdump format count the column from 0 (FLOW_DUMP) and storage from 0 on
+--- both axes (GRAPH). Three conventions over the same source: a reader converts with `pos.to(flow.row_pos(s), …)`,
+--- never by a hand `- 1`. nil, 'no-line' for a row without a line.
+function M.row_pos(s)
+    if type(s) ~= 'table' or type(s.l) ~= 'number' then return nil, 'no-line' end
+    return require('cartograph.pos').new(s.l, s.c, 'FLOW_ROW')
+end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 
 -- normalise a label (rust strips leading `'`; a label node may include a `:`)
