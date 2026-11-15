@@ -3546,18 +3546,17 @@ function M.attach(win)
     table.insert(M._sel_subs, 1, table.remove(M._sel_subs)) -- (to the front: it ran before every other follower)
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
-        callback = function ()
-            if M._compat_cm then return end -- (the pane's own compat emission below: already published)
-            M._delivered_row = row(); publish_cursor()
-        end,
+        callback = function () M._delivered_row = row(); publish_cursor() end,
     })
     -- ★ ONE PATH FOR EVERY MOVE NVIM DOES NOT DELIVER (CART-2098). A key run inside nvim_win_call from another window
     -- (the plane forwards j / k, G, gg, a search that way), an RPC call or a timer moves this cursor and fires no
     -- CursorMoved: nvim fires it only for the window current when its main loop checks. SafeState is that loop going
     -- idle, after ANY of them (probed in an --embed child: forwarded G / gg / search, nvim_exec_lua, a timer — the
     -- pane's CursorMoved 0 times, SafeState every time, already seeing the new row). So the row CursorMoved last
-    -- delivered is recorded above, and a different row at SafeState was moved behind nvim's back: the pane fires its
-    -- buffer's CursorMoved once — an output for every listener on the pane, and the handler above publishes it.
+    -- delivered is recorded above, and a different row at SafeState was moved behind nvim's back: it is PUBLISHED, on
+    -- the same path a delivered move takes (CART-2101). The pane emits no CursorMoved of its own for it — a listener
+    -- that wants every move follows the published selection (symbols.subscribe), not the buffer event (CART-2103: the
+    -- synthetic event is gone, the 2D-plane research having moved its gate and mirror onto subscribe first).
     -- Typed motion in this window: nvim delivers every move of the current window before SafeState, so the rows agree
     -- and nothing here fires — as before. (This replaces CART-2097's per-mapping mark in step.)
     M._delivered_row = row()
@@ -3568,12 +3567,6 @@ function M.attach(win)
             if row() == M._delivered_row then return end
             M._delivered_row = row()
             publish_cursor() -- ONE publish path for every move (CART-2101): no CursorMoved needed to reach it
-            -- ⚠ COMPAT, TO BE REMOVED (CART-2101): the buffer's CursorMoved is still emitted for a move nvim did not
-            -- deliver, because W3's gate (s0_gate criterion 2) and preview mirror (research/plane/mirror.lua) listen
-            -- for it. Removed once they follow the published selection (symbols.subscribe) — the user's sequencing.
-            M._compat_cm = true
-            pcall(vim.api.nvim_exec_autocmds, 'CursorMoved', { buffer = M.buf })
-            M._compat_cm = false
         end,
     })
     -- debounced (publish_cursor): focus (or statement highlight) follows where the cursor SETTLES

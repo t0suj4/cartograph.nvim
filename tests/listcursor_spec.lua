@@ -105,7 +105,7 @@ test('list cursor: G, gg, a search, j and k FORWARDED by nvim_win_call update th
         eq(typed.context, fwd.context, what .. ': the hover preview followed')
         eq(typed.highlight, fwd.highlight, what .. ': the highlight followed')
         eq(1, fwd.pubs, what .. ': one publication')
-        eq(1, fwd.cm, what .. ': the pane delivered its CursorMoved once')
+        eq(0, fwd.cm, what .. ': NO CursorMoved of the pane\'s own — the move is published, not emitted (CART-2103)')
         -- (not just equal: a file-level node row's hover preview IS that node — typed and forwarded agreeing on a
         -- STALE preview would pass every check above)
         if fwd.node ~= vim.NIL then hovered = hovered + 1; eq(fwd.node, fwd.context, what .. ': the preview is the row') end

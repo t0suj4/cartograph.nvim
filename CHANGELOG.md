@@ -10,8 +10,10 @@ Breaking or client-visible changes to cartograph's surfaces. Internal changes ar
   local-only; the live altitude's runtime values are always local-only. A headless host has no pane: `absent`.
 - Detect it: `graph.protocol = 3`, `serverInfo.version` `0.3`. Columns are unchanged from protocol 2 (CART-2101).
 - In-process (not the wire): `symbols.selection`, `symbols.subscribe { follow = 'item' | 'selection' | 'cursor', meta, fn }`.
-  The list pane's buffer still emits CursorMoved for a move made from another window; that compat emission is
-  marked for removal once the 2D-plane research consumers follow `symbols.subscribe`.
+  The list pane's buffer emitted a synthetic CursorMoved for a move made from another window (CART-2097); that
+  compat emission is REMOVED (CART-2103, once the 2D-plane research had moved onto `symbols.subscribe`). An in-process
+  listener that wants every move — forwarded ones included — follows `symbols.subscribe`; a buffer CursorMoved listener
+  now sees only the moves nvim itself delivers.
 
 ## 2026-11-15 — `txn_undo` takes the journal id it should undo (agent surface, additive)
 
