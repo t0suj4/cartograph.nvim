@@ -87,7 +87,12 @@ test('tokens: forth include edge + cross-file candidate-set refusal', function (
     end
     ok(refused, 'two defining files refuse')
     eq('ambiguous', refused.refused.rule)
-    eq(2, #refused.refused.cands - (#refused.refused.cands - 2), 'candidates carried')
+    -- (the shared refusal record, CART-0689: ids, sorted, capped, and the TRUE count — the old assertion here was the
+    -- tautology `eq(2, #c - (#c - 2))`, true for any list)
+    eq(2, refused.refused.n, 'the true candidate count')
+    eq({ 'app.fs::shared@1', 'lib/util.fs::shared@1' }, refused.refused.cands, 'node IDS, sorted')
+    local tsutil = require 'cartograph.spec.tsutil'
+    ok(tsutil.complete(refused.refused) and not tsutil.truncated(refused.refused), 'and the record answers complete')
 end)
 
 test('tokens: postscript procs, locals suppressed, top-level reg', function ()

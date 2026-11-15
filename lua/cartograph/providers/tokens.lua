@@ -826,10 +826,12 @@ function M.extract(root, opts)
                         local ak = file .. '\31' .. key
                         local a = ambig[ak]
                         if not a then
+                            -- (THE SHARED REFUSAL RECORD, CART-0689: `cands` ids capped at 8, `n` the true count — it
+                            -- carried the whole uncapped NODE list and no `n`, so neither `truncated` nor `complete`
+                            -- could be answered and the refusal-shadow / chain-continuation premises declined on it)
                             a = { file = file, callee = m.name, n = 0,
                                 line = m.l,
-                                refused = { rule = 'ambiguous',
-                                    cands = cands } }
+                                refused = require('cartograph.spec.tsutil').refusal('ambiguous', cands) }
                             ambig[ak] = a
                             calls[#calls + 1] = a
                         end
