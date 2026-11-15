@@ -7684,8 +7684,8 @@ local function binding_index(edges, hier)
             local ext, impl, exact -- (not `hier and hier()`: an `and` keeps ONE value of a call's several)
             if hier then ext, impl, exact = hier() end
             local up, defines, files_of = {}, {}, {}
-            -- (a supertype's simple name: the last segment of a qualified `a.b.C` — the queries capture the bare type
-            -- identifier, so `Listener<R>` arrives as `Listener`)
+            -- (a supertype's simple name: the last segment, `Listener<R>` arriving as `Listener` — java's rows are
+            -- keyed by spec.super_name, which drops type arguments)
             local function simple(t) return (t or ''):match('([%w_$]+)%s*$') end
             local function place(c, f)
                 if not (c and f) then return end
@@ -7733,9 +7733,11 @@ local function binding_index(edges, hier)
         while i <= #q do
             local f, c = q[i][1], q[i][2]; i = i + 1
             for _, p in ipairs(up[f .. '\0' .. c] or {}) do
+                -- (the supertype's OWN clauses are keyed by its simple name: `Outer.I` continues as I in Outer's file)
+                local pc = p:match('([%w_$]+)$') or p
                 for _, g in ipairs(where(f, p)) do
-                    local k2 = g .. '\0' .. p
-                    if not seen[k2] then seen[k2] = true; hit[g] = true; q[#q + 1] = { g, p } end
+                    local k2 = g .. '\0' .. pc
+                    if not seen[k2] then seen[k2] = true; hit[g] = true; q[#q + 1] = { g, pc } end
                 end
             end
         end

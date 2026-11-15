@@ -32,7 +32,7 @@
 -- (CART-0692: iface_query absent for typescript/tsx) and an UNBOUND capture
 -- (CART-0671: import_query binds @path and never @bind). It does NOT catch a capture
 -- that IS bound but only for some of the node shapes the grammar produces there
--- (CART-0672 / CART-0690, super_query binding @parent for 1 of 3 shapes) — that
+-- (CART-0672 / CART-0690, super_query binding @parent for 1 of 3 shapes, both since fixed) — that
 -- needs the grammar's node-types JSON and is a different instrument.
 
 local M = {}

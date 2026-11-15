@@ -493,7 +493,7 @@ end
 --   Map.Entry / Thread.UncaughtExceptionHandler -> nil: a JDK HEAD (imported from the JDK, or an unimported java.lang
 --                                    type) is a library class whose simple name a project class may share — server's
 --                                    `implements Map.Entry` beside 17 project Entry classes (the CART-2070 fence)
---   class Builder extends FieldMapper.Builder -> nil: the simple-name key is the CHILD's own (149 clauses on server). A
+--   class Builder extends FieldMapper.Builder -> nil: the simple-name key is the CHILD's own (144 nested clauses on server). A
 --                                    class is never its own supertype; the row would only say the qualifier was lost
 local function java_super_name(node, src, child)
     if node and node:type() == 'generic_type' then node = node:named_child(0) end

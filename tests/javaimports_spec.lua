@@ -173,11 +173,14 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
         local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
     end
     local J = 'src/main/java/'
-    w(J .. 'p/a/Outer.java', 'package p.a;\npublic class Outer {\n  public static class Base { public void g(int x) {} }\n'
-        .. '  public interface I { default void d(int x) {} }\n  public static class Gen<T> { public void k(int x) {} }\n'
+    w(J .. 'p/a/Outer.java', 'package p.a;\nimport p.k.K;\npublic class Outer {\n  public static class Base { public void g(int x) {} }\n'
+        .. '  public interface I extends K { default void d(int x) {} }\n  public static class Gen<T> { public void k(int x) {} }\n'
         .. '  public static class Builder { public void h(int x) {} }\n}\n')
     -- (the decoys make every bare name ambiguous, so only a supertype can decide)
-    w(J .. 'p/a/Decoy.java', 'package p.a;\npublic class Decoy { public void g(int x) {} public void d(int x) {} public void k(int x) {} }\n')
+    w(J .. 'p/a/Decoy.java', 'package p.a;\npublic class Decoy { public void g(int x) {} public void d(int x) {} public void k(int x) {} public void kk(int x) {} }\n')
+    -- (a SECOND hop: Outer.I extends a K of another package, whose default method the Impl receiver reaches only
+    -- through both clauses; Decoy declares `kk` too)
+    w(J .. 'p/k/K.java', 'package p.k;\npublic interface K { default void kk(int x) {} }\n')
     w(J .. 'p/a/Entry.java', 'package p.a;\npublic interface Entry { void e(int x); }\n')
     w(J .. 'p/b/Sub.java', 'package p.b;\nimport p.a.Outer;\npublic class Sub extends Outer.Base { void f() { g(1); } void s() { super.g(5); } }\n')
     w(J .. 'p/b/GSub.java', 'package p.b;\nimport p.a.Outer;\npublic class GSub extends Outer.Gen<String> { void f() { k(1); } }\n')
@@ -190,7 +193,10 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
     w(J .. 'p/b/QueryCache.java', 'package p.b;\npublic interface QueryCache extends org.lib.QueryCache { }\n')
     w(J .. 'p/b/E.java', 'package p.b;\nimport java.util.Map;\npublic class E implements Map.Entry<String, String> { }\n')
     w(J .. 'p/x/Use.java', 'package p.x;\nimport p.b.Sub;\nimport p.b.Impl;\n'
-        .. 'class Use { void f(Sub s, Impl i) { s.g(3); i.d(4); } }\n')
+        .. 'class Use { void f(Sub s, Impl i, Th t) { s.g(3); i.d(4); i.kk(5); } }\n')
+    -- (the java.lang half of the JDK fence: Thread is unimported, and the project has an UncaughtExceptionHandler)
+    w(J .. 'p/b/Th.java', 'package p.b;\npublic class Th implements Thread.UncaughtExceptionHandler { }\n')
+    w(J .. 'p/a/UncaughtExceptionHandler.java', 'package p.a;\npublic interface UncaughtExceptionHandler { }\n')
     local data = ts.extract(root)
     vim.fn.delete(root, 'rf')
     local rows = {}
@@ -206,6 +212,7 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
     eq(nil, rows.Q, 'a package-qualified superclass is not truncated onto a project class')
     eq(nil, rows.QueryCache, 'nor a package-qualified library interface onto the child itself')
     eq(nil, rows.E, 'a JDK head (Map.Entry) is not the project\'s Entry')
+    eq(nil, rows.Th, 'nor an unimported java.lang head (Thread.UncaughtExceptionHandler)')
     local got = {}
     local cv = require('cartograph.callview').of(data)
     for i = 1, cv.n do
@@ -213,9 +220,10 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
         local r = cv.get(i, 'refused')
         got[f:match('([^/]+)%.java$') .. ':' .. cv.get(i, 'full')] = cv.get(i, 'to') or ('refused ' .. tostring(type(r) == 'table' and r.rule or r))
     end
-    eq(J .. 'p/a/Outer.java::Base::g@2', got['Sub:Sub::g'], 'an inherited call through Outer.Base')
-    eq(J .. 'p/a/Outer.java::Base::g@2', got['Sub:Base::g'], 'super.g() keys the nested superclass')
-    eq(J .. 'p/a/Outer.java::Gen::k@4', got['GSub:GSub::k'], 'an inherited call through Outer.Gen<String>')
-    eq(J .. 'p/a/Outer.java::Base::g@2', got['Use:Sub::g'], 'a typed receiver of the subclass')
-    eq(J .. 'p/a/Outer.java::I::d@3', got['Use:Impl::d'], 'a default method reached through Outer.I: the head resolves through the import')
+    eq(J .. 'p/a/Outer.java::Base::g@3', got['Sub:Sub::g'], 'an inherited call through Outer.Base')
+    eq(J .. 'p/a/Outer.java::Base::g@3', got['Sub:Base::g'], 'super.g() keys the nested superclass')
+    eq(J .. 'p/a/Outer.java::Gen::k@5', got['GSub:GSub::k'], 'an inherited call through Outer.Gen<String>')
+    eq(J .. 'p/a/Outer.java::Base::g@3', got['Use:Sub::g'], 'a typed receiver of the subclass')
+    eq(J .. 'p/a/Outer.java::I::d@4', got['Use:Impl::d'], 'a default method reached through Outer.I: the head resolves through the import')
+    eq(J .. 'p/k/K.java::K::kk@1', got['Use:Impl::kk'], 'and past it: Outer.I\'s own supertype, keyed by its simple name')
 end)
