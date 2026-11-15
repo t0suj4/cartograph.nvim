@@ -245,6 +245,8 @@ M.SLOTS = {
     scan_ancestors = 'EMITTERS', scan_super = 'EMITTERS',
     scan_bare_calls = 'EMITTERS', ctor_query = 'EMITTERS',
     super_query = 'EMITTERS', iface_query = 'EMITTERS', interface = 'EMITTERS',
+    -- the class key of a supertype clause's captured TYPE node, nil = a class this graph does not key (CART-0690)
+    super_name = 'EMITTERS',
     -- the interface linker's candidate gates (CART-0692): a language declaring neither never redirects
     iface_bean = 'EMITTERS', iface_markers = 'EMITTERS',
     aperture_query = 'EMITTERS',

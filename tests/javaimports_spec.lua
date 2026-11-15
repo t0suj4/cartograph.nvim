@@ -159,3 +159,63 @@ test('javaimports: a bound class reaches its supertypes (generic, record), not i
     eq(J .. 'p/a/Local.java::Local::loc@1', got['Ver::loc'], 'a same-package supertype, not imported')
     eq(J .. 'p/a/Pair.java::Helper::twin@2', got['Pair::twin'], 'the same file\'s Helper, not a sibling\'s nested one')
 end)
+
+-- CART-0690: a QUALIFIED supertype parses as scoped_type_identifier, a third shape both type queries missed. A NESTED
+-- `Outer.Inner` (517 of 525 qualified clauses on elasticsearch server) is keyed by its last segment, as every nested
+-- class is, and remembers `Outer.Inner` so the supertype-file reach resolves the head as Java does. A package-qualified
+-- name, a JDK head, and a clause whose last segment is the child's own name key nothing: each would truncate onto a
+-- project class of the same simple name.
+test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qualified, JDK-headed or self-named one is none (CART-0690)', function ()
+    if not has_java() then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, t)
+        vim.fn.mkdir(vim.fs.dirname(root .. '/' .. rel), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    local J = 'src/main/java/'
+    w(J .. 'p/a/Outer.java', 'package p.a;\npublic class Outer {\n  public static class Base { public void g(int x) {} }\n'
+        .. '  public interface I { default void d(int x) {} }\n  public static class Gen<T> { public void k(int x) {} }\n'
+        .. '  public static class Builder { public void h(int x) {} }\n}\n')
+    -- (the decoys make every bare name ambiguous, so only a supertype can decide)
+    w(J .. 'p/a/Decoy.java', 'package p.a;\npublic class Decoy { public void g(int x) {} public void d(int x) {} public void k(int x) {} }\n')
+    w(J .. 'p/a/Entry.java', 'package p.a;\npublic interface Entry { void e(int x); }\n')
+    w(J .. 'p/b/Sub.java', 'package p.b;\nimport p.a.Outer;\npublic class Sub extends Outer.Base { void f() { g(1); } void s() { super.g(5); } }\n')
+    w(J .. 'p/b/GSub.java', 'package p.b;\nimport p.a.Outer;\npublic class GSub extends Outer.Gen<String> { void f() { k(1); } }\n')
+    w(J .. 'p/b/Impl.java', 'package p.b;\nimport p.a.Outer;\npublic class Impl implements Outer.I { }\n')
+    w(J .. 'p/b/J.java', 'package p.b;\nimport p.a.Outer;\npublic interface J extends Outer.I { }\n')
+    w(J .. 'p/b/Rec.java', 'package p.b;\nimport p.a.Outer;\npublic record Rec(int v) implements Outer.I { }\n')
+    w(J .. 'p/b/En.java', 'package p.b;\nimport p.a.Outer;\npublic enum En implements Outer.I { A }\n')
+    w(J .. 'p/b/Builder.java', 'package p.b;\nimport p.a.Outer;\npublic class Builder extends Outer.Builder { }\n')
+    w(J .. 'p/b/Q.java', 'package p.b;\npublic class Q extends p.a.Decoy { }\n')
+    w(J .. 'p/b/QueryCache.java', 'package p.b;\npublic interface QueryCache extends org.lib.QueryCache { }\n')
+    w(J .. 'p/b/E.java', 'package p.b;\nimport java.util.Map;\npublic class E implements Map.Entry<String, String> { }\n')
+    w(J .. 'p/x/Use.java', 'package p.x;\nimport p.b.Sub;\nimport p.b.Impl;\n'
+        .. 'class Use { void f(Sub s, Impl i) { s.g(3); i.d(4); } }\n')
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local rows = {}
+    for _, e in ipairs(data.extends or {}) do rows[e.child] = 'extends ' .. e.parent .. ' / ' .. tostring(e.written) end
+    for _, e in ipairs(data.implements or {}) do rows[e.child] = 'implements ' .. e.iface .. ' / ' .. tostring(e.written) end
+    eq('extends Base / Outer.Base', rows.Sub, 'a nested superclass: the last segment, and the head as written')
+    eq('extends Gen / Outer.Gen', rows.GSub, 'a nested GENERIC superclass')
+    eq('implements I / Outer.I', rows.Impl, 'a class\'s nested interface')
+    eq('implements I / Outer.I', rows.J, 'an interface\'s nested super-interface')
+    eq('implements I / Outer.I', rows.Rec, 'a record\'s nested interface')
+    eq('implements I / Outer.I', rows.En, 'an enum\'s nested interface')
+    eq(nil, rows.Builder, 'Builder extends Outer.Builder keys nothing: the key is the child\'s own')
+    eq(nil, rows.Q, 'a package-qualified superclass is not truncated onto a project class')
+    eq(nil, rows.QueryCache, 'nor a package-qualified library interface onto the child itself')
+    eq(nil, rows.E, 'a JDK head (Map.Entry) is not the project\'s Entry')
+    local got = {}
+    local cv = require('cartograph.callview').of(data)
+    for i = 1, cv.n do
+        local f = cv.get(i, 'file')
+        local r = cv.get(i, 'refused')
+        got[f:match('([^/]+)%.java$') .. ':' .. cv.get(i, 'full')] = cv.get(i, 'to') or ('refused ' .. tostring(type(r) == 'table' and r.rule or r))
+    end
+    eq(J .. 'p/a/Outer.java::Base::g@2', got['Sub:Sub::g'], 'an inherited call through Outer.Base')
+    eq(J .. 'p/a/Outer.java::Base::g@2', got['Sub:Base::g'], 'super.g() keys the nested superclass')
+    eq(J .. 'p/a/Outer.java::Gen::k@4', got['GSub:GSub::k'], 'an inherited call through Outer.Gen<String>')
+    eq(J .. 'p/a/Outer.java::Base::g@2', got['Use:Sub::g'], 'a typed receiver of the subclass')
+    eq(J .. 'p/a/Outer.java::I::d@3', got['Use:Impl::d'], 'a default method reached through Outer.I: the head resolves through the import')
+end)

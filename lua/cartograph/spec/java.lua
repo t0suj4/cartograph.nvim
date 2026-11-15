@@ -482,6 +482,35 @@ local function java_jdk_import(fq)
     for _, p in ipairs(JAVA_JDK_PREFIX) do if fq:sub(1, #p) == p then return true end end
     return false
 end
+-- ★ A SUPERTYPE CLAUSE'S CLASS KEY (CART-0690): `key, written` for the type node of an extends / implements clause,
+-- nil when the clause names no class this graph keys. Classes are keyed by SIMPLE name, nested ones too, so:
+--   Base / Base<T>                -> Base
+--   Outer.Inner / Outer<T>.Inner  -> Inner, written 'Outer.Inner' (a NESTED class: the head is a class, upper-case by
+--                                    Java's naming convention, the same test a PascalCase static receiver passes)
+--   a.b.Base / java.util.Map.Entry -> nil: a PACKAGE-qualified name is not truncated. On elasticsearch server all 8 such
+--                                    clauses name a library class, and `interface QueryCache extends
+--                                    org.apache.lucene.search.QueryCache` truncated would be the project's own QueryCache
+--   Map.Entry / Thread.UncaughtExceptionHandler -> nil: a JDK HEAD (imported from the JDK, or an unimported java.lang
+--                                    type) is a library class whose simple name a project class may share — server's
+--                                    `implements Map.Entry` beside 17 project Entry classes (the CART-2070 fence)
+--   class Builder extends FieldMapper.Builder -> nil: the simple-name key is the CHILD's own (149 clauses on server). A
+--                                    class is never its own supertype; the row would only say the qualifier was lost
+local function java_super_name(node, src, child)
+    if node and node:type() == 'generic_type' then node = node:named_child(0) end
+    if not node then return nil end
+    local t = node:type()
+    if t == 'type_identifier' then return node_text(node, src) end
+    if t ~= 'scoped_type_identifier' then return nil end
+    local written = node_text(node, src):gsub('%b<>', ''):gsub('%s+', '')
+    if not written:match('^_*%u') then return nil end
+    local head = written:match('^([%w_$]+)')
+    local fq = java_imports(src)[head]
+    if (fq and java_jdk_import(fq)) or (not fq and JAVA_JDK_TYPES[head]) then return nil end
+    local last = written:match('([%w_$]+)$')
+    if not last or last == child then return nil end
+    return last, written
+end
+
 -- a class body's fields: name -> { ty = type node, init = value node, final = bool }, memoized per body for the last file
 local flowfields_src, flowfields = nil, {}
 local function java_body_fields(body, src)
@@ -1096,14 +1125,11 @@ return {
             if ot == 'this' then
                 cls = java_enclosing_class(calln, src)
             elseif ot == 'super' then
-                local _, cnode = java_enclosing_class(calln, src)
+                -- (the superclass clause keyed as the extends row is, CART-0690: `Base<T>` and `Outer.Inner` name a
+                -- class, a package-qualified library class and the child's own simple name do not)
+                local me, cnode = java_enclosing_class(calln, src)
                 local sup = cnode and cnode:field('superclass')[1]
-                for _, c in (sup and inext or NOOP), sup, -1 do
-                    if c:type() == 'type_identifier' then
-                        cls = node_text(c, src)
-                        break
-                    end
-                end
+                cls = sup and sup:named_child(0) and java_super_name(sup:named_child(0), src, me) or nil
             elseif ot == 'identifier' then
                 local objname = node_text(obj, src)
                 cls, hedge, defer = java_var_type(model, objname, calln)
@@ -1222,12 +1248,14 @@ return {
     -- chain being walked is the declaration chain. The type arguments are a
     -- sibling `type_arguments` node, so capturing the direct `type_identifier`
     -- child cannot pick one of them up by accident.
+    -- The whole type node is captured and spec.super_name keys it (CART-0690): a qualified supertype parses as
+    -- scoped_type_identifier, a THIRD shape, and which of its segments is the class is a decision, not a capture.
     super_query = [=[
         (class_declaration
             name: (identifier) @child
-            superclass: (superclass [ (type_identifier) @parent
-                                      (generic_type (type_identifier) @parent) ]))
+            superclass: (superclass [ (type_identifier) (generic_type) (scoped_type_identifier) ] @parent))
     ]=],
+    super_name = java_super_name,
     -- interface→impl (F1, [[cartograph-linker]]'s first Java kind): a class's
     -- `implements I, J` and an interface's `extends K` clauses. SET-valued
     -- (multiple @iface per decl), so it runs its own extraction pass (the
@@ -1241,20 +1269,16 @@ return {
     iface_query = [=[
         (class_declaration
             name: (identifier) @ichild
-            (super_interfaces (type_list [ (type_identifier) @iface
-                                           (generic_type (type_identifier) @iface) ]))) @idecl
+            (super_interfaces (type_list [ (type_identifier) (generic_type) (scoped_type_identifier) ] @iface))) @idecl
         (interface_declaration
             name: (identifier) @ichild
-            (extends_interfaces (type_list [ (type_identifier) @iface
-                                             (generic_type (type_identifier) @iface) ]))) @idecl
+            (extends_interfaces (type_list [ (type_identifier) (generic_type) (scoped_type_identifier) ] @iface))) @idecl
         (record_declaration
             name: (identifier) @ichild
-            (super_interfaces (type_list [ (type_identifier) @iface
-                                           (generic_type (type_identifier) @iface) ]))) @idecl
+            (super_interfaces (type_list [ (type_identifier) (generic_type) (scoped_type_identifier) ] @iface))) @idecl
         (enum_declaration
             name: (identifier) @ichild
-            (super_interfaces (type_list [ (type_identifier) @iface
-                                           (generic_type (type_identifier) @iface) ]))) @idecl
+            (super_interfaces (type_list [ (type_identifier) (generic_type) (scoped_type_identifier) ] @iface))) @idecl
     ]=],
     -- ★ THE INTERFACE LINKER'S TWO CANDIDATE GATES ARE JAVA'S DECLARATIONS (CART-0692), read off the CALLING
     -- language's spec. They had been `_bean_name` / `_service_markers` that the engine pulled off this module for

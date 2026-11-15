@@ -7698,8 +7698,11 @@ local function binding_index(edges, hier)
                 local k = f .. '\0' .. c
                 local l = up[k]; if not l then l = {}; up[k] = l end; l[#l + 1] = p
             end
-            for _, e in ipairs(ext or {}) do link(e.file, e.child, simple(e.parent)) end
-            for _, e in ipairs(impl or {}) do link(e.file, e.child, simple(e.iface)) end
+            -- (a NESTED supertype keeps its dotted head, `Outer.Inner`, CART-0690: Java imports and resolves the OUTER
+            -- class, so `where` names the head's files and keeps those that define the last segment)
+            local function sup(w, n) return (w and w:match('^[%w_$]+%.[%w_$.]+$')) or simple(n) end
+            for _, e in ipairs(ext or {}) do link(e.file, e.child, sup(e.written, e.parent)) end
+            for _, e in ipairs(impl or {}) do link(e.file, e.child, sup(e.written, e.iface)) end
             for k, list in pairs(exact or {}) do
                 local c = type(k) == 'string' and k:match('^([%w_$]+)::')
                 if c then for _, nd in ipairs(list) do place(c, nd.file) end end
@@ -7712,6 +7715,12 @@ local function binding_index(edges, hier)
         hit = {}
         local up, defines, files_of = supermemo.up, supermemo.defines, supermemo.files_of
         local function where(f, p) -- the files the simple name p names, seen from file f
+            local head, last = p:match('^([%w_$]+)%..-([%w_$]+)$')
+            if head then
+                local out = {}
+                for _, g in ipairs(where(f, head)) do if defines[g] and defines[g][last] then out[#out + 1] = g end end
+                return out
+            end
             if defines[f] and defines[f][p] then return { f } end
             local b = bind_of[f] and bind_of[f][p]
             if b then return { b } end
@@ -8734,6 +8743,13 @@ local MATCH_OPTS = { match_limit = 65536 }
             local child = node_text(childn, src)
             local t = node_text(parentn, src)
             local parent = t:match('[^\\]+$') or t
+            -- (a language that captures the whole type node keys it itself: nil = the clause names no class this graph
+            -- keys, and `written` the clause as written — java's `Outer.Inner`, CART-0690)
+            if spec.super_name then
+                parent, t = spec.super_name(parentn, src, child)
+                if not parent then return end
+                t = t or parent
+            end
             data.extends = data.extends or {}
             -- (`written`: the parent AS WRITTEN when it differs — `\Base_Handler`, `A\B` — so a language's class rules
             -- can read it through the file's names: php's class veto walks the chain by FQCN, CART-0735)
@@ -9110,8 +9126,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local cintf = decl:type() == 'interface_declaration'
                         data.implements = data.implements or {}
                         for _, ifn in ipairs(ifaces) do
-                            data.implements[#data.implements + 1] = { child = child,
-                                iface = node_text(ifn, src), cintf = cintf, file = file }
+                            local iface, written = node_text(ifn, src), nil
+                            if spec.super_name then iface, written = spec.super_name(ifn, src, child) end
+                            if iface then
+                                data.implements[#data.implements + 1] = { child = child,
+                                    iface = iface, cintf = cintf, file = file, written = written }
+                            end
                         end
                         if not cintf and spec.iface_bean then
                             local bn = spec.iface_bean(decl, src)
