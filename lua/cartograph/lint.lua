@@ -784,6 +784,81 @@ local function truncation_walker(store, file, src, out)
     end } }
 end
 
+-- A FIELD / GLOBAL FUNCTION DEFINED TWICE AT CHUNK LEVEL (CART-2082). Lua assigns in order, so the second
+-- `function M.f` overwrites the first, and when nothing between them can read M.f the first definition is dead at
+-- runtime: spec/tsutil.lua carried two `M.unparen` for ~2 months and the earlier, PARENS-aware one never ran
+-- (CART-1114). Only the unconditional shape is this: both definitions DIRECT statements of the chunk (a definition
+-- under `if` / `do` / a function is a deliberate override), a field or global name (a `local function` twice is two
+-- bindings, not an overwrite). Conservative on READS: any statement between the two that names M.f, or uses the table
+-- M as a whole value (`register(M)`, `setmetatable(M, …)`), may have read the first, and the pair is not reported.
+-- Suggestive: a __newindex proxy table could record both definitions.
+local function redefined_walker(store, file, src, out)
+    local function norm(n) return (tsutil.node_text(n, src):gsub('%s+', ''):gsub(':', '.')) end
+    -- the name a chunk-level statement defines, or nil
+    local function defined(st, fname)
+        if fname == 'local_declaration' then return nil end
+        local t = st:type()
+        if t == 'function_declaration' then
+            local nm = st:field('name')[1]
+            return nm and norm(nm) or nil
+        elseif t == 'assignment_statement' then
+            local vl, el = st:named_child(0), st:named_child(1)
+            if vl and el and vl:named_child_count() == 1 and el:named_child_count() == 1
+                and el:named_child(0):type() == 'function_definition' then
+                local tgt = vl:named_child(0)
+                local tt = tgt:type()
+                if tt == 'identifier' or tt == 'dot_index_expression' then return norm(tgt) end
+            end
+        end
+        return nil
+    end
+    -- does `n` (a statement between the two) possibly read `name`, whose root table is `base`?
+    local function reads(n, name, base)
+        local t = n:type()
+        if t == 'dot_index_expression' or t == 'method_index_expression' then
+            if norm(n) == name then return true end
+        elseif t == 'identifier' and tsutil.node_text(n, src) == base then
+            local p = n:parent()
+            local pt = p and p:type()
+            -- the table as the PREFIX of another member (`M.g`) is not a read of M.f; any other use of it is
+            if name == base or not ((pt == 'dot_index_expression' or pt == 'method_index_expression')
+                and p:named_child(0) == n) then return true end
+        end
+        for _, c in tsutil.inamed, n, -1 do if reads(c, name, base) then return true end end
+        return false
+    end
+    return { enter = { chunk = function (root)
+        local sts, defs = {}, {}
+        for child, fname in root:iter_children() do
+            if child:named() then
+                sts[#sts + 1] = child
+                local d = defined(child, fname)
+                if d then defs[#sts] = d end
+            end
+        end
+        local last = {} -- name -> index of its latest definition
+        for i = 1, #sts do
+            local d = defs[i]
+            if d then
+                local j = last[d]
+                if j then
+                    local base = d:match('^([^.]+)')
+                    local read = false
+                    for k = j + 1, i - 1 do
+                        if reads(sts[k], d, base) then read = true; break end
+                    end
+                    if not read then
+                        out[#out + 1] = { file = store.abs(file), line = select(1, sts[j]:range()) + 1,
+                            message = ('%s is defined AGAIN at line %d and nothing between reads it — Lua assigns in order, so this definition never runs'):format(
+                                d, select(1, sts[i]:range()) + 1) }
+                    end
+                end
+                last[d] = i
+            end
+        end
+    end } }
+end
+
 -- THE WALKING RULES' SHARED PASS (CART-1659): every selected rule that declares `walk = { lang, files, make, done? }`
 -- sees each file's tree in ONE treewalk walk — make(store, file, src, out) returns the file's visitor (its `finish`,
 -- if any, runs after the walk), done(out) post-processes the rule's whole list. Tagcover and truncation each walked
@@ -1999,6 +2074,10 @@ M.rules = {
         -- semantics are unambiguous: the second target silently becomes nil. Three
         -- real bugs in one day of our own development
         walk = { lang = 'lua', files = '%.lua$', make = truncation_walker } },
+    { name = 'redefined-function', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
+        -- the second chunk-level `function M.f` overwrites the first with nothing reading it between (CART-2082);
+        -- suggestive, since a __newindex proxy table could record both
+        walk = { lang = 'lua', files = '%.lua$', make = redefined_walker } },
     { name = 'require-cycle', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         -- HEDGED BY ITS OWN COMMENT: import edges do not record load-time vs lazy, so
         -- a cycle is "fragile IF load-time", not a certain bug

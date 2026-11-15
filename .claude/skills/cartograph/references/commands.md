@@ -96,7 +96,7 @@ first" otherwise).
 
 Rules are whole-program and cross-file — not a luacheck replacement, a complement.
 Registered rules at this commit: `resource-leak`, `member-leak`, `null-deref`,
-`silent-drop`, `seam-guard`, `truncation`, `require-cycle`, `sql`, `sink-concat`,
+`silent-drop`, `seam-guard`, `truncation`, `redefined-function`, `require-cycle`, `sql`, `sink-concat`,
 `sink-source`, `sink-reach`, `dead-state`, `db-audit`, `route-audit`,
 `ansible-audit`, `ansible-vars`, `layering`, `clone`, `access-point`,
 `registry-audit`, `pair-audit`, `schema-mirror`, `greenspun`, `dynamic-dispatch`,

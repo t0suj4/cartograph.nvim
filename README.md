@@ -1983,6 +1983,11 @@ The rules:
 - **truncation** — `local a, b = x and f() or y`: `and`/`or` ADJUSTS a call to
   one value, so the extra targets are silently nil. Three real bugs in one
   day of this repo's own development earned the rule.
+- **redefined-function** — a chunk-level `function M.f` defined AGAIN at chunk
+  level with nothing between that could read `M.f` (no call, capture, or
+  whole-table use of `M`): Lua assigns in order, so the first never runs.
+  Suggestive (a `__newindex` proxy could record both). Earned by
+  `tsutil.unparen`, whose fixed copy sat dead under a stale one for two months.
 - **tag-coverage** — a module constructs a set of discriminant values
   (`{ k = 'assign', … }`) and each walker tests a subset. A function handling
   *most* of them and missing one is a silent hole: the value falls to whatever

@@ -761,3 +761,44 @@ test('refusal shadow: a candidate in the ELIDED TAIL still blocks', function ()
     eq(nil, first_blocker(ali8, 'reallyDeadHelper'))
     vim.fn.delete(root8, 'rf')
 end)
+
+-- CART-2082: spec/tsutil.lua carried two chunk-level `function M.unparen` for ~2 months; Lua assigns in order, so the
+-- earlier one never ran (CART-1114) and nothing reported it. Only the unconditional overwrite with nothing reading the
+-- name between is the finding — a call, a capture, a whole-table use, a conditional or a local is not.
+test('lint redefined-function: a chunk-level field function overwritten unread is reported; every reading shape is not (CART-2082)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'function M.unparen(n) return n end',          -- 2: dead
+        'function M.other() return 1 end',
+        'M.unparen = function (n) return n end',        -- 4: the overwrite (assignment form)
+        'function M.used() return 1 end',
+        'M.used()',                                     -- a call between: the first ran
+        'function M.used() return 2 end',
+        'function M.reg() return 1 end',
+        'register(M)',                                  -- the whole table escapes: it may be read
+        'function M.reg() return 2 end',
+        'if x then function M.cond() end end',          -- conditional: a deliberate override
+        'function M.cond() end',
+        'local function lf() end',                      -- two locals are two bindings
+        'local function lf() end',
+        'function M.cap() return 1 end',
+        'local keep = M.cap',                           -- captured: the first lives on
+        'function M.cap() return 2 end',
+        'function M:meth() end',                        -- `M:meth` and `M.meth` are one field
+        'function M.meth() end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local f = lint.run(store, only('redefined-function'))
+    vim.fn.delete(root, 'rf')
+    local got = {}
+    for _, x in ipairs(f) do got[#got + 1] = x.line .. ' ' .. x.message:match('^(%S+)') end
+    table.sort(got)
+    eq({ '18 M.meth', '2 M.unparen' }, got)
+    ok(f[1].message:find('defined AGAIN at line', 1, true), f[1].message)
+end)
