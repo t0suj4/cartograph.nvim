@@ -2042,7 +2042,16 @@ function M.analyze_pair(pair, store)
             h.fparam = f
         end
     end
-    local structural = insdel > 0 or nstruct > 0
+    -- ★ AN OPERATOR DIVERGENCE IS NOT A VALUE (CART-0417). `+` against `-` is a value hole by the IR's leaf rule, but
+    -- Lua / C / Java cannot pass an operator as an argument, so no parameter list recovers it. It had been planned as
+    -- one: the hole carries its ENCLOSING node's span (for keying), so the helper took the whole `base + w * factor`
+    -- as `hp1` and each caller passed it — with `base` a local of the helper's body, unbound at the call site. A
+    -- certified, unhedged, wrong plan (before the span it crashed, which was the only guard). The ticket's REFUSE
+    -- branch: an operator hole makes the pair structural. Lifting it into a passed operator function is the
+    -- structural-hole arc's business, not this classifier's.
+    local nop = 0
+    for _, h in ipairs(holes) do if h.kind == 'operator' then nop = nop + 1 end end
+    local structural = insdel > 0 or nstruct > 0 or nop > 0
     -- group value holes by (kind, a, b) — one PARAMETER per distinct varying leaf, but
     -- collect EVERY occurrence's range (sites_a/sites_b) so a leaf that appears more than
     -- once in the body is substituted at all its sites (the extract transaction needs this;

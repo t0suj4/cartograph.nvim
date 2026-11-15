@@ -4755,3 +4755,39 @@ test('clones: a function in a language with no expression IR is counted as uncov
     eq('uncovered-languages', f.absence_why.premise)
     ok(vim.tbl_contains(agent.VERBS.clones_find.absences, f.absence))
 end)
+
+-- CART-0417: two functions identical but for one OPERATOR (`base + w * factor` vs `base - w * factor`). The operator
+-- hole was classified a VALUE and — once it carried its enclosing node's span — planned: the helper took the whole
+-- expression as a parameter and each caller passed `base ± w * factor`, with `base` a local of the helper's body,
+-- unbound at the call site. An operator cannot be passed as an argument in Lua: the pair is structural, refused.
+test('clones: an OPERATOR divergence makes a pair structural — refused, never planned as a value parameter (CART-0417)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function body(op)
+        return table.concat({
+            '    local base = total * 2', '    local acc = 0',
+            '    for _, it in ipairs(items) do', '        acc = acc + it.weight', '    end',
+            '    local out = base ' .. op .. ' w * factor', '    if out > 100 then out = 100 end',
+            "    print('score', out, acc)", '    return out, acc' }, '\n')
+    end
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.score_add(total, w, factor, items)\n' .. body('+') .. '\nend\n'
+        .. 'function M.score_sub(total, w, factor, items)\n' .. body('-') .. '\nend\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local p = clones.near(store, { max_dist = 3 })[1]
+    ok(p, 'the two functions are a near pair')
+    local a = clones.analyze_pair(p, store)
+    local op
+    for _, h in ipairs(a.holes or {}) do if h.kind == 'operator' then op = h end end
+    ok(op and op.a == '+' and op.b == '-', 'the divergence is the operator, located: ' .. vim.inspect(a.holes))
+    eq('structural', a.kind)
+    ok(clones.extract_verdict(a).state ~= 'value', 'the verdict is not an extractable value')
+    local plan, why = require('cartograph.cloneextract').plan(store, p)
+    eq(nil, plan, 'no plan is made')
+    ok(tostring(why):find('structural', 1, true), 'and the refusal says why: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
