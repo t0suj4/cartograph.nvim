@@ -261,12 +261,18 @@ end
 
 -- The file line (0-based) the cursor in `win` is sitting on, given the node the
 -- buffer renders; nil on the header rows.
+-- ★ THE INVERSE OF buf_row, AND IT WAS NOT (found by CART-2089): it counted rows from the def's own first line, while
+-- the body starts at the first SHOWN line — a leading doc comment, or the enclosing region / context lines — so on any
+-- def with a docblock <C-]> resolved and gf opened that many lines too far down. Same start / last as buf_row.
 local function cursor_file_line(win, node)
     if not node then return nil end
     local row0 = vim.api.nvim_win_get_cursor(win)[1] - 1
     if row0 < HEADER_ROWS then return nil end
-    local fl = atr.sl(node.range) + (row0 - HEADER_ROWS)
-    if fl > atr.el(node.range) then return nil end
+    local sh = M._shown and M._shown.id == node.id and M._shown or nil
+    local start = sh and sh.start or atr.sl(node.range)
+    local last = sh and sh.last or atr.el(node.range)
+    local fl = start + (row0 - HEADER_ROWS)
+    if fl > last then return nil end
     return fl
 end
 
@@ -403,11 +409,52 @@ function M.create()
     return buf
 end
 
+--- The source pane's cursor address (CART-2089): the node this buffer renders, its file, the 0-based file line and byte
+--- column under the cursor (nil on a header row, or in a generated alternate view, whose rows are not source), the word
+--- there, and the base of those numbers. nil when the buffer renders nothing.
+function M.cursor_address(win)
+    local node = M.ctx or M.cur
+    if not node then return nil end
+    win = win or M.win_top
+    local fl = (not M._view_rows) and cursor_file_line(win, node) or nil
+    local col
+    if fl then
+        local c = vim.api.nvim_win_get_cursor(win)[2]
+        local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+        local row0 = vim.api.nvim_win_get_cursor(win)[1] - 1
+        -- (the buffer row is the source line PREFIXED by nothing: body_lines copies the file's text verbatim)
+        col = (lines[row0 + 1] and c) or nil
+    end
+    local cword
+    vim.api.nvim_win_call(win, function () cword = vim.fn.expand('<cword>') end)
+    return { node = node.id, file = node.file, line = fl, col = col, cword = cword ~= '' and cword or nil,
+        base = { line = 0, col = 0, unit = 'byte' } }
+end
+
 function M.attach(win)
     M.win_top = win
     set_margin(win)
     M.context(nil)
+    -- publish the cursor address when it SETTLES (CART-2089): debounced like the browser's focus follow, deduped so an
+    -- unchanged address fires nothing, and it never re-renders
+    local gen, last = 0, nil
+    vim.api.nvim_create_autocmd('CursorMoved', {
+        buffer = vim.api.nvim_win_get_buf(win),
+        callback = function ()
+            gen = gen + 1
+            local mine = gen
+            vim.defer_fn(function ()
+                if mine ~= gen or not vim.api.nvim_win_is_valid(win) then return end
+                local a = M.cursor_address(win)
+                local key = a and table.concat({ a.node, tostring(a.line), tostring(a.col), a.cword or '' }, '\31') or ''
+                if key == last then return end
+                last = key
+                store.set_source_cursor(a)
+            end, M.CURSOR_SETTLE_MS)
+        end,
+    })
 end
+M.CURSOR_SETTLE_MS = 60 -- (the settle window; a spec may lower it)
 
 ---@param id string?
 function M.render(id)

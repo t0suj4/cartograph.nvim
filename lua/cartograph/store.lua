@@ -1794,6 +1794,27 @@ function M.set_context(ctx)
     for _, fn in ipairs(M._ctx_subs) do pcall(fn, ctx) end
 end
 
+-- ★ WHERE THE SOURCE PANE'S CURSOR IS (CART-2089). The address existed only inside a key handler (<C-]>, gf), so the
+-- source pane could drive no linked pane and no gesture without a key press, while the browser publishes through
+-- symbols.view / loc_provider. Published on a SETTLED cursor move (debounced, deduped, no re-render), the same channel
+-- shape as context: `source_cursor` is the value (per band, like `context`), `_srccur_subs` the subscribers (session
+-- wiring: SESSION_GLOBAL). An address: { node, file, line, col, cword, base = { line = 0, col = 0, unit = 'byte' } } —
+-- line / col nil on a header row; the base travels with the numbers (the typed offset is CART-2086).
+M._srccur_subs = {}
+--- Subscribe to the source pane's cursor address. Returns an unsubscribe function.
+function M.on_source_cursor(fn)
+    table.insert(M._srccur_subs, fn)
+    return function ()
+        for i, f in ipairs(M._srccur_subs) do
+            if f == fn then table.remove(M._srccur_subs, i); return end
+        end
+    end
+end
+function M.set_source_cursor(addr)
+    M.source_cursor = addr
+    for _, fn in ipairs(M._srccur_subs) do pcall(fn, addr) end
+end
+
 --- Occurrences of `to_id` inside `from_id` (the uses-edge call sites).
 function M.occurrences(from_id, to_id)
     return M.occ[(from_id or '') .. '\31' .. (to_id or '')]
@@ -2375,6 +2396,7 @@ end
 -- path, cache loads and self:// bands — new surface for this exact bug class.
 M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
     _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true,
+    _srccur_subs = true, -- (the source pane's cursor subscribers, CART-2089)
     -- _label_subs belongs here for the same reason as its siblings: a pane's
     -- subscription is SESSION wiring, not graph content, and leaving it out meant a
     -- re-ingest silently unwired the name pick (found by its own spec).
