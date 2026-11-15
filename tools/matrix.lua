@@ -56,7 +56,7 @@ local PV = dofile(here .. '/pinverdict.lua') -- a pin's movement as a verdict (C
 local function say(s) io.stdout:write(s .. '\n') end
 
 local COLS = { 'counts', 'valid', 'mem', 'rows', 'expr', 'dfpar', 'fold', 'silent',
-    'cache', 'key', 'struct', 'dfshape', 'par' }
+    'cache', 'key', 'struct', 'dfshape', 'par', 'xlang' }
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
     blesh = true, gforth = true, openfirmware = true, bwipp = true,
@@ -117,7 +117,7 @@ end
 --   STILL GATED: valid, fold, silent, cache — INTRINSIC checks. Referential integrity,
 --     fold round-trip, silent-local and cold==warm are properties of whatever graph they
 --     are handed, so a subset is a perfectly good subject for them.
-local SCOPE_UNGATED = { rows = true, expr = true, dfpar = true }
+local SCOPE_UNGATED = { rows = true, expr = true, dfpar = true, xlang = true }
 local SCOPE_NA = { counts = true, mem = true, key = true, struct = true, dfshape = true, par = true }
 local SCOPE_NOTE = { 'SCOPED (--file): a corpus-wide baseline cannot judge a subset' }
 
@@ -710,6 +710,38 @@ local function run_row(name)
                 local det, d = gd.detail(slim, pslim,
                     { a = 'sequential', b = 'parallel', limit = 5 })
                 cell('par', gd.empty(d) and 'OK' or 'FAIL', det)
+            end
+        end
+    end
+
+    -- ★ CROSS-LANGUAGE LINKS (CART-0789). bench.extract stops at the raw extract, so the one place a `ref` edge is
+    -- minted by string-key matching rather than resolution had NO gated expectation anywhere: CART-0788 swung
+    -- desynced's links 40-292 between identical processes and every gate stayed green, because none looked. This runs
+    -- xlang.link exactly as the open path does (effective bindings: declared + discovered) and counts the ref edges it
+    -- owns: `xlang` (a declared binding's key match) and `xdisc` (a discovered binding's hedge, CART-0725), pinned per
+    -- corpus as `expected_xlang`. ★ IT RUNS LAST because link MUTATES the shared graph, and every column above compares
+    -- the raw extract against a baseline; `mem` after it judges extraction's budget, and a later phase over it is refused.
+    if wanted('xlang') then
+        local xl = require 'cartograph.xlang'
+        local okx, st = pcall(function () return xl.link(data, xl.effective_bindings(data)) end)
+        if not okx then
+            cell('xlang', 'FAIL', { 'xlang.link raised: ' .. tostring(st):sub(1, 300) })
+        else
+            local nx, nd = 0, 0
+            for _, e in ipairs(data.edges or {}) do
+                if e.kind == 'ref' then
+                    if e.xlang then nx = nx + 1 end
+                    if e.xdisc then nd = nd + 1 end
+                end
+            end
+            local d = { ('xlang refs %d · discovered %d · linked sites %d'):format(nx, nd, (st and st.links) or 0) }
+            local exp = corpus.expected_xlang
+            if not exp then
+                cell('xlang', (nx + nd) > 0 and '~' or '--', d) -- ran, not yet pinned / nothing to link
+            else
+                local ok = (exp.xlang or 0) == nx and (exp.xdisc or 0) == nd
+                cell('xlang', ok and 'OK' or 'FAIL', ok and nil or {
+                    ('xlang refs %d expected %d · discovered %d expected %d'):format(nx, exp.xlang or 0, nd, exp.xdisc or 0) })
             end
         end
     end
