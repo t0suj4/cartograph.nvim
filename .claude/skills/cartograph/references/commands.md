@@ -194,7 +194,7 @@ require('cartograph').setup {
 ```
 
 **Navigation:** `pivot` `<CR>` · `jump` `<C-]>` · `back` `<C-o>` · `back_alt` `<C-t>`
-· `forward` `<C-i>` · `open_file` `gf` · `ascend` `h` · `descend` `l` · `down` `j` ·
+· `forward` `<C-i>` · `open_file` `gf` · `refresh` `<C-l>` (re-samples the live altitude) · `ascend` `h` · `descend` `l` · `down` `j` ·
 `up` `k` · `cycle` `<Tab>` · `cycle_back` `<S-Tab>` · `close` `q`
 
 `j`/`k` step *out* to the parent at a block's last/first row.

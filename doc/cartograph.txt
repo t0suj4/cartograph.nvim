@@ -887,6 +887,8 @@ NAVIGATION ~
   back_alt      <C-t>     also back, where <C-o> is already taken
   forward       <C-i>     jumplist forward
   open_file     gf        open the real file at this entry
+  refresh       <C-l>     redraw, re-sampling the live altitude (its header
+                          shows when the current sample was taken)
   ascend        h         symbols: zoom out (function -> file -> tree)
   ascend_structural H     symbols: zoom out by CONTAINMENT instead of
                           history — off the trail (|cartograph-site|);

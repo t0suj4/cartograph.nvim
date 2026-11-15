@@ -1175,15 +1175,23 @@ end
 
 -- the live-value tree for a node id, snapshotted from the running process
 -- (a SAMPLE — cached for this view, rebuilt on demand, never persisted).
+-- ★ A SAMPLE CARRIES ITS TIME (CART-2088). The cache was filled once and never reset, yet the header said `live @ now`:
+-- moving symbols.view from M.projection to M.on_view and reopening still showed M.projection. The cache stays — walking
+-- into a live tree must read ONE sample, not a fresh one per step — but each entry records when it was taken, the header
+-- says so, and `keys.refresh` (<C-l>, vim's redraw) drops every sample and re-renders.
 local function live_tree(id)
     M._live = M._live or {}
-    if M._live[id] == nil then
+    local e = M._live[id]
+    if e == nil then
         local n = store.node(id)
         local tree = n and require('cartograph.self_oracle').live_value(n, store.data)
-        M._live[id] = tree or false
+        e = { tree = tree or false, at = os.time() }
+        M._live[id] = e
     end
-    return M._live[id] or nil
+    return e.tree or nil, e.at
 end
+--- drop every live sample: the next render re-samples the running process (CART-2088)
+function M.resample_live() M._live = {} end
 
 -- walk key = id \31 seg \31 seg … into the live tree (mirrors lit_walk)
 local function live_walk(key)
@@ -1198,12 +1206,12 @@ local function live_walk(key)
     -- function's upvalue tree, built on demand from the fn reached so far
     local upi
     for i, p in ipairs(parts) do if p == UPSENT then upi = i; break end end
-    local val = live_tree(id)
+    local val, at = live_tree(id)
     if not upi then
         for _, seg in ipairs(parts) do
             val = step(val, seg); if val == nil then break end
         end
-        return node, val, parts, nil
+        return node, val, parts, nil, at
     end
     for i = 1, upi - 1 do val = step(val, parts[i]); if val == nil then break end end
     local fnentry = (type(val) == 'table' and val.fn) and val or nil
@@ -1211,7 +1219,7 @@ local function live_walk(key)
     local upt = require('cartograph.self_oracle').upvalues(fnentry.fn, store.data)
     for i = upi + 1, #parts do upt = step(upt, parts[i]); if upt == nil then break end end
     -- return the fn entry only at its upvalue ROOT, so render can offer its def
-    return node, upt, parts, (upi == #parts) and fnentry or nil
+    return node, upt, parts, (upi == #parts) and fnentry or nil, at
 end
 
 -- Emit the rows for a data table `val` (litval or live-snapshot shape); shared
@@ -1324,7 +1332,7 @@ end
 -- sourced from the live process — a module's concrete exports, a dispatch
 -- table's actual contents, every function resolved to the def it dispatches to.
 local function render_live(ctx, key)
-    local node, val, path, fnentry = live_walk(key)
+    local node, val, path, fnentry, at = live_walk(key)
     if not node then ctx.lines[1] = '(gone)'; return end
     local upmode = (key or ''):find(UPSENT, 1, true) ~= nil
     -- drop the UPSENT sentinel from the displayed crumb
@@ -1341,7 +1349,8 @@ local function render_live(ctx, key)
         for i = 1, 3 do ctx.marks[i] = { { 0, -1, 'CartographDim' } } end
         return
     end
-    local tag = upmode and '↑ upvalues' or 'live @ now'
+    -- (the sample's TIME, never "now": the tree is cached until keys.refresh re-samples, CART-2088)
+    local tag = upmode and '↑ upvalues' or ('sampled %s'):format(os.date('%H:%M:%S', at or os.time()))
     ctx.lines[1] = ('⚡ %s   %s'):format(crumb, tag)
     ctx.marks[1] = { { 0, 4 + #crumb, 'CartographTitle' },
         { 4 + #crumb, -1, 'CartographDim' } }
@@ -3335,6 +3344,15 @@ function M.attach(win)
     vim.wo[win].winbar = M.winbar()  -- the mode strip, before the first render
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
+    -- keys.refresh: vim's redraw, plus a fresh LIVE sample — the live altitude shows a cached sample with its time
+    -- (CART-2088), and this is how to take a new one
+    if keys.refresh then
+        vim.keymap.set('n', keys.refresh, function ()
+            M.resample_live()
+            M.render()
+            vim.cmd('redraw!')
+        end, { buffer = M.buf, desc = 'cartograph: redraw, re-sampling the live values' })
+    end
     -- forward-declared: the CursorMoved handler + the ascend key fire these,
     -- but the helpers themselves are defined later in attach
     local sync_focus_to_view

@@ -439,8 +439,10 @@ end)
 
 -- invoke the callback of a buffer-local mapping by its lhs
 local function press(buf, lhs)
+    -- (compared as KEYCODES: nvim stores `<C-l>` as `<C-L>`, so a spelling compare misses every control key)
+    local function code(k) return vim.api.nvim_replace_termcodes(k, true, true, true) end
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
-        if m.lhs == lhs and m.callback then return m.callback() end
+        if code(m.lhs) == code(lhs) and m.callback then return m.callback() end
     end
     error('no mapping for ' .. lhs)
 end
@@ -634,4 +636,50 @@ test('self oracle: the lazy $VIMRUNTIME node extracts + splices on descend', fun
 
     vim.cmd('tabclose')
     vim.fn.delete(vr, 'rf')
+end)
+
+-- CART-2088: the live altitude's sample was cached for the session but labelled `live @ now`, so a value changed in the
+-- running process still showed its old shape under "now". The sample keeps its cache (walking it must read ONE sample),
+-- carries its TIME in the header, and keys.refresh (<C-l>) takes a new one.
+test('self oracle: the live lens names WHEN its sample was taken, and keys.refresh re-samples it (CART-2088)', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts      = require 'cartograph.providers.treesitter'
+    local store   = require 'cartograph.store'
+    local source  = require 'cartograph.panes.source'
+    local symbols = require 'cartograph.panes.symbols'
+    local cfg     = require 'cartograph.config'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local fd = assert(io.open(dir .. '/lua/modsample2088.lua', 'w'))
+    fd:write('local M = {}\nM.before = 1\nfunction M.run () return M.before end\nreturn M\n')
+    fd:close()
+    vim.opt.rtp:append(dir)
+    local live = require('modsample2088')
+    local roots = { plug = dir }
+    local data = ts.extract('self://loaded', { files = { 'plug/lua/modsample2088.lua' },
+        abs = function (f) local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r end })
+    data.provider, data.root, data.roots = 'self', 'self://loaded', roots
+    store.ingest(data)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    local function text() return table.concat(vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false), '\n') end
+    symbols.show('file', 'plug/lua/modsample2088.lua')
+    press(symbols.buf, cfg.keys.cycle) -- -> the live lens
+    local t1 = text()
+    ok(t1:find('before', 1, true), 'the sample holds M.before: ' .. t1)
+    ok(t1:find('sampled %d%d:%d%d:%d%d'), 'the header names the sample time: ' .. t1)
+    ok(not t1:find('live @ now', 1, true), 'and never claims "now"')
+    -- the running value moves; a re-render reads the SAME sample (still labelled with its time, not "now")
+    live.after = 2
+    symbols.render()
+    ok(not text():find('after', 1, true), 'the cached sample does not show it: ' .. text())
+    -- keys.refresh takes a new sample
+    press(symbols.buf, cfg.keys.refresh)
+    ok(text():find('after', 1, true), 'after <C-l> the new value is there: ' .. text())
+    vim.cmd('tabclose')
+    package.loaded['modsample2088'] = nil
+    vim.fn.delete(dir, 'rf')
 end)
