@@ -275,7 +275,7 @@ test('nav: descend a compound statement into its inner forms (block view)', func
     -- flattened summary (bnw regression: that word must NOT be followed —
     -- the compound statement opens its block regardless of the word)
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] then
+        if symbols.stmt_line(r) then
             local text = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1]
             local col = text:find('%f[%w]g%f[%W]') -- a callee token in the row
             pcall(vim.api.nvim_win_set_cursor, wsym, { r, (col or 5) - 1 })
@@ -424,7 +424,7 @@ test('nav: j/k step out of a block (sticky two-press) and back in', function ()
 
     store.pivot(f.id); symbols.show('fn', f.id)
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
+        if symbols.stmt_line(r) == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
     end
     press(keys.descend); eq('block', symbols.view.level)
     press(keys.down)                          -- move to the last form
@@ -475,7 +475,7 @@ test('nav: stepping down from a block at the function edge is a no-op', function
 
     store.pivot(f.id); symbols.show('fn', f.id)
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
+        if symbols.stmt_line(r) == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
     end
     vim.api.nvim_set_current_win(wsym)
     K[keys.descend]()
@@ -525,7 +525,7 @@ test('nav: h after a block step-out returns through the caller list it came from
     -- `if`, so the landing walks the containment chain down to it (CART-0480).
     -- It used to take two descends -- into the function, then onto the if row.
     press(keys.descend); eq('block', symbols.view.level)
-    eq(4, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]], 'at the call itself')
+    eq(4, symbols.stmt_line(vim.api.nvim_win_get_cursor(wsym)[1]), 'at the call itself')
 
     press(keys.down)  -- j: step out to the function
     press(keys.down)  -- j: commit to the function
@@ -571,7 +571,7 @@ test('nav: a statement descends into its NAMES, and the trail comes back', funct
     -- claims it and the level is what the row offers
     local target
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] == 4 then target = r break end
+        if symbols.stmt_line(r) == 4 then target = r break end
     end
     ok(target, 'the statement has a row')
     vim.api.nvim_win_set_cursor(wsym, { target, 0 })
@@ -709,7 +709,7 @@ test('pick: a row\'s names, resolved by range, labelled digits first', function 
     store.set_focus(f.id); store.pivot(f.id); symbols.show('fn', f.id)
     local target
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] == 4 then target = r break end -- the `q(cfg, x + 1)` line
+        if symbols.stmt_line(r) == 4 then target = r break end -- the `q(cfg, x + 1)` line
     end
     ok(target, 'the call statement has a row')
 
@@ -760,7 +760,7 @@ test('pick: a row\'s names, resolved by range, labelled digits first', function 
     symbols.show('fn', f.id)
     local brow
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_stmt[r] == 4 then brow = r break end
+        if symbols.stmt_line(r) == 4 then brow = r break end
     end
     local cb
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
@@ -1044,7 +1044,7 @@ test('nav: descending an occurrence lands on the statement that holds it', funct
     local landed = descend_from(r5)
     eq('fn', symbols.view.level)
     eq(f.id, symbols.view.fn)
-    eq(5, symbols.line_stmt[landed], 'lands on the statement that holds the use')
+    eq(5, symbols.stmt_line(landed), 'lands on the statement that holds the use')
 
     -- ...AND THROUGH THE FOLD. The fn altitude collapses the whole `if` onto one
     -- statement row, so stopping at the nearest anchor above left you looking at
@@ -1055,7 +1055,7 @@ test('nav: descending an occurrence lands on the statement that holds it', funct
     local depth = #symbols.trail
     landed = descend_from(r7)
     eq('block', symbols.view.level, 'it descends INTO the if, not onto it')
-    eq(7, symbols.line_stmt[landed], 'and lands on the nested use itself')
+    eq(7, symbols.stmt_line(landed), 'and lands on the nested use itself')
     -- THE RETURN PATH IS THE LANDING'S BY-PRODUCT: every step of the chain
     -- pushed the trail, so `h` walks back out the way it came in.
     eq(depth + 2, #symbols.trail, 'the chain recorded both steps')
@@ -1081,10 +1081,10 @@ test('nav: descending an occurrence lands on the statement that holds it', funct
     -- |cartograph-site| and nowhere fenced until now.
     landed = descend_from(occ_row_for(7))
     eq('block', symbols.view.level, 'l after h restores the block it left')
-    eq(7, symbols.line_stmt[landed])
+    eq(7, symbols.stmt_line(landed))
     Hb()
     eq('fn', symbols.view.level, 'H asks what encloses the block')
-    eq(6, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]],
+    eq(6, symbols.stmt_line(vim.api.nvim_win_get_cursor(wsym)[1]),
         'and lands on the `if` that holds it, not the top of the function')
 
     vim.cmd('tabclose')

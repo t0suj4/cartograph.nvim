@@ -24,7 +24,12 @@ local function full()
     local d = thin(); d.index_only = nil; return d
 end
 local function caps()
-    return lsp.handlers['initialize'](store).capabilities
+    -- (initialize NEGOTIATES the session's position encoding, CART-2092: put it back, so a later spec in this worker
+    -- does not inherit the utf-16 a capability-less client gets)
+    local enc = lsp._enc
+    local c = lsp.handlers['initialize'](store).capabilities
+    lsp._enc = enc
+    return c
 end
 
 test('index-only: the marker rides on data and store reports it', function ()

@@ -109,6 +109,18 @@ function M._row_site(st)
     row.pos, row.line = M._row_pos(st.line, st.range or st.at), nil
     return row
 end
+--- line_stmt rows (CART-2093, the same decision for the pane's OTHER per-row table): each row's statement anchor is a
+--- typed GRAPH position built here from the 1-based file line its writer has, and read ONLY through stmt_line in a
+--- named base — the ~10 `l - 1` readers had guessed the base like line_site's had.
+function M._line1_pos(line1)
+    if type(line1) ~= 'number' then return nil end
+    return P.new(line1 - 1, nil, 'GRAPH')
+end
+--- the statement line of row `r` in `base` (1 when omitted: the file line a reader means), nil when the row has none
+function M.stmt_line(r, base)
+    local p = M.line_stmt[r]
+    return p and P.line(p, base or 1) or nil
+end
 
 -- Altitudes whose ROWS ARE NODES: hovering one previews that node's definition.
 -- They share M.hover_node — the working set and the candidate list were left out
@@ -1701,7 +1713,7 @@ local function render_region(ctx, id)
         local indent = f.branch and '  ▸ ' or '    '
         ctx.lines[#ctx.lines + 1] = indent .. M.fit_text(f.text, indent)
         ctx.vnums[#ctx.lines] = tostring(f.sr + 1)
-        ctx.line_stmt[#ctx.lines] = f.sr + 1
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(f.sr + 1)
         if v then
             ctx.line_node[#ctx.lines] = v.id
             ctx.node_line[v.id]       = #ctx.lines
@@ -1876,7 +1888,7 @@ local function render_fn(ctx, id)
         ctx.lines[#ctx.lines + 1] = text
         if dim_from then ctx.marks[#ctx.lines] = { { dim_from, -1, 'CartographDim' } } end
         ctx.vnums[#ctx.lines] = tostring(s.l)
-        ctx.line_stmt[#ctx.lines] = s.l   -- 1-based file line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(s.l)   -- 1-based file line
         ctx.line_stmtidx[#ctx.lines] = i  -- index into df.stmts
         ctx.line_calls[#ctx.lines] = cs   -- call entries on this row's line
         ctx.line_vars[#ctx.lines]  = vs   -- module vars read by this statement
@@ -1924,7 +1936,7 @@ local function render_block(ctx, key)
     for _, f in ipairs(forms) do
         ctx.lines[#ctx.lines + 1] = (f.branch and '  ▸ ' or '    ') .. f.text
         ctx.vnums[#ctx.lines] = tostring(f.sr + 1)
-        ctx.line_stmt[#ctx.lines] = f.sr + 1 -- source preview/highlight anchor
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(f.sr + 1) -- source preview/highlight anchor
         if f.branch then
             ctx.line_block[#ctx.lines] =
                 ('%s\31%d\31%d\31%d\31%d'):format(fnid, f.sr, f.sc, f.er, f.ec)
@@ -2109,7 +2121,7 @@ local function render_syms(ctx, key)
     local text = (src[sr + 1] or ''):gsub('^%s+', ''):gsub('%s+$', '')
     ctx.lines[1] = ('≡ %s'):format(M.fit_text(text, '≡ '))
     ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
-    ctx.line_stmt[1] = sr + 1
+    ctx.line_stmt[1] = M._line1_pos(sr + 1)
     if #items == 0 then
         ctx.lines[2] = '  (no names here)'
         ctx.marks[2] = { { 0, -1, 'CartographDim' } }
@@ -2124,7 +2136,7 @@ local function render_syms(ctx, key)
             or '  (no node)'
         ctx.lines[#ctx.lines + 1] = '    ' .. it.text .. tail
         ctx.vnums[#ctx.lines] = tostring(it.sr + 1)
-        ctx.line_stmt[#ctx.lines] = it.sr + 1
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(it.sr + 1)
         ctx.line_syms[#ctx.lines] = it
         if target then
             ctx.line_node[#ctx.lines] = it.id
@@ -2178,7 +2190,7 @@ end
 --- @return {text:string, sr:integer, sc:integer, ec:integer, label:string, id:string?}[]
 --- @return string|nil file  the absolute path the positions address
 function M.pick_items(r)
-    local line = M.line_stmt[r]
+    local line = M.stmt_line(r)
     if not line then return {}, nil end
     local id = M.row_subject(r)
     local n = id and store.node(id)
@@ -2335,7 +2347,7 @@ local function render_lints(ctx, fn_id)
         ctx.marks[#ctx.lines] = f.hedged
             and { { 0, 1, 'CartographFrontier' } } or nil
         ctx.vnums[#ctx.lines] = tostring(f.line)
-        ctx.line_stmt[#ctx.lines] = f.line -- the fn hover highlights this line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(f.line) -- the fn hover highlights this line
         ctx.line_kind[#ctx.lines] = 'lint'
         -- a KEY, not an index: the row survives a re-render, and the compartment
         -- re-derives the finding from source rather than holding a stale copy
@@ -2418,7 +2430,7 @@ local function render_lintact(ctx, key)
         return note(ctx, '⚠ this finding is no longer reported here — the source'
             .. ' changed since the roster was drawn', 'CartographFrontier')
     end
-    ctx.line_stmt[1] = f.line
+    ctx.line_stmt[1] = M._line1_pos(f.line)
     ctx.vnums[1] = tostring(f.line)
     -- THE OFFENDING NODE, before any prose. Asked for as "the explanations would show
     -- offending nodes on the surface": the code the rule actually objected to is a
@@ -2456,7 +2468,7 @@ local function render_lintact(ctx, key)
         ctx.lines[#ctx.lines + 1] = '  ▸ un-suppress'
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
         ctx.line_act[#ctx.lines] = { verb = 'unsuppress', file = file, lnum = f.line }
-        ctx.line_stmt[#ctx.lines] = f.line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(f.line)
     else
         local ok, why = require('cartograph.suppress').lead_for(file or '')
         if ok then
@@ -2464,7 +2476,7 @@ local function render_lintact(ctx, key)
             ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
             ctx.line_act[#ctx.lines] = { verb = 'suppress', file = file,
                 lnum = f.line, rule = f.rule }
-            ctx.line_stmt[#ctx.lines] = f.line
+            ctx.line_stmt[#ctx.lines] = M._line1_pos(f.line)
         else
             note(ctx, '⊘ cannot suppress — ' .. tostring(why), 'CartographFrontier')
         end
@@ -2510,7 +2522,7 @@ local function render_unread(ctx, fn_id)
             M.fit_identity(u.t or '<unnamed>', '? ', ''))
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
         ctx.vnums[#ctx.lines] = tostring(u.line)
-        ctx.line_stmt[#ctx.lines] = u.line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(u.line)
         -- the node's own byte-range, so the source pane marks the CONSTRUCT and not
         -- merely its line: every expr node carries .at by construction
         -- (a row's position is a typed `pos` since CART-2086; this was CART-2087's stopgap site. u.line is the
@@ -2561,7 +2573,7 @@ local function render_suppressed(ctx, fn_id)
             M.fit_identity(f.rule or '?', '∅ ', ''))
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         ctx.vnums[#ctx.lines] = tostring(f.line)
-        ctx.line_stmt[#ctx.lines] = f.line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(f.line)
         ctx.line_kind[#ctx.lines] = 'lint'
         -- the SAME key a live finding carries: one compartment serves both, and it
         -- offers un-suppress precisely when the finding it re-derives is hushed
@@ -2624,7 +2636,7 @@ local function render_protos(ctx)
             ctx.vnums[#ctx.lines] = tostring(p.line)
             ctx.line_proto[#ctx.lines] = pr.key(m.file, i)
             ctx.line_file[#ctx.lines] = m.file
-            ctx.line_stmt[#ctx.lines] = p.line
+            ctx.line_stmt[#ctx.lines] = M._line1_pos(p.line)
             ctx.line_kind[#ctx.lines] = 'proto'
         end
     end
@@ -2649,7 +2661,7 @@ local function render_proto(ctx, key)
     ctx.lines[1] = M.fit_identity(name, '', btail) .. btail
     ctx.marks[1] = { { 0, -1, 'CartographTitle' } }
     ctx.line_file[1] = file
-    ctx.line_stmt[1] = rec.line
+    ctx.line_stmt[1] = M._line1_pos(rec.line)
     ctx.line_kind[1] = 'proto'
     if rec.base then
         local base = ('%s/%s'):format(rec.base.type, rec.base.name)
@@ -2674,7 +2686,7 @@ local function render_proto(ctx, key)
             ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
             ctx.vnums[#ctx.lines] = tostring(f.line)
             ctx.line_file[#ctx.lines] = file
-            ctx.line_stmt[#ctx.lines] = f.line
+            ctx.line_stmt[#ctx.lines] = M._line1_pos(f.line)
             ctx.line_kind[#ctx.lines] = 'frontier'
             fi = fi + 1
         end
@@ -2690,7 +2702,7 @@ local function render_proto(ctx, key)
             .. M.fit_identity(o.path or '?', '  ', mark) .. mark
         ctx.vnums[#ctx.lines] = tostring(o.line)
         ctx.line_file[#ctx.lines] = file
-        ctx.line_stmt[#ctx.lines] = o.line
+        ctx.line_stmt[#ctx.lines] = M._line1_pos(o.line)
         ctx.line_kind[#ctx.lines] = 'override'
     end
     frontiers_upto(nil)
@@ -3160,7 +3172,7 @@ function M.show(level, ctx_val)
     if M.win and vim.api.nvim_win_is_valid(M.win) then
         local first = 1
         for row = 1, vim.api.nvim_buf_line_count(M.buf) do
-            if M.line_node[row] or M.line_stmt[row] or M.line_site[row] or M.line_state[row]
+            if M.line_node[row] or M.stmt_line(row) or M.line_site[row] or M.line_state[row]
                 or M.line_lit[row] or M.line_block[row]
                 or (level == 'files' and M.line_file[row]) then
                 first = row
@@ -3422,14 +3434,14 @@ function M.attach(win)
                                         view = { name = 'nbhd' } })
                                 end
                             end
-                        elseif M.view.level == 'region' and M.line_stmt[r] then
+                        elseif M.view.level == 'region' and M.stmt_line(r) then
                             -- a region's STATEMENT rows are not node rows, and this
                             -- branch used to end here: hover_node declined and
                             -- nothing happened, so the source kept whatever the last
                             -- row had lit. They highlight their line, as fn does.
                             local n = store.node(M.view.region)
                             if n then
-                                local l = M.line_stmt[r]
+                                local l = M.stmt_line(r)
                                 store.set_highlight({ file = n.file, ranges = {
                                     { start = { line = l - 1, char = 0 },
                                       ['end'] = { line = l, char = 0 } } } })
@@ -3450,7 +3462,7 @@ function M.attach(win)
                     -- a line, so hover previews the declaring line in that
                     -- module (the FSM-anchor law satisfied by the module, whose
                     -- id IS its file path)
-                    local l, f = M.line_stmt[r], M.line_file[r]
+                    local l, f = M.stmt_line(r), M.line_file[r]
                     local mid = f and module_id(f)
                     if l and mid and store.node(mid) then
                         store.set_context({ node = mid, ranges = {
@@ -3490,14 +3502,14 @@ function M.attach(win)
                         store.set_highlight({ file = n.file, ranges = {
                             { start = { line = it.sr, char = it.sc },
                               ['end'] = { line = it.sr, char = it.ec } } } })
-                    elseif n and M.line_stmt[r] then -- the header row
-                        local l = M.line_stmt[r]
+                    elseif n and M.stmt_line(r) then -- the header row
+                        local l = M.stmt_line(r)
                         store.set_highlight({ file = n.file, ranges = {
                             { start = { line = l - 1, char = 0 },
                               ['end'] = { line = l, char = 0 } } } })
                     end
                 elseif M.view.level == 'fn' or M.view.level == 'block' then
-                    local l = M.line_stmt[r]
+                    local l = M.stmt_line(r)
                     local fnid = M.view.level == 'fn' and M.view.fn
                         or (M.view.block or ''):match('^(.-)\31')
                     local n = fnid and store.node(fnid)
@@ -3623,9 +3635,9 @@ function M.attach(win)
         if not (line1 and M.win and vim.api.nvim_win_is_valid(M.win)) then return end
         local best
         for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-            local l = M.line_stmt[r]
+            local l = M.stmt_line(r)
             if l == line1 then return r end
-            if l and l < line1 and (not best or l > M.line_stmt[best]) then best = r end
+            if l and l < line1 and (not best or l > M.stmt_line(best)) then best = r end
         end
         return best
     end
@@ -3637,7 +3649,7 @@ function M.attach(win)
     local function block_key_at(r)
         if M.line_block[r] then return M.line_block[r] end
         if M.view.level ~= 'fn' then return nil end
-        local node, sl = store.node(M.view.fn), M.line_stmt[r]
+        local node, sl = store.node(M.view.fn), M.stmt_line(r)
         if not (node and sl) then return nil end
         if #require('cartograph.providers.treesitter')
             .forms(store.abspath(node), sl - 1) == 0 then return nil end
@@ -3657,7 +3669,7 @@ function M.attach(win)
             local r = row_for_line(line1)
             if not r then return end
             pcall(vim.api.nvim_win_set_cursor, M.win, { r, 2 })
-            if M.line_stmt[r] == line1 then break end
+            if M.stmt_line(r) == line1 then break end
             local key = block_key_at(r)
             if not key then break end
             push_trail()
@@ -3841,7 +3853,7 @@ function M.attach(win)
     --- The symbols key for row `r`, plus how many of its names RESOLVE. Used twice:
     --- to decide whether the level is worth opening at all, and to open it.
     local function syms_at(r)
-        local sl = M.line_stmt[r]
+        local sl = M.stmt_line(r)
         local id = M.subject('def') or M.row_subject(r)
         if not (sl and id and store.node(id)) then return nil, 0, 0 end
         local key = syms_key(id, sl - 1)
@@ -4013,7 +4025,7 @@ function M.attach(win)
         end
         -- 7. LAST: the names, even when none of them resolve -- "this statement names
         -- x and y, and neither has a node" is an answer; nothing happening is not.
-        if not M.line_stmt[r] then return enter_declaring_file(r) end
+        if not M.stmt_line(r) then return enter_declaring_file(r) end
         enter_syms(r)
     end
     -- a row in a live-value view: a sub-table descends deeper (the live
@@ -4531,7 +4543,7 @@ function M.attach(win)
     local function content_rows()
         local rows = {}
         for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-            if M.line_stmt[r] then rows[#rows + 1] = r end
+            if M.stmt_line(r) then rows[#rows + 1] = r end
         end
         return rows
     end
@@ -4633,7 +4645,7 @@ function M.attach(win)
         return M.line_node[r]
     end
     local function row_desc(r)
-        return { line = M.line_stmt[r], tag = row_tag(r) }
+        return { line = M.stmt_line(r), tag = row_tag(r) }
     end
     -- place the cursor for `desc` and report how well it matched:
     --   'exact' the node itself is a row here (a tagged item; or, for a bare
@@ -4645,7 +4657,7 @@ function M.attach(win)
         if not desc then return nil end
         local exact, ghost, near
         for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-            local rl, rt = M.line_stmt[r], row_tag(r)
+            local rl, rt = M.stmt_line(r), row_tag(r)
             if desc.tag then
                 -- match tag AND line: the same var read in two statements shares
                 -- a tag, so the line disambiguates which occurrence
@@ -4655,7 +4667,7 @@ function M.attach(win)
                 exact = r; break -- a bare statement IS its same-line row
             end
             if desc.line and rl and rl <= desc.line
-                and (not near or rl > (M.line_stmt[near] or -1)) then near = r end
+                and (not near or rl > (M.stmt_line(near) or -1)) then near = r end
         end
         local target = exact or ghost or near
         if target then pcall(vim.api.nvim_win_set_cursor, win, { target, 2 }) end
@@ -4772,7 +4784,7 @@ function M.attach(win)
         local n = store.node((M.row_subject(r)))
         local file = (site and site.file) or (n and n.file) or M.line_file[r]
         if not file then return end
-        local lnum = (site and site.pos and P.line(site.pos, 1)) or (M.view.level == 'fn' and M.line_stmt[r])
+        local lnum = (site and site.pos and P.line(site.pos, 1)) or (M.view.level == 'fn' and M.stmt_line(r))
             or (n and atr.sl(n.range) + 1) or 1
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
         pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })

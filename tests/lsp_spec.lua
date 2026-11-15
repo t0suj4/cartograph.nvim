@@ -46,6 +46,13 @@ local function at(file, line, character)
 end
 local function H(method, params) return lsp.handlers[method](store, params) end
 
+-- ★ THE ENCODING IS NEGOTIATED SESSION STATE (CART-2092), and these fixtures have no files on disk, so a column can
+-- cross the wire only as bytes. Negotiate it HERE rather than inherit whatever the last `initialize` in this worker
+-- left: indexonly_honesty_spec initializes with no client capabilities (utf-16, correctly), and when the parallel
+-- runner put it first in this worker, ten of these tests answered vim.NIL.
+local NVIM_CAPS = { capabilities = { general = { positionEncodings = { 'utf-8', 'utf-16', 'utf-32' } } } }
+H('initialize', NVIM_CAPS)
+
 test('lsp: definition on a resolved call -> the target Location', function ()
     store.ingest(DATA)
     local r = H('textDocument/definition', at('a.lua', 1, 5))
@@ -171,8 +178,6 @@ test('lsp: workspace/symbol matches exact + tail + substring', function ()
 end)
 
 -- (what nvim's client offers; the encoding is NEGOTIATED since CART-2092)
-local NVIM_CAPS = { capabilities = { general = { positionEncodings = { 'utf-8', 'utf-16', 'utf-32' } } } }
-
 test('lsp: initialize advertises only the served capabilities', function ()
     local c = H('initialize', NVIM_CAPS).capabilities
     eq(true, c.definitionProvider); eq(true, c.referencesProvider)

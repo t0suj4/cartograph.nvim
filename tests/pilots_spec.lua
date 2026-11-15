@@ -214,7 +214,7 @@ test('compartment: rows carry an ANCHOR (file + line) and a KEY to descend',
     local key, anchored
     for r, k in pairs(symbols.line_proto) do
         key = k
-        anchored = symbols.line_file[r] and symbols.line_stmt[r]
+        anchored = symbols.line_file[r] and symbols.stmt_line(r)
     end
     ok(key, 'a roster row carries a prototype key')
     ok(anchored, 'and a file+line anchor, which is what hover previews')
