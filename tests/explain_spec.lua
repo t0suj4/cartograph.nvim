@@ -176,8 +176,11 @@ test('coverage: an unread row\'s line_site.line is the 0-based start of its rang
     for i = 2, #rows do
         local s = symbols.line_site[i]
         if s and s.range then
-            eq(atr.sl(s.range), s.line, 'row ' .. i .. ': line is the range start (0-based)')
-            ok(want[s.line + 1], ('row %d: gf opens line %d, an unread construct\'s own line'):format(i, s.line + 1))
+            -- (since CART-2086 the row carries a typed GRAPH `pos`, read in a named base)
+            local P = require 'cartograph.pos'
+            eq(atr.sl(s.range), P.line(s.pos, 0), 'row ' .. i .. ': line is the range start (0-based)')
+            eq(0, s.pos.lb, 'the row position is a GRAPH position')
+            ok(want[P.line(s.pos, 1)], ('row %d: gf opens line %d, an unread construct\'s own line'):format(i, P.line(s.pos, 1)))
             checked = checked + 1
         end
     end

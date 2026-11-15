@@ -19,6 +19,12 @@ local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local concerns = require 'cartograph.panes.concerns'
 local altitudes = require 'cartograph.panes.altitudes'
+local P = require 'cartograph.pos'
+-- ★ A ROW'S POSITION IS A TYPED VALUE (CART-2086, the user's decision 2026-11-15: a position table per rendered row,
+-- built from the cartograph.pos PROFILES, never an ad-hoc table). line_site rows carried a bare `line` whose base each
+-- reader guessed (`site.line + 1`), and one altitude wrote it 1-based among 0-based ones (CART-2087). A row now carries
+-- `pos` (GRAPH: 0-based line, 0-based byte column when its range starts on that line); readers ask
+-- `P.line(site.pos, 1)` for a 1-based line. There is no bare `line` field left to misread.
 local axes = require 'cartograph.panes.axes'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
@@ -92,6 +98,17 @@ local M = {
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
+function M._row_pos(line0, range)
+    if range and atr.sl(range) == line0 then return P.of_range(range) end
+    return P.new(line0, nil, 'GRAPH')
+end
+--- an occurrence record as a row: a copy carrying `pos`, its bare `line` dropped
+function M._row_site(st)
+    local row = {}
+    for k, v in pairs(st) do row[k] = v end
+    row.pos, row.line = M._row_pos(st.line, st.range or st.at), nil
+    return row
+end
 
 -- Altitudes whose ROWS ARE NODES: hovering one previews that node's definition.
 -- They share M.hover_node — the working set and the candidate list were left out
@@ -853,7 +870,7 @@ local function render_sites(ctx, node, icon, label, sites, empty_note, unavailab
             ctx.lines[#ctx.lines + 1] = text
             if st.inferred then ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } } end
             ctx.vnums[#ctx.lines] = tostring(st.line + 1)
-            ctx.line_site[#ctx.lines] = st
+            ctx.line_site[#ctx.lines] = M._row_site(st)
             -- the row is ABOUT the using function (descend still opens the
             -- site, not the fn — that separation is line_about's whole reason)
             ctx.line_about[#ctx.lines] = g.fn
@@ -1124,7 +1141,7 @@ local function render_regfor(ctx, id)
             -- function from several places in its data, and the label can only
             -- print the first
             ctx.line_site[#ctx.lines] = { fn = r.from, file = r.from,
-                line = line, range = at, ranges = r.at, reg = true }
+                pos = M._row_pos(line, at), range = at, ranges = r.at, reg = true }
         end
     end
     if #regs == 0 then
@@ -1409,7 +1426,7 @@ local function render_axis(ctx, key)
                 .. (m.guarded and '  (guarded)' or '')
             ctx.vnums[#ctx.lines] = tostring((m.line or 0) + 1)
             ctx.line_site[#ctx.lines] = { fn = m.fn, file = m.file,
-                line = m.line, range = m.range, def = m.def, var = m.var,
+                pos = M._row_pos(m.line, m.range), range = m.range, def = m.def, var = m.var,
                 ranges = m.ranges }
             ctx.line_about[#ctx.lines] = m.fn or m.var
         elseif m.node then
@@ -1502,7 +1519,7 @@ local function render_occs(ctx, key)
         ctx.lines[#ctx.lines + 1] = '  ' .. t
         ctx.vnums[#ctx.lines] = tostring(rsl + 1)
         ctx.line_site[#ctx.lines] = { fn = fnid, name = fname, file = fn.file,
-            line = rsl, range = r }
+            pos = M._row_pos(rsl, r), range = r }
         -- every occurrence row is about the function whose body holds it
         ctx.line_about[#ctx.lines] = fnid
     end
@@ -2423,7 +2440,7 @@ local function render_lintact(ctx, key)
             ctx.marks[#ctx.lines] = { { 0, 1, 'CartographFrontier' } }
             ctx.vnums[#ctx.lines] = tostring(sl + 1)
             ctx.line_site[#ctx.lines] = { fn = fn_id, file = node.file,
-                line = sl, range = nd.at }
+                pos = M._row_pos(sl, nd.at), range = nd.at }
         end
     end
     -- EXPLAIN: the message the 30-column row could not carry. Chrome, not an action.
@@ -2496,12 +2513,12 @@ local function render_unread(ctx, fn_id)
         ctx.line_stmt[#ctx.lines] = u.line
         -- the node's own byte-range, so the source pane marks the CONSTRUCT and not
         -- merely its line: every expr node carries .at by construction
-        -- (line_site.line is 0-BASED on every altitude — gf, descend and region_at all add 1 — and u.line is the
+        -- (a row's position is a typed `pos` since CART-2086; this was CART-2087's stopgap site. u.line is the
         -- 1-based line this row PRINTS: it was stored here as-is, so gf / descend opened ONE LINE BELOW the construct.
         -- STOPGAP, CART-2087: the start of the construct's own range; the typed offset (CART-2086) is the real fix)
         if u.at then
             ctx.line_site[#ctx.lines] = { fn = fn_id, file = node.file,
-                line = atr.sl(u.at), range = u.at }
+                pos = M._row_pos(atr.sl(u.at), u.at), range = u.at }
         end
     end
     if #set == 0 then
@@ -4161,7 +4178,7 @@ function M.attach(win)
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
-                return enter('fn', s.fn, s.fn, s.line and s.line + 1)
+                return enter('fn', s.fn, s.fn, s.pos and P.line(s.pos, 1))
             end
             -- a WRITES row: the function that sets this var
             local wn = store.node(M.line_node[r])
@@ -4180,13 +4197,13 @@ function M.attach(win)
                 store.set_context(nil)
                 local lvl, key = altitudes.up_of_node(st.var, store)
                 if lvl then
-                    enter(lvl, key, nil, st.line and st.line + 1)
+                    enter(lvl, key, nil, st.pos and P.line(st.pos, 1))
                 end
                 return
             end
             if st and store.node(st.fn) then
                 store.set_context(nil)
-                return enter('fn', st.fn, st.fn, st.line and st.line + 1)
+                return enter('fn', st.fn, st.fn, st.pos and P.line(st.pos, 1))
             end
             local n = store.node(M.line_node[r])
             if n then
@@ -4201,7 +4218,7 @@ function M.attach(win)
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
-                enter('fn', s.fn, s.fn, s.line and s.line + 1)
+                enter('fn', s.fn, s.fn, s.pos and P.line(s.pos, 1))
             end
         elseif M.view.level == 'refused' then
             -- a candidate row: jump into that def (a real fork taken)
@@ -4291,9 +4308,9 @@ function M.attach(win)
             local st = M.line_site[r]
             local f = M.line_file[r]
             store.set_context(nil)
-            if st and st.line then
-                local rid = altitudes.region_at(st.file, st.line, store)
-                if rid then return enter('region', rid, nil, st.line + 1) end
+            if st and st.pos then
+                local rid = altitudes.region_at(st.file, P.line(st.pos, 0), store)
+                if rid then return enter('region', rid, nil, P.line(st.pos, 1)) end
             end
             if f then enter('file', f) end
         end
@@ -4755,7 +4772,7 @@ function M.attach(win)
         local n = store.node((M.row_subject(r)))
         local file = (site and site.file) or (n and n.file) or M.line_file[r]
         if not file then return end
-        local lnum = (site and site.line + 1) or (M.view.level == 'fn' and M.line_stmt[r])
+        local lnum = (site and site.pos and P.line(site.pos, 1)) or (M.view.level == 'fn' and M.line_stmt[r])
             or (n and atr.sl(n.range) + 1) or 1
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
         pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })

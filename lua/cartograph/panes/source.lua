@@ -427,8 +427,10 @@ function M.cursor_address(win)
     end
     local cword
     vim.api.nvim_win_call(win, function () cword = vim.fn.expand('<cword>') end)
-    return { node = node.id, file = node.file, line = fl, col = col, cword = cword ~= '' and cword or nil,
-        base = { line = 0, col = 0, unit = 'byte' } }
+    -- (a typed GRAPH position — 0-based line, 0-based byte column — not a bare pair with a hand-written base: CART-2086;
+    -- nil on a header row / an alternate view)
+    return { node = node.id, file = node.file, cword = cword ~= '' and cword or nil,
+        pos = fl and require('cartograph.pos').new(fl, col, 'GRAPH') or nil }
 end
 
 function M.attach(win)
@@ -446,7 +448,8 @@ function M.attach(win)
             vim.defer_fn(function ()
                 if mine ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local a = M.cursor_address(win)
-                local key = a and table.concat({ a.node, tostring(a.line), tostring(a.col), a.cword or '' }, '\31') or ''
+                local key = a and table.concat({ a.node, tostring(a.pos and a.pos.line), tostring(a.pos and a.pos.col),
+                    a.cword or '' }, '\31') or ''
                 if key == last then return end
                 last = key
                 store.set_source_cursor(a)

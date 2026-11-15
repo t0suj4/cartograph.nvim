@@ -1800,8 +1800,8 @@ end
 -- source pane could drive no linked pane and no gesture without a key press, while the browser publishes through
 -- symbols.view / loc_provider. Published on a SETTLED cursor move (debounced, deduped, no re-render), the same channel
 -- shape as context: `source_cursor` is the value (per band, like `context`), `_srccur_subs` the subscribers (session
--- wiring: SESSION_GLOBAL). An address: { node, file, line, col, cword, base = { line = 0, col = 0, unit = 'byte' } } —
--- line / col nil on a header row; the base travels with the numbers (the typed offset is CART-2086).
+-- wiring: SESSION_GLOBAL). An address: { node, file, cword, pos } — `pos` a typed cartograph.pos GRAPH position (0-based
+-- line, 0-based byte column; CART-2086), nil on a header row.
 M._srccur_subs = {}
 --- Subscribe to the source pane's cursor address. Returns an unsubscribe function.
 function M.on_source_cursor(fn)

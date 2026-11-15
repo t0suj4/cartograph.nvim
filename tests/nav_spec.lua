@@ -1030,7 +1030,7 @@ test('nav: descending an occurrence lands on the statement that holds it', funct
         symbols.render()
         for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
             local s = symbols.line_site[r]
-            if s and s.line + 1 == line1 then return r end
+            if s and s.pos and require('cartograph.pos').line(s.pos, 1) == line1 then return r end
         end
     end
     local function descend_from(r)

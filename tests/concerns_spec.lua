@@ -195,7 +195,7 @@ test('regfor: a registrant row is anchored at the REGISTRATION, not the file hea
     ok(srow, 'the registrant row carries a site')
     local st = symbols.line_site[srow]
     eq('reg.lua', st.file)
-    eq(7, st.line, 'the line the registration is written on, not 0')
+    eq(7, require('cartograph.pos').line(st.pos, 0), 'the line the registration is written on, not 0')
     eq(2, #st.ranges, 'and EVERY occurrence, since one module can register twice')
     ok(st.reg, 'marked as a registration site')
 end)
