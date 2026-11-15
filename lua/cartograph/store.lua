@@ -1923,16 +1923,23 @@ function M.node(id) return id and M.by_id[id] or nil end
 --- makes an EMPTY answer meaningful — a module spans its file, so including it would
 --- put every position inside something and "outside every definition" (a comment, an
 --- import, a top-level statement) could never be said.
+--- ★ BOTH COORDINATES ARE 1-BASED (CART-2091), the agent's convention: `line` was compared 1-based (sl + 1) while
+--- `col` was compared against the raw 0-based byte columns, so a column-qualified query was off by one at both edges
+--- — the byte just before a callback opened read as inside it. The column is converted once, here (the typed
+--- position that carries its base is CART-2086).
+---@param line integer 1-based
+---@param col integer? 1-based byte column
 ---@return table[] nodes, innermost first; empty when the position is in no definition
 function M.defs_at(file, line, col)
     local at = require 'cartograph.at'
+    local c0 = col and (col - 1) -- the stored columns are 0-based bytes
     local rows = {}
     for _, n in ipairs(M.by_file[file] or {}) do
         if n.range then
             local sl, sc = at.sl(n.range) + 1, at.sc(n.range)
             local el, ec = at.el(n.range) + 1, at.ec(n.range)
-            local after_start = sl < line or (sl == line and (col == nil or sc <= col))
-            local before_end = el > line or (el == line and (col == nil or ec >= col))
+            local after_start = sl < line or (sl == line and (c0 == nil or sc <= c0))
+            local before_end = el > line or (el == line and (c0 == nil or ec >= c0))
             if after_start and before_end then
                 rows[#rows + 1] = { node = n,
                     span = (el - sl) * 1e6 + (ec - sc) }

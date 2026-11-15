@@ -351,4 +351,10 @@ test('store.defs_at: a COLUMN separates two definitions sharing a line', functio
     local left = store.defs_at('h.lua', 3, 5)
     eq(1, #left, 'column 5 is before the callback opens, so only the wrapper contains it')
     eq('h.lua::wrap', left[1].id)
+    -- CART-2091: the column is 1-BASED like the line. cb opens at 0-based byte 20 = 1-based column 21; column 20 is the
+    -- byte BEFORE it (it read as inside cb when the column was compared 0-based against a 1-based line)
+    local before = store.defs_at('h.lua', 3, 20)
+    eq(1, #before, 'the byte just before the callback opens is in the wrapper only')
+    eq('h.lua::wrap', before[1].id)
+    eq('h.lua::cb', store.defs_at('h.lua', 3, 21)[1].id, 'its first byte is in the callback')
 end)
