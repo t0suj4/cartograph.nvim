@@ -1202,9 +1202,60 @@ local function v_why(store, args)
     local file, why, hits = resolve_file(store, args.file)
     if not file then return unknown_file(store, args.file, why, hits, 'file') end
     local line = math.floor(tonumber(args.line) or 0)
+    local lsp = require 'cartograph.lsp'
+    -- ★ NO `col` = EVERY CALL ON THE LINE (CART-0684). A defaulted col 1 SUBSTITUTED the question: it landed on the
+    -- enclosing definition and answered kind 'def', which read as "this verb cannot see calls" — two wrong findings in
+    -- one session (prov "missing", class-literal return inference "absent"; both shipped). The columns are what the
+    -- caller is trying to discover, so with none given each call record STARTING on the line answers, in column order,
+    -- each row as a positioned call answers plus its `col`; the enclosing definition rides BESIDE them as a def row,
+    -- never instead of them, and a line with no call record says so in a note.
+    if args.col == nil or args.col == vim.NIL then
+        local l0 = math.max(0, line - 1)
+        local calls = {}
+        for _, c in ipairs(store.topo():calls_of(file)) do
+            if c.at and atr.sl(c.at) == l0 then calls[#calls + 1] = c end
+        end
+        table.sort(calls, function (a, b)
+            if atr.sc(a.at) ~= atr.sc(b.at) then return atr.sc(a.at) < atr.sc(b.at) end
+            return atr.ec(a.at) < atr.ec(b.at)
+        end)
+        local subject = { kind = 'position', file = file, line = line }
+        local rows, notes, ts = {}, {}, {}
+        for _, c in ipairs(calls) do
+            local r = lsp.why_call(store, c)
+            r.line, r.col = line, atr.sc(c.at) + 1
+            rows[#rows + 1] = r
+            if r.status == 'resolved' or r.status == 'hedged' then ts[#ts + 1] = r.tier
+            elseif r.status == 'refused' then
+                notes[#notes + 1] = { kind = 'refusal-is-the-answer', premise = r.rule, col = r.col,
+                    why = ('the call at col %d was REFUSED between %d candidate(s) — the answer is "a rule declined", NOT "it calls nothing"'):format(r.col, r.candidates or 0) }
+            else
+                notes[#notes + 1] = { kind = 'frontier-is-the-answer', col = r.col,
+                    why = ('a call is recorded at col %d and the resolver produced no target and no refusal — nothing was concluded about it'):format(r.col) }
+            end
+        end
+        -- the enclosing definition: the innermost node covering the first call (or the line's start)
+        local n = lsp.node_at(store, file, l0, calls[1] and atr.sc(calls[1].at) or 0)
+        if n then rows[#rows + 1] = { kind = 'def', name = n.name, node = n.id, exported = n.exported } end
+        if #calls == 0 then
+            if not n then
+                local mod = module_of(store, file)
+                return { subject = subject, result = {}, absence = 'frontier', absence_why = {
+                    premise = mod and mod.unparsed and 'unparsed' or 'nothing-modelled-here',
+                    why = mod and mod.unparsed and 'this file never parsed — nothing at any position in it was analysed'
+                        or 'no call record starts on this line and no definition covers it — from here "nothing is there" and "the extractor does not model what is" are INDISTINGUISHABLE',
+                    evidence = { file = file, line = line } } }
+            end
+            notes[#notes + 1] = { kind = 'no-call-on-line',
+                why = 'no call record starts on this line: the one row is the ENCLOSING DEFINITION, context, not an answer about calls — and not a claim that nothing is called here unmodelled' }
+        else
+            notes[#notes + 1] = { kind = 'line-mode',
+                why = ('no `col` given: every call record starting on line %d, in column order (%d), then the enclosing definition as context. Pass `col` for one position'):format(line, #calls) }
+        end
+        return { subject = subject, result = rows, tier = floor_tier(ts), notes = notes }
+    end
     local col = math.floor(tonumber(args.col) or 1)
     local subject = { kind = 'position', file = file, line = line, col = col }
-    local lsp = require 'cartograph.lsp'
     -- the handler speaks LSP: 0-based line/character, and a uri. Our surface is
     -- 1-based (agentq's), so the conversion lives HERE, at the seam.
     local ans = lsp.handlers['cartograph/why'](store, {
@@ -1524,6 +1575,12 @@ local function v_cone(store, args)
         return tostring(x.line) < tostring(y.line)
     end)
     local notes = { refnote }
+    -- (an OMITTED direction picked the question — out vs in are opposite answers about one node, and nothing in the
+    -- rows says which was asked: the CART-0684 audit's one other SUBSTITUTING default. Said, not changed)
+    if args.direction == nil or args.direction == NUL then
+        notes[#notes + 1] = { kind = 'defaulted-direction', premise = 'direction', evidence = { direction = dir },
+            why = 'no `direction` given: this is the OUT cone — what this node REACHES. Pass direction = "in" for what reaches it' }
+    end
     if #rows > 0 then
         -- THE HEADLINE, AND EXACTLY WHAT IT QUANTIFIES OVER. A path floor would
         -- need the path, and cone.reachable is a set BFS that does not keep one
@@ -4280,15 +4337,15 @@ M.VERBS = {
         refuses = { 'ambiguous-file', 'unknown-file' },
         summary = 'the honesty record for what is at file:line — how a call resolved, or which rule refused it',
         subject = 'position',
-        -- `why` answers about ONE position, so its result is one row and floor
-        -- and peak coincide. Declaring the floor anyway keeps the field total:
-        -- an agent never has to special-case a missing quantifier.
+        -- with `col`, `why` answers about ONE position: one row, floor and peak
+        -- coincide. Without it, every call on the line (CART-0684), and the
+        -- headline is the floor over their rungs.
         tier_basis = 'mixed', tier_headline = 'floor', needs_calls = true,
         absences = { 'frontier' },
         args = {
             { name = 'file', type = 'string', required = true, desc = 'path relative to the graph root' },
             { name = 'line', type = 'integer', required = true, desc = '1-based line' },
-            { name = 'col', type = 'integer', desc = '1-based column (default 1)' },
+            { name = 'col', type = 'integer', desc = '1-based column; omitted = EVERY call starting on the line, in column order (each row carries its col), plus the enclosing definition as a context row' },
         },
         run = v_why,
     },

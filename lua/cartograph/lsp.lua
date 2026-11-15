@@ -435,31 +435,35 @@ end
 
 -- ── cartograph/* — namespaced honesty/graph extensions (standard methods stay
 -- strictly standard; these carry what no standard method can express) ────────
+-- the honesty row of ONE call record (shared with the agent's line mode, CART-0684)
+local function why_call(store, c)
+    if c.to then
+        return { kind = 'call', callee = callrec.callee(c),
+            status = c.hedge and 'hedged' or 'resolved', target = c.to,
+            tier = store.topo():tier(c.fn, c.to) or 'matched',
+            hedge = c.hedge and c.hedge.rule or nil, prov = c.prov }
+    elseif c.refused then
+        return { kind = 'call', callee = callrec.callee(c), status = 'refused',
+            rule = c.refused.rule,
+            -- the FORK'S width, not the stored list's: `cands` is capped at
+            -- 8 (tsutil.refusal), `n` is the real count (CART-0548). SAY BOTH
+            -- (CART-0682): a caller that navigates the fork gets only the
+            -- retained ids, and until this said so, two verbs answered 8 and
+            -- 19 about one refusal with nothing naming the difference.
+            candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0,
+            candidates_kept = c.refused.cands and #c.refused.cands or nil,
+            truncated = tsutil.truncated(c.refused) or nil,
+            witness = c.refused.witness }
+    end
+    return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }
+end
+M.why_call, M.node_at = why_call, node_at
+
 M.handlers['cartograph/why'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
     local p = params.position
     local c = call_at(store, file, p.line, p.character)
-    if c then
-        if c.to then
-            return { kind = 'call', callee = callrec.callee(c),
-                status = c.hedge and 'hedged' or 'resolved', target = c.to,
-                tier = store.topo():tier(c.fn, c.to) or 'matched',
-                hedge = c.hedge and c.hedge.rule or nil, prov = c.prov }
-        elseif c.refused then
-            return { kind = 'call', callee = callrec.callee(c), status = 'refused',
-                rule = c.refused.rule,
-                -- the FORK'S width, not the stored list's: `cands` is capped at
-                -- 8 (tsutil.refusal), `n` is the real count (CART-0548). SAY BOTH
-                -- (CART-0682): a caller that navigates the fork gets only the
-                -- retained ids, and until this said so, two verbs answered 8 and
-                -- 19 about one refusal with nothing naming the difference.
-                candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0,
-                candidates_kept = c.refused.cands and #c.refused.cands or nil,
-                truncated = tsutil.truncated(c.refused) or nil,
-                witness = c.refused.witness }
-        end
-        return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }
-    end
+    if c then return why_call(store, c) end
     local n = node_at(store, file, p.line, p.character)
     -- `exported = n.exported`, NOT `or false` (CART-0231): an absent key says the
     -- language has no visibility concept, where `false` would assert privacy we did

@@ -492,3 +492,44 @@ test('agent: node_find takes `name` as an alias of `query`, mentions `query` as 
     for _, r in ipairs(gi.result) do if r.verb == 'node_find' then row = r end end
     eq({ 'name -> query' }, row and row.aliases)
 end)
+
+-- CART-0684: `why` with no `col` defaulted to column 1, landed on the ENCLOSING DEFINITION and answered kind 'def' —
+-- which read as "this verb cannot see calls" and produced two wrong findings. No col = every call on the line, in
+-- column order, each carrying its col; the definition rides BESIDE them, and a call-free line says so.
+test('why: no col answers EVERY call on the line in column order, the def beside them, never instead (CART-0684)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local L4 = 'function M.f() return b(a()) end'
+    local src = table.concat({ 'local M = {}', 'local function a() return 1 end', 'local function b(x) return x end',
+        L4, 'function M.h()', '  local x = 1', '  return x', 'end', 'return M' }, '\n') .. '\n'
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(src); fd:close()
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    vim.fn.delete(root, 'rf')
+    local agent = require 'cartograph.agent'
+    local d = agent.answer(store, 'why', { file = 'm.lua', line = 4 })
+    local shape = {}
+    for _, r in ipairs(d.result) do
+        shape[#shape + 1] = r.kind == 'call' and (r.callee .. '@' .. r.col .. ':' .. r.status) or ('def ' .. r.name)
+    end
+    eq({ 'b@' .. L4:find('b%(') .. ':resolved', 'a@' .. L4:find('a%(') .. ':resolved', 'def M.f' }, shape)
+    ok(d.tier ~= nil and d.tier ~= vim.NIL, 'the headline is the floor over the calls\' rungs')
+    local kinds = {}
+    for _, n in ipairs(d.notes or {}) do kinds[n.kind] = true end
+    ok(kinds['line-mode'], 'a note says no col was given and what was answered instead')
+    -- an explicit col keeps its position answer: col 1 is the definition
+    local p = agent.answer(store, 'why', { file = 'm.lua', line = 4, col = 1 })
+    eq(1, #p.result); eq('def', p.result[1].kind)
+    -- a line with no call record: the def row, and a note that it is context, not an absence of calls
+    local e = agent.answer(store, 'why', { file = 'm.lua', line = 6 })
+    eq(1, #e.result); eq('def', e.result[1].kind); eq('M.h', e.result[1].name)
+    local nc = false
+    for _, n in ipairs(e.notes or {}) do if n.kind == 'no-call-on-line' then nc = true end end
+    ok(nc, 'a call-free line says no call record starts there')
+    -- the audit's other substituting default: cone's omitted direction is SAID (out vs in are opposite answers)
+    local fid
+    for _, n in ipairs(store.data.nodes) do if n.name == 'M.f' then fid = n.id end end
+    local function has(dd, k) for _, n in ipairs(dd.notes or {}) do if n.kind == k then return true end end end
+    ok(has(agent.answer(store, 'cone', { node = fid }), 'defaulted-direction'), 'an omitted direction is named')
+    ok(not has(agent.answer(store, 'cone', { node = fid, direction = 'out' }), 'defaulted-direction'), 'a given one is not')
+end)
