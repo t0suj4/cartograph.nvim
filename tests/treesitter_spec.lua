@@ -3867,6 +3867,35 @@ test('adhesion declines file headers: the license stays', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0783: a doc comment on line 1 above a def on line 2 reaches the top of the file, so adhesion declines it — the
+-- rule for licence notices. The hazard said "(file header)", a CATEGORY, when what the verb saw is a POSITION: in this
+-- witness the block is f's own documentation. It now says what was seen and that it cannot tell which.
+test('adhesion: a top-of-file block left behind is disclosed as a POSITION, not asserted to be a file header (CART-0783)', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local mv = require 'cartograph.moveapply'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    write('m.lua', '-- what f does\nlocal function f() return 1 end\n\n-- what g does\nlocal function g() return 2 end\n')
+    write('dest.lua', 'local d = 1\n')
+    store.ingest(ts.extract(root))
+    for id, n in pairs(store.by_id) do if n.name == 'f' or n.name == 'g' then store.stage(id) end end
+    store.set_dest('dest.lua')
+    local plan = assert(mv.plan(store))
+    local starts = {}
+    for _, m in ipairs(plan.moves) do starts[m.name] = m.lines.s end
+    eq(1, starts.f, 'f: its line-1 comment is declined (the rule is unchanged)')
+    eq(3, starts.g, 'g: its comment travels with it')
+    local txt = require('cartograph.hazard').text(plan.hazards)
+    ok(txt:find("f's own documentation", 1, true), 'the hazard names the other reading: ' .. txt)
+    ok(not txt:find('(file header)', 1, true), 'and asserts no category: ' .. txt)
+    ok(txt:find('reaches the top of m.lua', 1, true), 'it says what was seen: ' .. txt)
+    store.clear_stage()
+    vim.fn.delete(root, 'rf')
+end)
+
 test('move wiring: import line written, call sites requalified', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local journal = require 'cartograph.journal'

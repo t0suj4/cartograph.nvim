@@ -245,9 +245,8 @@ function M.plan(store, id)
             end
         end
         if header then
-            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment', ('the comment block above %s'
-                .. ' touches the top of %s (file header) — left behind')
-                :format(t.name, t.file), nil, nil, 'decision')
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment',
+                txn.header_left_behind(t.name, t.file), nil, nil, 'decision')
         end
         plan.removed[#plan.removed + 1] = {
             id = t.id, name = t.name, file = t.file,

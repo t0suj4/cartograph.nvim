@@ -228,9 +228,19 @@ function M.attach_above(lines, s, pats)
         s = s - 1
     end
     if s == 0 and orig > 0 then
-        return orig, true -- the block touches line 1: a file header
+        return orig, true -- the block touches line 1: maybe a file header, maybe the def's own doc
     end
     return s, false
+end
+
+--- The disclosure for a block attach_above left behind, ONE sentence for every verb that moves or removes a def
+--- (moveapply, clonemerge). ★ IT SAYS WHAT WAS SEEN, A POSITION — NOT A CATEGORY (CART-0783). It read "(file header)",
+--- and in the witness the block was the definition's own documentation (`-- what f does` on line 1, f on line 2):
+--- moved with a sibling, f arrived undocumented and its comment stayed behind with no code. Whether a top-of-file
+--- block is a licence or a doc comment is not decided here; the rule declines either way and says so.
+function M.header_left_behind(name, file)
+    return ('the comment block above %s reaches the top of %s, so it is left behind — it may be a file header'
+        .. ' (a licence, a module docblock) or %s\'s own documentation, and this verb cannot tell which'):format(name, file, name)
 end
 
 --- Apply deletions, token replacements and line insertions to one

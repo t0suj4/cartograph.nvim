@@ -371,9 +371,8 @@ local function collect(store, ids, dest, plan, opts)
             mode = (plan.copy and plan.copy[id]) and 'copy' or 'move' }
         touched[n.file] = true
         if header then
-            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment', ('the comment block above %s'
-                .. ' touches the top of %s (file header) — left behind')
-                :format(n.name, n.file), nil, nil, 'decision')
+            plan.hazards[#plan.hazards + 1] = require('cartograph.hazard').new('header-comment',
+                txn.header_left_behind(n.name, n.file), nil, nil, 'decision')
         end
         -- "referenced from data" is the `reg` EDGE's claim, so ask the edge.
         -- This used to read n.cbarg, which conflates three classes — a
