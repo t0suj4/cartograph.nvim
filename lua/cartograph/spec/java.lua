@@ -629,6 +629,54 @@ local function java_ret_flow(defn, src, tvars)
     if not ok or #all == 0 then return nil end
     return table.concat(all, '|')
 end
+-- ★ A TYPE VARIABLE IS NOT A CLASS (CART-0677). `class ShadowHolder<Session extends Flushable> { Session item; …
+-- item.flush() }` declares a type VARIABLE named Session; the class Session (which does not implement Flushable) can be
+-- the receiver under no instantiation, yet the declared-type key `Session::flush` landed on it with no refusal — the one
+-- finding in its design doc that broke "a wrong edge is worse than a missing one". The name a binder declares is read
+-- through the type parameters in scope at the call: the enclosing method's / constructor's, then each enclosing class's
+-- until a STATIC boundary (a static nested class, or an interface / enum / record, sees no outer type variable). A type
+-- variable answers its FIRST bound's class (`Flushable`; a bound that is itself a type variable is followed, 3 deep), and
+-- an UNBOUNDED one erases to Object: false, no qualification at all. Not a type variable: the name comes back unchanged.
+local JAVA_CLASSLIKE = { class_declaration = true, interface_declaration = true, enum_declaration = true,
+    record_declaration = true, annotation_type_declaration = true }
+local function java_static_scope(p, t)
+    if t ~= 'class_declaration' then return true end -- an interface / enum / record nested anywhere is implicitly static
+    for _, c in inext, p, -1 do
+        if c:type() == 'modifiers' then
+            for i = 0, c:child_count() - 1 do if c:child(i):type() == 'static' then return true end end
+        end
+    end
+    return false
+end
+local function java_tvar_class(node, name, src, depth)
+    local p = node:parent()
+    while p do
+        local t = p:type()
+        if (t == 'method_declaration' or t == 'constructor_declaration' or JAVA_CLASSLIKE[t])
+            and p:field('type_parameters')[1] then
+            local tps = p:field('type_parameters')[1]
+            for _, tp in inext, tps, -1 do
+                if tp:type() == 'type_parameter' then
+                    local id = tp:named_child(0)
+                    if id and id:type() == 'type_identifier' and node_text(id, src) == name then
+                        local bound
+                        for _, c in inext, tp, -1 do
+                            if c:type() == 'type_bound' then bound = c:named_child(0); break end
+                        end
+                        local b = bound and java_base_type(bound, src)
+                        if not b then return false end -- unbounded (Object), or a bound no simple name names
+                        if (depth or 0) >= 3 then return false end
+                        return java_tvar_class(tp, b, src, (depth or 0) + 1) -- (`U extends T`: T is read from the same list)
+                    end
+                end
+            end
+        end
+        if JAVA_CLASSLIKE[t] and java_static_scope(p, t) then return name end
+        p = p:parent()
+    end
+    return name
+end
+
 -- the type variables a method declares (`<S extends X, T>` -> { S = true, T = true })
 local function java_tvars(defn, src)
     local tps = defn:field('type_parameters')[1]
@@ -1204,6 +1252,12 @@ return {
                     end
                 end
             end
+        end
+        -- (a declared type that names a TYPE VARIABLE in scope is its bound's class, or nothing — CART-0677)
+        if cls and obj then
+            local tc = java_tvar_class(calln, cls, src)
+            if tc == false then return nil end
+            cls = tc
         end
         -- a JDK-typed receiver dispatches into the stdlib, not a project
         -- def: leave it bare for the stdlib_names/prefix gate to skip

@@ -88,3 +88,40 @@ test('javatyped: an undeclared field falls back to the old name join (still refu
     eq(nil, c.to)
     eq('ambiguous', type(c.refused) == 'table' and c.refused.rule or nil, 'Item::name and Other::name, as before')
 end)
+
+-- CART-0677: a TYPE VARIABLE named like a class (`<Session extends Flushable>`) typed `item.flush()` as the CLASS
+-- Session's method — a class that cannot be the receiver under any instantiation, linked with no refusal. The declared
+-- name now reads through the type parameters in scope: a bound's class, nothing for an unbounded one, and a static
+-- nested class sees no outer type variable.
+test('javatyped: a type variable is its BOUND, not the class of the same name; unbounded = no key; static nesting sees none (CART-0677)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    local function w(rel, t)
+        vim.fn.mkdir(vim.fs.dirname(root .. '/' .. rel), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('src/p/Flushable.java', 'package p;\npublic interface Flushable { void flush(); }\n')
+    w('src/p/Session.java', 'package p;\npublic class Session { public void flush() {} }\n')
+    w('src/p/ShadowHolder.java', table.concat({
+        'package p;',
+        'public class ShadowHolder<Session extends Flushable> {',
+        '    private Session item;',
+        '    public void run() { this.item.flush(); }',          -- 4: the field
+        '    public void run2(Session s) { s.flush(); }',        -- 5: a parameter
+        '    public <Session> void run3(Session t) { t.flush(); }', -- 6: an UNBOUNDED type variable (Object) shadowing both
+        '    static class Nested { void go(Session s) { s.flush(); } }', -- 7: no outer type variable here
+        '    class Inner { void go(Session s) { s.flush(); } }',  -- 8: an inner class sees it
+        '}', '' }, '\n'))
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    local to = {}
+    for _, c in ipairs(data.calls) do
+        if c.file == 'src/p/ShadowHolder.java' then to[c.line + 1] = c.to or false end
+    end
+    local F, S = 'src/p/Flushable.java::Flushable::flush@1', 'src/p/Session.java::Session::flush@1'
+    eq(F, to[4], 'this.item.flush(): the bound')
+    eq(F, to[5], 's.flush() on a parameter of the type variable')
+    ok(to[6] ~= S, 'an unbounded type variable is no key into the class Session: ' .. tostring(to[6]))
+    eq(S, to[7], 'a static nested class: Session IS the class')
+    eq(F, to[8], 'an inner class sees the outer type variable')
+end)
