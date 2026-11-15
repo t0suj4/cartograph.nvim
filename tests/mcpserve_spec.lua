@@ -344,7 +344,7 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         edges_callees = { node = idof('M.caller') },
         why = { file = 'm.lua', line = 4, col = 26 }, lint_run = {},
         clones_find = {}, cone = { node = idof('M.caller') }, ladder = {},
-        territory = {}, census = {}, mentions = { name = 'walk' }, externals = {},
+        territory = {}, census = {}, sites = { name = 'walk' }, mentions = { name = 'walk' }, externals = {},
         -- THE VERSION AXIS (CART-0595). This fixture reads nothing external, so
         -- both move verbs land on an ABSENCE here — which is exactly what this
         -- sweep is for: the empty answer must name a premise the verb declared.

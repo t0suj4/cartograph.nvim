@@ -3539,10 +3539,10 @@ every `tk` write and commit. A ticket filed since the session registered with
 guessed ID fails. Cross-filing (a FLOW ticket from a cartograph session) is
 fine, because what counts is the session, not the project prefix.
 
-<!-- @claim readme-agent-verbs: The agent surface serves 44 verbs. -->
-<!-- check: #require('cartograph.agent').ORDER == 44 -->
+<!-- @claim readme-agent-verbs: The agent surface serves 45 verbs. -->
+<!-- check: #require('cartograph.agent').ORDER == 45 -->
 
-## Agent surface (headless, 44 verbs)
+## Agent surface (headless, 45 verbs)
 
 Everything above is the editor. There is a second, equal surface: cartograph
 answers the same questions **headlessly**, over MCP or one-shot JSON, and applies

@@ -319,7 +319,7 @@ end
 -- line's characters misread on any non-ASCII line. The change is a deliberate client break, so it is made VISIBLE:
 -- every answer's `graph` carries `protocol` and `positions`, mcpserve's serverInfo version moved, and CHANGELOG.md /
 -- doc/cartograph.txt say so. A client that reads columns must check `graph.positions.unit == 'char'`.
-M.PROTOCOL = 3 -- 3: the `selection` verb, the list pane's current item (CART-2101); 2: CHARACTER columns (CART-2086)
+M.PROTOCOL = 4 -- 4: the `sites` verb (CART-1933); 3: the `selection` verb, the list pane's current item (CART-2101); 2: CHARACTER columns (CART-2086)
 M.POSITIONS = { line = 1, col = 1, unit = 'char' }
 
 local function build_graph(store)
@@ -676,7 +676,7 @@ end
 -- for the list of what was skipped and why.
 local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_callees',
     'why', 'lint_run',
-    'clones_find', 'cone', 'ladder', 'territory', 'census', 'mentions', 'externals',
+    'clones_find', 'cone', 'ladder', 'territory', 'census', 'sites', 'mentions', 'externals',
     -- THE VERSION AXIS (CART-0595), listed after the external surface because it
     -- is that surface scored twice: the roster first (there is no from/to to
     -- guess at), then the READ diff, then the CALL diff it must not be mistaken
@@ -1845,6 +1845,110 @@ end
 
 -- the largest unparsed file `mentions` byte-scans to close its frontier (a bigger one stays frontier, named)
 M.BYTE_SCAN_CAP = 32 * 1024 * 1024
+-- ── verb: sites (CART-1933) ─────────────────────────────────────────────────
+-- WHERE A NAME IS CALLED OR REFERENCED, ONE ROW PER OCCURRENCE. `mentions` answers per FILE by construction, and
+-- node_find is absent for a name with no definition — so "where is set_quick_bar_slot called" (an ENGINE method, the
+-- BNW 2.1 port's whole work list) had no verb. The graph already holds every call site with its range, resolved or
+-- not, and every reference edge with its sites; this reads them. A call row says what it reached: the target, a
+-- refusal (rule), external (no definition in this graph), or unresolved. A name only WRITTEN somewhere and never
+-- called / referenced through the graph is not a site here — `mentions` is the name-level answer for that.
+local function v_sites(store, args)
+    local name = args.name
+    local only
+    if args.file and args.file ~= '' then
+        local f, why, hits = resolve_file(store, args.file)
+        if not f then return unknown_file(store, args.file, why, hits, 'file') end
+        only = f
+    end
+    local want = args.kind ~= '' and args.kind or nil
+    local limit = math.floor(tonumber(args.limit) or 200)
+    local P, atr, callrec = require 'cartograph.pos', require 'cartograph.at', require 'cartograph.callrec'
+    local rows, seen = {}, {}
+    local function tail(s) return s and (s:match('[%w_]+$') or s) end
+    local function add(file, r, row)
+        if only and file ~= only then return end
+        local l0, c0 = atr.sl(r), atr.sc(r)
+        local key = file .. ':' .. l0 .. ':' .. c0
+        if seen[key] then return end
+        seen[key] = true
+        -- (protocol positions: 1-based line, 1-based CHARACTER column through the line's text, CART-2086)
+        local q = P.to(P.new(l0, c0, 'GRAPH'), 'AGENT', line_text(store, file, l0 + 1))
+        row.file, row.line, row.col = file, l0 + 1, q and q.col or nil
+        rows[#rows + 1] = row
+    end
+    if not want or want == 'call' then
+        for _, c in callrec.each(store.data) do
+            local callee = callrec.callee(c)
+            if callee == name or tail(callee) == name then
+                local r = c.at
+                if r and c.file then
+                    local status, detail
+                    if callrec.to(c) then status = 'resolved'
+                    elseif c.refused then status, detail = 'refused', c.refused.rule
+                    elseif c.ext then status, detail = 'external', c.ext.why
+                    else status = 'unresolved' end
+                    add(c.file, r, { kind = 'call', callee = callee, qualified = nn(callrec.full(c)),
+                        target = nn(callrec.to(c)), status = status, why = nn(detail), fn = nn(callrec.fn(c)) })
+                end
+            end
+        end
+    end
+    local passing = 0
+    if not want or want == 'reference' or want == 'read' then
+        for _, e in ipairs(store.data.edges or {}) do
+            if (e.kind == 'ref' or e.kind == 'use' or e.kind == 'reg') and e.at then
+                local t = store.node(e.to)
+                local tn = t and t.name
+                if tn and (tn == name or tail(tn) == name) then
+                    local src = store.node(e.from)
+                    local file = src and src.file or e.from
+                    local kind = e.kind == 'use' and 'read' or 'reference'
+                    if not want or want == kind then
+                        for _, r in ipairs(e.at) do
+                            -- (an edge's site list can hold the call a function is PASSED to — `game.print(helper)` records
+                            -- `game.print` beside `helper` — which is not an occurrence of the name: a one-line site counts
+                            -- only when its text names the target)
+                            local l0 = atr.sl(r)
+                            local text = l0 == atr.el(r) and line_text(store, file, l0 + 1)
+                            local span = text and text:sub(atr.sc(r) + 1, atr.ec(r))
+                            if span and span ~= tn and span:sub(-#name) ~= name then
+                                passing = passing + 1
+                            else
+                                add(file, r, { kind = kind, target = e.to, status = 'resolved', fn = nn(e.from) })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(rows, function (a, b)
+        if a.file ~= b.file then return a.file < b.file end
+        if a.line ~= b.line then return a.line < b.line end
+        return (a.col or 0) < (b.col or 0)
+    end)
+    local total, notes = #rows, {}
+    if total > limit then
+        for i = total, limit + 1, -1 do rows[i] = nil end
+        notes[#notes + 1] = { kind = 'clipped', premise = 'limit',
+            why = ('%d further site(s) not returned (limit %d)'):format(total - limit, limit), evidence = { total = total, limit = limit } }
+    end
+    if passing > 0 then
+        notes[#notes + 1] = { kind = 'passing-call-sites', premise = 'altitude',
+            why = ('%d reference site(s) were the CALL a function by this name is passed to (`f(name)` records `f` too), not an occurrence of the name, and are not rows'):format(passing),
+            evidence = { passing = passing } }
+    end
+    notes[#notes + 1] = { kind = 'graph-sites-only', premise = 'altitude',
+        why = 'one row per CALL of the name (any resolution: a target, a refusal, external, unresolved) and per graph REFERENCE / READ of a definition by that name. A call matches on its callee name or its last segment (`player.set_quick_bar_slot` is `set_quick_bar_slot`); nothing here claims two rows mean the same function — read `target` / `status`',
+        evidence = { total = total } }
+    if total == 0 then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-site',
+            why = ('no call of %q and no graph reference to a definition by that name%s — `mentions` answers whether any file merely names it'):format(tostring(name), only and (' in ' .. only) or ''),
+            evidence = { name = name, file = nn(only) } }, notes = notes }
+    end
+    return { subject = { name = name, file = nn(only), total = total }, result = rows, notes = notes }
+end
+
 local function v_mentions(store, args)
     -- THE REFUSAL COMES FIRST, and mentions.lua is explicit about why: an empty
     -- mentioning() means EITHER "no file mentions this" OR "this graph has no
@@ -4581,6 +4685,21 @@ M.VERBS = {
         absences = {},
         args = {},
         run = v_census,
+    },
+    sites = {
+        answers = 'who-uses-it',
+        refuses = { 'ambiguous-file', 'unknown-file' },
+        summary = 'every SITE where a name is called or referenced, one row per occurrence with file, 1-based line and character column — of an EXTERNAL name too (an engine API with no definition here): each call row says resolved (target) / refused (rule) / external / unresolved. The per-occurrence answer `mentions` (files only) does not give',
+        subject = 'query',
+        tier_basis = 'observation', needs_calls = true, -- (its rows are the call records: a thin graph has none)
+        absences = { 'absent' },
+        args = {
+            { name = 'name', type = 'string', required = true, desc = 'the name: a call matches its callee or the callee\'s last segment', aliases = { 'query' } },
+            { name = 'file', type = 'string', desc = 'only sites in this file' },
+            { name = 'kind', type = 'string', enum = { 'call', 'reference', 'read' }, desc = 'only this kind of site' },
+            { name = 'limit', type = 'integer', desc = 'max rows (default 200); a clip is reported as a note' },
+        },
+        run = v_sites,
     },
     mentions = {
         answers = 'who-uses-it',

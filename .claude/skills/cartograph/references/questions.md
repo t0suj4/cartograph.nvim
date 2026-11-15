@@ -35,6 +35,7 @@ verb's section is the question it answers, so two verbs in one section are alter
 | Question | Instrument |
 |---|---|
 | Who calls this, each row with its resolution tier and the resolvers that landed it (`prov`)? | MCP `edges_callers { node | ref | file+line }` |
+| WHERE is this name called / referenced — every SITE with file, line and character column, of an EXTERNAL name too (an engine API with no definition here)? Each call row says resolved / refused / external / unresolved | MCP `sites { name, file?, kind? = call\|reference\|read, limit? }` (protocol 4). Matches a call's callee or its last segment (`player.set_quick_bar_slot`). `mentions` is the file-level answer for a name nothing calls. CART-1933 |
 | Which FILES mention this identifier — the name-level question that still answers when resolution refused? | MCP `mentions { name, from? }` (refuses `no-mention-index` on a graph without one). The index skips names under 3 characters and OBJECT-LITERAL keys (`{ getScript: function … }`): a name the graph DEFINES that its own file's index entry lacks answers `frontier` / `name-not-indexed` naming the definitions, never `absent`; a non-empty list missing a defining file carries a `defining-file-not-indexed` note (CART-1008) |
 
 ## What does it use?

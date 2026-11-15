@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-15 — agent protocol 4: the `sites` verb (agent surface, additive)
+
+- New verb `sites { name, file?, kind?, limit? }`: every SITE where a name is called or referenced, one row per occurrence
+  with `file`, 1-based `line` and 1-based character `col` — of an EXTERNAL name too (an engine API with no definition in
+  the graph, which `node_find` cannot find and `mentions` answers only per file). A call row carries `status`
+  (resolved / refused / external / unresolved), `target`, `why`, the enclosing `fn` and the `qualified` callee
+  (`player.set_quick_bar_slot`). Absent when nothing calls or references the name (CART-1933).
+- Detect it: `graph.protocol = 4`, `serverInfo.version` `0.4`. Columns are unchanged.
+
 ## 2026-11-15 — agent protocol 3: the `selection` verb (agent surface, additive)
 
 - New verb `selection`: the list pane's CURRENT ITEM as the source shares it — an item (`node`, 1-based `line`,

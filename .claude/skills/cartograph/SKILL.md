@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 44 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua, the `alibi` verb only). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 45 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua, the `alibi` verb only). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the five reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -110,12 +110,12 @@ instrument and surprising if you forget it.
 
 ## The verbs
 
-44, in the order they may be trusted in. `graph_info` first — it reports which verbs
+45, in the order they may be trusted in. `graph_info` first — it reports which verbs
 are available on *this* graph and host, and why any are not.
 
 ```
 READ      graph_info  node_find  node_at  edges_callers  edges_callees  why  lint_run
-CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
+CATALOGUE clones_find  cone  ladder  territory  census  sites  mentions  externals
 VERSION   portability_targets  portability_move  portability_move_calls
 FEDERATE  ports
 EDITOR    selection

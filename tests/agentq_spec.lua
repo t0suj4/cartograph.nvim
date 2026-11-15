@@ -396,11 +396,15 @@ test('agent: refusal candidates are same-question verbs this host can serve, wit
             has_mention_index = function () return mi end }
     end
     local full = agent.candidates(stub(false, false), 'mentions')
-    eq(1, #full, vim.inspect(full))
+    eq(2, #full, vim.inspect(full))
     eq('edges_callers', full[1].name)
     eq('who-uses-it', full[1].question)
     eq(false, full[1].same_subject, 'mentions takes a name, edges_callers a node: stated, not filtered')
     eq('node', full[1].subject)
+    -- (CART-1933: sites answers the same question from the CALL records — no mention index needed — and takes a NAME,
+    -- the subject mentions was asked with)
+    eq('sites', full[2].name)
+    eq(true, full[2].same_subject, 'sites takes the same name')
     eq({}, agent.candidates(stub(true, false), 'mentions'), 'on a thin graph the sibling is unavailable too')
     -- language: a lua-only sibling is not offered for a ruby subject, and is for a lua one
     local rb, lua = {}, {}
@@ -616,7 +620,7 @@ test('why: columns are 1-based CHARACTERS (protocol 2), converted through the li
     local bchar = vim.fn.strchars(L2:sub(1, bbyte - 1)) + 1 -- its 1-based CHARACTER column
     ok(bchar == bbyte - 1, 'the fixture really differs by one: ' .. bchar .. ' vs ' .. bbyte)
     local d = agent.answer(store, 'why', { file = 'm.lua', line = 2 })
-    eq(3, d.graph.protocol, 'the envelope names the protocol')
+    eq(4, d.graph.protocol, 'the envelope names the protocol')
     eq({ line = 1, col = 1, unit = 'char' }, d.graph.positions, 'and the position contract')
     local brow
     for _, r in ipairs(d.result) do if r.callee == 'b' then brow = r end end
