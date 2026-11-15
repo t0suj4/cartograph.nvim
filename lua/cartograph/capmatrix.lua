@@ -29,7 +29,7 @@
 --
 -- ⚠ WHAT IT CANNOT SEE (CART-0693's own ledger, stated so the fence declares its
 -- reach): it counts which captures a language binds, so it catches an UNFILLED slot
--- (CART-0692: iface_query absent for typescript/tsx) and an UNBOUND capture
+-- (CART-0692: iface_query was absent for typescript/tsx, since filled; php still has none) and an UNBOUND capture
 -- (CART-0671: import_query binds @path and never @bind). It does NOT catch a capture
 -- that IS bound but only for some of the node shapes the grammar produces there
 -- (CART-0672 / CART-0690, super_query binding @parent for 1 of 3 shapes, both since fixed) — that

@@ -1074,6 +1074,43 @@ M.spec.typescript.super_query = [=[
         (class_heritage (extends_clause
             (member_expression property: (property_identifier) @parent))))
 ]=]
+-- INTERFACES (CART-0692) → data.implements, the SET-valued arm handle_super's single parent cannot hold: a class's /
+-- abstract class's `implements I, ns.J, G<T>` and an interface's `extends L, M` (cintf). ROWS ONLY, NO REDIRECT:
+-- typescript is STRUCTURAL — any object of the right shape conforms, so an `implements` clause does not bound the
+-- implementer set — and the javascript family declares no iface_bean / iface_markers, so resolve_interface draws no
+-- candidate from these rows (a language redirects only through gates it declares). What reads them: the LSP
+-- textDocument/implementation handler (interface → implementers, I.m → each C.m), the hierarchy lint's maps.
+M.spec.typescript.iface_query = [=[
+    (class_declaration name: (type_identifier) @ichild
+        (class_heritage (implements_clause
+            [ (type_identifier) (generic_type) (nested_type_identifier) ] @iface))) @idecl
+    (abstract_class_declaration name: (type_identifier) @ichild
+        (class_heritage (implements_clause
+            [ (type_identifier) (generic_type) (nested_type_identifier) ] @iface))) @idecl
+    (interface_declaration name: (type_identifier) @ichild
+        (extends_type_clause
+            [ (type_identifier) (generic_type) (nested_type_identifier) ] @iface)) @idecl
+]=]
+-- A supertype's KEY (shared by handle_super and the iface pass): a type keys by its bare name as classes and interfaces
+-- are keyed — `G<T>` by `G`, a namespace-qualified `ns.J` by `J` (the same last-segment rule super_query applies to
+-- `extends ns.Base`) with `written` = ns.J. A qualified name whose last segment is the child's own (`class Logger
+-- implements types.Logger`) names ANOTHER module's type, and keyed bare it would be a row C → C: none. The extends
+-- captures (identifier / property_identifier) pass through unchanged. (A `do` block: the chunk is at Lua's 200-local cap)
+do
+local function ts_super_name(node, src, child)
+    if not node then return nil end
+    local t = node:type()
+    if t == 'generic_type' then return ts_super_name(node:field('name')[1], src, child) end
+    if t == 'nested_type_identifier' then
+        local written = node_text(node, src):gsub('%s+', '')
+        local last = written:match('([%w_$]+)$')
+        if not last or last == child then return nil end
+        return last, written
+    end
+    return node_text(node, src)
+end
+M.spec.typescript.super_name = ts_super_name
+end
 -- CLASS FIELD-ARROWS: `class C { m = () => {} }` / `private m = async () => {}` —
 -- a field whose value is a function is a method in all but grammar (React class
 -- components + services define handlers this way, called via this.m()). Keyed
@@ -9124,7 +9161,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     end
                     if childn and decl then
                         local child = node_text(childn, src)
-                        -- @langs-ok java/php/ts `interface_declaration` — languages without interfaces have nothing to mirror
+                        -- @langs-ok java/php/ts `interface_declaration` — languages without interfaces have nothing to mirror (java + typescript bind iface_query; php waits on CART-0692's gate decision)
                         local cintf = decl:type() == 'interface_declaration'
                         data.implements = data.implements or {}
                         for _, ifn in ipairs(ifaces) do
