@@ -10,6 +10,7 @@
 local oracle = require 'cartograph.oracle'
 local fieldlink = require 'cartograph.fieldlink'
 local lsppos = require 'cartograph.lsppos'
+local P = require 'cartograph.pos'
 
 local M = {}
 
@@ -90,9 +91,14 @@ function M.harvest(store, opts, on_done)
         query = function (ses, it, step)
             local stepped = false
             local function done1() if not stepped then stepped = true; step() end end
+            -- (it.col is a stored BYTE column; the wire wants the client's NEGOTIATED unit, CART-2092 — a column that
+            -- will not convert is not sent: counted silent, never sent in the wrong unit)
+            local wpos = P.to_lsp(it.row, it.col, P.client_encoding(ses.client),
+                P.line_reader(root, ses.texts)(it.file)(it.row))
+            if not wpos then stats.silent = stats.silent + 1; return done1() end
             local ok = ses.client:request('textDocument/definition', {
                 textDocument = { uri = vim.uri_from_fname(root .. '/' .. it.file) },
-                position = { line = it.row, character = it.col },
+                position = wpos,
             }, function (_, result)
                 local d = def_of(result, root)
                 if not d then stats.silent = stats.silent + 1

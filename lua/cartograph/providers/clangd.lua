@@ -161,6 +161,24 @@ local function name_pos(node, lines)
     return { line = atr.sl(node.range), character = atr.sc(node.range) }
 end
 
+-- ★ THE WIRE IS NOT STORAGE (CART-2092). clangd answers in its NEGOTIATED offset encoding (UTF-16 unless the client
+-- agreed on another); the graph stores 0-based BYTE columns (at.BASE). The wire `character` was copied straight into
+-- at.char, so on any non-ASCII line the graph held UTF-16 columns among byte ones. Every crossing now goes through
+-- cartograph.pos with the client's own `offset_encoding`, reading the file's line; a range that will not convert is
+-- dropped (never stored wrong).
+local P = require 'cartograph.pos'
+local enc_of = P.client_encoding
+local line_reader = P.line_reader
+--- a wire range from `client` for `file` as a stored range, or nil when it will not convert
+function M._wire_at(client, lines_of, file, r)
+    return (P.range_from_lsp(r, enc_of(client), lines_of(file)))
+end
+--- name_pos's byte column, sent in the client's encoding
+local function wire_pos(client, node, lines)
+    local p0 = name_pos(node, lines)
+    return (P.to_lsp(p0.line, p0.character, enc_of(client), lines[p0.line + 1])) -- nil = not sent (never a byte column as a wire one)
+end
+
 --- Enrich a tree-sitter extraction in place. Returns stats or nil, reason.
 ---@param data table  the neutral-schema graph (mutated)
 ---@param opts { bin:string?, timeout:number?, index_wait:number? }?
@@ -219,6 +237,7 @@ function M.enrich(data, opts)
     end
 
     local answered, edges_added, upgraded = {}, 0, {}
+    local rd = line_reader(root, texts) -- (wire ranges convert through each file's lines, CART-2092)
     local timeout = opts.timeout or 4000
     for _, n in ipairs(fn_nodes) do
         local file = n.file
@@ -226,7 +245,7 @@ function M.enrich(data, opts)
         local uri = vim.uri_from_fname(root .. '/' .. file)
         local okp, prep = pcall(client.request_sync, client,
             'textDocument/prepareCallHierarchy',
-            { textDocument = { uri = uri }, position = name_pos(n, lines) },
+            { textDocument = { uri = uri }, position = wire_pos(client, n, lines) },
             timeout, 0)
         local item = okp and prep and prep.result and prep.result[1]
         if item then
@@ -241,10 +260,8 @@ function M.enrich(data, opts)
                     if from then
                         local at = {}
                         for _, r in ipairs(inc.fromRanges or {}) do
-                            at[#at + 1] = { start = { line = r.start.line,
-                                    char = r.start.character },
-                                ['end'] = { line = r['end'].line,
-                                    char = r['end'].character } }
+                            local a = M._wire_at(client, rd, ffile, r)
+                            if a then at[#at + 1] = a end
                         end
                         table.insert(answered[n.id], { from = from.id, at = at })
                     end
@@ -338,9 +355,10 @@ function M.enrich_async(data, opts, on_done)
         end,
         query = function (ses, n, step)
             local lines = vim.split(ses.texts[n.file] or '', '\n', { plain = true })
+            local rd = line_reader(root, ses.texts) -- (CART-2092)
             local uri = vim.uri_from_fname(root .. '/' .. n.file)
             local ok = ses.client:request('textDocument/prepareCallHierarchy',
-                { textDocument = { uri = uri }, position = name_pos(n, lines) },
+                { textDocument = { uri = uri }, position = wire_pos(ses.client, n, lines) },
                 function (_, result)
                     local item = result and result[1]
                     if not item then return step() end
@@ -354,10 +372,8 @@ function M.enrich_async(data, opts, on_done)
                                     if from then
                                         local at = {}
                                         for _, r in ipairs(inc.fromRanges or {}) do
-                                            at[#at + 1] = { start = { line = r.start.line,
-                                                    char = r.start.character },
-                                                ['end'] = { line = r['end'].line,
-                                                    char = r['end'].character } }
+                                            local a = M._wire_at(ses.client, rd, ffile, r)
+                                            if a then at[#at + 1] = a end
                                         end
                                         table.insert(answered[n.id], { from = from.id, at = at })
                                     end
@@ -461,10 +477,11 @@ function M.resolve_focused(n, on_edges)
         sess.opened[n.file] = true
     end
     local lines = vim.split(sess.texts[n.file] or '', '\n', { plain = true })
+    local rd = line_reader(root, sess.texts) -- (CART-2092)
     local uri = vim.uri_from_fname(root .. '/' .. n.file)
     local function fail() sess.pending[n.id] = nil end -- retry on next focus
     local ok = sess.client:request('textDocument/prepareCallHierarchy',
-        { textDocument = { uri = uri }, position = name_pos(n, lines) },
+        { textDocument = { uri = uri }, position = wire_pos(sess.client, n, lines) },
         function (_, result)
             local item = result and result[1]
             if not item then sess.pending[n.id] = nil; sess.resolved[n.id] = true; return end
@@ -479,8 +496,8 @@ function M.resolve_focused(n, on_edges)
                         if from then
                             local at = {}
                             for _, r in ipairs(inc.fromRanges or {}) do
-                                at[#at + 1] = { start = { line = r.start.line, char = r.start.character },
-                                    ['end'] = { line = r['end'].line, char = r['end'].character } }
+                                local a = M._wire_at(sess.client, rd, ffile, r)
+                                if a then at[#at + 1] = a end
                             end
                             edges[#edges + 1] = { from = from.id, at = at }
                         end

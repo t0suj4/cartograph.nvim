@@ -39,13 +39,36 @@ local SYMBOLKIND = {
     module = 2, ['function'] = 12, method = 6, var = 13, region = 3,
 }
 
--- ── position / range helpers (utf-8 offsets: store chars ARE byte offsets, and
--- T1 declares positionEncoding utf-8, so no conversion here — T2 owns utf-16) ──
-local function lsp_range(r)
-    return {
-        start = { line = atr.sl(r), character = atr.sc(r) },
-        ['end'] = { line = atr.el(r), character = atr.ec(r) },
-    }
+-- ── position / range helpers ──
+-- ★ THE ENCODING IS NEGOTIATED, NOT DECLARED (CART-2092). Storage is GRAPH bytes (at.BASE). This server declared
+-- positionEncoding = 'utf-8' whatever the client offered — right for the in-process nvim client (it offers utf-8), wrong
+-- for any stdio client that does not (lspserve), which then read byte columns as UTF-16 ones. `initialize` now picks
+-- utf-8 when the client lists it and utf-16 (the LSP default) otherwise, and every range out / position in crosses
+-- through cartograph.pos with that encoding. A column that will not convert is left out (a range) or answers null (a
+-- request) — never sent or read wrong.
+M._enc = 'utf-8'
+local P = require 'cartograph.pos'
+local function text_of(store, file, line0)
+    local lines = file and store.content({ file = file })
+    return lines and lines[line0 + 1] or nil
+end
+local function lsp_range(r, store, file)
+    if M._enc == 'utf-8' then
+        return {
+            start = { line = atr.sl(r), character = atr.sc(r) },
+            ['end'] = { line = atr.el(r), character = atr.ec(r) },
+        }
+    end
+    local a = P.to_lsp(atr.sl(r), atr.sc(r), M._enc, text_of(store, file, atr.sl(r)))
+    local b = P.to_lsp(atr.el(r), atr.ec(r), M._enc, text_of(store, file, atr.el(r)))
+    if not (a and b) then return nil end
+    return { start = a, ['end'] = b }
+end
+-- an incoming LSP position as { line, character } in STORAGE bytes, or nil when it addresses no character
+local function in_pos(store, file, position)
+    local line, byte = P.from_lsp(position, M._enc, position and text_of(store, file, position.line))
+    if not line then return nil end
+    return { line = line, character = byte }
 end
 
 -- half-open containment: [start, end) so the char just past a token is "not in"
@@ -83,7 +106,9 @@ end
 local function location(store, id)
     local n = store.node(id)
     if not navigable(n) then return nil end
-    return { uri = uri_of(store, n.file), range = lsp_range(n.range) }
+    local rg = lsp_range(n.range, store, n.file)
+    if not rg then return nil end
+    return { uri = uri_of(store, n.file), range = rg }
 end
 
 -- RBS/profile ENRICHMENT ([[cartograph-stdlib-profile]]): a minted external node
@@ -162,7 +187,12 @@ end
 -- ── handlers ──────────────────────────────────────────────────────────────
 M.handlers = {}
 
-M.handlers['initialize'] = function (store)
+M.handlers['initialize'] = function (store, params)
+    local offered = (((params or {}).capabilities or {}).general or {}).positionEncodings
+    M._enc = 'utf-16' -- the LSP default when the client offers nothing
+    for _, e in ipairs(type(offered) == 'table' and offered or {}) do
+        if e == 'utf-8' then M._enc = 'utf-8'; break end
+    end
     -- INDEX-ONLY honesty ([[cartograph-thin-index]]): the thin index has NO call graph, so
     -- references and call-hierarchy would answer EMPTY — which a client renders as an
     -- authoritative "no references / no callers", a fabricated negative. Don't advertise
@@ -172,7 +202,7 @@ M.handlers['initialize'] = function (store)
     local calls = not (store and store.is_index_only and store.is_index_only())
     return {
         capabilities = {
-            positionEncoding = 'utf-8',
+            positionEncoding = M._enc, -- negotiated above (CART-2092)
             definitionProvider = true,
             referencesProvider = calls,
             documentSymbolProvider = true,
@@ -196,7 +226,8 @@ M.handlers['shutdown'] = function () return vim.NIL end
 
 M.handlers['textDocument/definition'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     local c = call_at(store, file, p.line, p.character)
     if c then
         if c.to then -- resolved (incl. hedged: one Location, the hedge shows on hover)
@@ -229,7 +260,8 @@ end
 
 M.handlers['textDocument/references'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     -- the target = what the cursor's call resolves to, else the def under it
     local c = call_at(store, file, p.line, p.character)
     local target = (c and c.to) or (function ()
@@ -243,7 +275,8 @@ M.handlers['textDocument/references'] = function (store, params)
         local cn = store.node(caller)
         if cn and cn.file then
             for _, r in ipairs(store.occurrences(caller, target) or {}) do
-                out[#out + 1] = { uri = uri_of(store, cn.file), range = lsp_range(r) }
+                local rg = lsp_range(r, store, cn.file)
+                if rg then out[#out + 1] = { uri = uri_of(store, cn.file), range = rg } end
             end
         end
     end
@@ -252,7 +285,8 @@ M.handlers['textDocument/references'] = function (store, params)
         local fn = store.node(u.from)
         if fn and fn.file then
             for _, r in ipairs(u.at or {}) do
-                out[#out + 1] = { uri = uri_of(store, fn.file), range = lsp_range(r) }
+                local rg = lsp_range(r, store, fn.file)
+                if rg then out[#out + 1] = { uri = uri_of(store, fn.file), range = rg } end
             end
         end
     end
@@ -272,8 +306,8 @@ M.handlers['textDocument/documentSymbol'] = function (store, params)
             out[#out + 1] = {
                 name = n.name or id,
                 kind = SYMBOLKIND[n.kind],
-                range = lsp_range(n.range),
-                selectionRange = lsp_range(n.range),
+                range = lsp_range(n.range, store, n.file),
+                selectionRange = lsp_range(n.range, store, n.file),
             }
         end
     end
@@ -285,7 +319,8 @@ local function md(lines) return { contents = { kind = 'markdown', value = table.
 
 M.handlers['textDocument/hover'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     local c = call_at(store, file, p.line, p.character)
     if c then
         if c.to then
@@ -363,7 +398,7 @@ M.handlers['workspace/symbol'] = function (store, params)
                 if navigable(n) and SYMBOLKIND[n.kind] then
                     out[#out + 1] = {
                         name = n.name or id, kind = SYMBOLKIND[n.kind],
-                        location = { uri = uri_of(store, n.file), range = lsp_range(n.range) },
+                        location = { uri = uri_of(store, n.file), range = lsp_range(n.range, store, n.file) },
                     }
                 end
             end
@@ -382,8 +417,8 @@ local function item_of(store, id)
     if not navigable(n) or not SYMBOLKIND[n.kind] then return nil end
     return {
         name = n.name or id, kind = SYMBOLKIND[n.kind],
-        uri = uri_of(store, n.file), range = lsp_range(n.range),
-        selectionRange = lsp_range(n.range), data = { id = id },
+        uri = uri_of(store, n.file), range = lsp_range(n.range, store, n.file),
+        selectionRange = lsp_range(n.range, store, n.file), data = { id = id },
     }
 end
 
@@ -398,7 +433,9 @@ end
 
 M.handlers['textDocument/prepareCallHierarchy'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local id = symbol_at(store, file, params.position.line, params.position.character)
+    local pp = in_pos(store, file, params.position)
+    if not pp then return vim.NIL end
+    local id = symbol_at(store, file, pp.line, pp.character)
     local item = id and item_of(store, id)
     return item and { item } or vim.NIL
 end
@@ -412,7 +449,8 @@ M.handlers['callHierarchy/incomingCalls'] = function (store, params)
         local from = item_of(store, caller)
         if from then
             local ranges = {}
-            for _, r in ipairs(store.occurrences(caller, id) or {}) do ranges[#ranges + 1] = lsp_range(r) end
+            local cf = (store.node(caller) or {}).file
+            for _, r in ipairs(store.occurrences(caller, id) or {}) do ranges[#ranges + 1] = lsp_range(r, store, cf) end
             out[#out + 1] = { from = from, fromRanges = ranges }
         end
     end
@@ -426,7 +464,8 @@ M.handlers['callHierarchy/outgoingCalls'] = function (store, params)
         local to = item_of(store, callee)
         if to then
             local ranges = {} -- the sites WITHIN `id` where it calls `to`
-            for _, r in ipairs(store.occurrences(id, callee) or {}) do ranges[#ranges + 1] = lsp_range(r) end
+            local idf = (store.node(id) or {}).file
+            for _, r in ipairs(store.occurrences(id, callee) or {}) do ranges[#ranges + 1] = lsp_range(r, store, idf) end
             out[#out + 1] = { to = to, fromRanges = ranges }
         end
     end
@@ -461,7 +500,8 @@ M.why_call, M.node_at = why_call, node_at
 
 M.handlers['cartograph/why'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     local c = call_at(store, file, p.line, p.character)
     if c then return why_call(store, c) end
     local n = node_at(store, file, p.line, p.character)
@@ -488,7 +528,8 @@ end
 -- type (String) has no node -> empty (honest), not a guess.
 M.handlers['textDocument/typeDefinition'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     local c = call_at(store, file, p.line, p.character)
     local tn
     if c and c.to then
@@ -517,7 +558,8 @@ local function class_of(name) return name and name:match('^(.-)[:.]+[%w_]+$') or
 
 M.handlers['textDocument/implementation'] = function (store, params)
     local file = file_key(store, params.textDocument.uri)
-    local p = params.position
+    local p = in_pos(store, file, params.position)
+    if not p then return vim.NIL end
     local id = (function ()
         local c = call_at(store, file, p.line, p.character)
         if c and c.to then return c.to end

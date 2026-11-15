@@ -14,6 +14,10 @@
 
 local atr = require 'cartograph.at'
 local lsppos = require 'cartograph.lsppos'
+-- (THE WIRE IS NOT STORAGE, CART-2092: lua-ls speaks its NEGOTIATED offset encoding; positions go out and come back
+-- through cartograph.pos with the client's own encoding — a byte column was sent as `character`, and a returned
+-- UTF-16 `character` was compared against stored BYTE columns)
+local P = require 'cartograph.pos'
 local M = {}
 
 local function find_bin()
@@ -37,6 +41,10 @@ local function name_pos(node, lines)
         if s then return { line = l, character = s - 1 } end
     end
     return { line = atr.sl(node.range), character = atr.sc(node.range) }
+end
+local function wire_pos(client, node, lines)
+    local p0 = name_pos(node, lines)
+    return (P.to_lsp(p0.line, p0.character, P.client_encoding(client), lines[p0.line + 1])) -- nil = not sent
 end
 
 --- Enrich a tree-sitter extraction in place. Returns stats or nil, reason.
@@ -132,6 +140,7 @@ function M.enrich(data, opts)
     -- lua-ls queues requests until the workspace is loaded; the FIRST
     -- request gets the generous timeout, the rest a normal one
     local timeout = opts.timeout or 4000
+    local rd = P.line_reader(root, texts) -- (a returned column converts through its file's line, CART-2092)
     local first_timeout = opts.load_wait or 60000
 
     local matched = {}  -- call -> { def ids that claimed it }
@@ -142,7 +151,7 @@ function M.enrich(data, opts)
         local okr, res = pcall(client.request_sync, client,
             'textDocument/references', {
                 textDocument = { uri = vim.uri_from_fname(root .. '/' .. n.file) },
-                position = name_pos(n, lines),
+                position = wire_pos(client, n, lines),
                 context = { includeDeclaration = false },
             }, first and first_timeout or timeout, 0)
         first = false
@@ -150,9 +159,9 @@ function M.enrich(data, opts)
             answered[n.id] = true
             for _, loc in ipairs(res.result) do
                 local ffile = vim.uri_to_fname(loc.uri):sub(#root + 2)
-                local line = lsppos.sl(loc.range)
-                local ch = lsppos.sc(loc.range)
-                for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
+                local line, ch = P.from_lsp({ line = lsppos.sl(loc.range), character = lsppos.sc(loc.range) },
+                    P.client_encoding(client), rd(ffile)(lsppos.sl(loc.range)))
+                for _, c in ipairs(line and sites[ffile .. '\31' .. line] or {}) do
                     if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                         matched[c] = matched[c] or {}
                         table.insert(matched[c], n.id)
@@ -282,18 +291,19 @@ function M.enrich_async(data, opts, on_done)
         -- then answers — async, so the wait costs nothing (the deadline caps it)
         query = function (ses, n, step)
             local lines = vim.split(ses.texts[n.file] or '', '\n', { plain = true })
+            local rd2 = P.line_reader(root, ses.texts) -- (CART-2092)
             local ok = ses.client:request('textDocument/references', {
                 textDocument = { uri = vim.uri_from_fname(root .. '/' .. n.file) },
-                position = name_pos(n, lines),
+                position = wire_pos(ses.client, n, lines),
                 context = { includeDeclaration = false },
             }, function (_, result)
                 if result then
                     answered[n.id] = true
                     for _, loc in ipairs(result) do
                         local ffile = vim.uri_to_fname(loc.uri):sub(#root + 2)
-                        local line = lsppos.sl(loc.range)
-                        local ch = lsppos.sc(loc.range)
-                        for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
+                        local line, ch = P.from_lsp({ line = lsppos.sl(loc.range), character = lsppos.sc(loc.range) },
+                            P.client_encoding(ses.client), rd2(ffile)(lsppos.sl(loc.range)))
+                        for _, c in ipairs(line and sites[ffile .. '\31' .. line] or {}) do
                             if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                                 matched[c] = matched[c] or {}
                                 table.insert(matched[c], n.id)

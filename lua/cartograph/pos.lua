@@ -131,4 +131,64 @@ function M.col(p, profile, line_text)
     return q.col
 end
 
+
+-- ── THE LSP WIRE (CART-2092) ──────────────────────────────────────────────────────────────────────────────────────
+-- An LSP position is { line, character } in the NEGOTIATED positionEncoding (utf-16 when the client offers nothing
+-- else). Storage is GRAPH bytes. These two are the only crossing, both through `M.to`, so a wire column is never stored
+-- as a byte column (clangd did) and a byte column never goes out as a UTF-16 one (luals / fieldharvest did).
+--- A stored (0-based line, 0-based byte column) as an LSP position in `encoding`; `text` is that line.
+function M.to_lsp(line0, byte0, encoding, text)
+    local P, why = M.lsp(encoding)
+    if not P then return nil, why end
+    if P.unit == 'byte' then return { line = line0, character = byte0 } end
+    local q, w = M.to(M.new(line0, byte0, 'GRAPH'), P, text)
+    if not q then return nil, w end
+    return { line = q.line, character = q.col }
+end
+--- An LSP position in `encoding` as a stored (0-based line, 0-based byte column): line0, byte0 | nil, reason.
+function M.from_lsp(position, encoding, text)
+    local P, why = M.lsp(encoding)
+    if not P then return nil, why end
+    if type(position) ~= 'table' or type(position.line) ~= 'number' or type(position.character) ~= 'number' then
+        return nil, 'no-position'
+    end
+    if P.unit == 'byte' then return position.line, position.character end
+    local q, w = M.to(M.new(position.line, position.character, P), 'GRAPH', text)
+    if not q then return nil, w end
+    return q.line, q.col
+end
+--- A per-file LINE READER for the wire conversions: `reader(file)(line0) -> text | nil`, from `texts[file]` (text a
+--- client already opened) else the file under `root`, split once per file.
+function M.line_reader(root, texts)
+    local split = {}
+    return function (file)
+        return function (l0)
+            local ls = split[file]
+            if ls == nil then
+                local t = texts and texts[file]
+                if not t then
+                    local fd = io.open(root .. '/' .. file, 'r')
+                    t = fd and fd:read('a'); if fd then fd:close() end
+                end
+                ls = t and vim.split(t, '\n', { plain = true }) or false
+                split[file] = ls
+            end
+            return ls and ls[l0 + 1] or nil
+        end
+    end
+end
+--- an LSP client's negotiated encoding (vim.lsp's `offset_encoding`), the LSP default when it carries none
+function M.client_encoding(client) return (client and client.offset_encoding) or 'utf-16' end
+
+--- An LSP range in `encoding` as a stored range { start = { line, char }, end = … } | nil, reason. `text_of(line0)`
+--- returns a line's text (needed unless the encoding is utf-8).
+function M.range_from_lsp(r, encoding, text_of)
+    if type(r) ~= 'table' or type(r.start) ~= 'table' or type(r['end']) ~= 'table' then return nil, 'no-range' end
+    local sl, sc = M.from_lsp(r.start, encoding, text_of and text_of(r.start.line))
+    if not sl then return nil, sc end
+    local el, ec = M.from_lsp(r['end'], encoding, text_of and text_of(r['end'].line))
+    if not el then return nil, ec end
+    return { start = { line = sl, char = sc }, ['end'] = { line = el, char = ec } }
+end
+
 return M

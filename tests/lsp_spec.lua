@@ -170,13 +170,45 @@ test('lsp: workspace/symbol matches exact + tail + substring', function ()
     eq(nil, names('bar')['a.lua'], 'modules are not workspace symbols')
 end)
 
+-- (what nvim's client offers; the encoding is NEGOTIATED since CART-2092)
+local NVIM_CAPS = { capabilities = { general = { positionEncodings = { 'utf-8', 'utf-16', 'utf-32' } } } }
+
 test('lsp: initialize advertises only the served capabilities', function ()
-    local c = H('initialize', {}).capabilities
+    local c = H('initialize', NVIM_CAPS).capabilities
     eq(true, c.definitionProvider); eq(true, c.referencesProvider)
     eq(true, c.documentSymbolProvider); eq(true, c.hoverProvider)
     eq(true, c.workspaceSymbolProvider)
-    eq('utf-8', c.positionEncoding)
+    eq('utf-8', c.positionEncoding, 'a client offering utf-8 gets it')
     eq(nil, c.completionProvider, 'no completion in the read MVP')
+end)
+
+-- CART-2092: the server DECLARED utf-8 whatever the client offered, so a stdio client without utf-8 read byte columns
+-- as UTF-16 ones. A client offering nothing gets the LSP default, utf-16, and every column crosses through pos.lsp.
+test('lsp: a client that does not offer utf-8 gets utf-16, and columns are CONVERTED on a non-ASCII line (CART-2092)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local L = 'local s = "é"; local function f2() return 1 end' -- (the non-ASCII byte sits in a STRING: an ASCII name)
+    local fd = assert(io.open(root .. '/u.lua', 'w')); fd:write(L .. '\nreturn f2\n'); fd:close()
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    -- (the body runs protected: the server's encoding is MODULE state, and a failure here must not leave utf-16 in
+    -- place for every spec after this one)
+    local okb, err = pcall(function ()
+        eq('utf-16', H('initialize', {}).capabilities.positionEncoding, 'nothing offered: the LSP default')
+        local byte = L:find('local function', 1, true) - 1            -- 0-based BYTE column of the def
+        local u16 = vim.str_utfindex(L, 'utf-16', byte, false)        -- its UTF-16 column (é is 1 unit, 2 bytes)
+        ok(u16 == byte - 1, 'the fixture differs by one')
+        local got
+        for _, sym in ipairs(H('workspace/symbol', { query = 'f2' }) or {}) do
+            if sym.name == 'f2' then got = sym.location.range.start end
+        end
+        ok(got, 'the symbol is served')
+        eq(u16, got.character, 'the range goes out in UTF-16 units')
+    end)
+    H('initialize', NVIM_CAPS) -- (restore the nvim session's encoding)
+    vim.fn.delete(root, 'rf')
+    if not okb then error(err, 0) end
 end)
 
 test('lsp: handle() dispatches and rejects unknown methods', function ()

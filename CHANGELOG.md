@@ -2,6 +2,13 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-15 — LSP position encoding is negotiated (lspserve / the LSP server)
+
+- The LSP server now picks `positionEncoding` from what the client offers: `utf-8` when listed, else the LSP default
+  `utf-16`. It used to declare `utf-8` whatever the client offered, so a stdio client without utf-8 read byte columns
+  as UTF-16 ones. nvim's own client offers utf-8 and sees no change (CART-2092).
+- A position that addresses no character in its line answers `null`; a range that will not convert is left out.
+
 ## 2026-11-15 — agent protocol 2: columns are CHARACTERS (breaking for agent clients)
 
 - The MCP agent surface (`tools/mcpserve.lua`) now speaks 1-based **character** columns. Before, a column

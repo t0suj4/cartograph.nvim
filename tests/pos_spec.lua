@@ -62,3 +62,35 @@ test('pos: of_range reads a stored range as GRAPH', function ()
     eq({ line = 4, col = 2, lb = 0, cb = 0, unit = 'byte' }, pos.of_range(r))
     eq({ line = 6, col = 3, lb = 0, cb = 0, unit = 'byte' }, pos.of_range(r, 'end'))
 end)
+
+-- CART-2092: the LSP wire is not storage. A wire column is in the NEGOTIATED encoding (utf-16 unless agreed otherwise);
+-- every crossing goes through pos.to_lsp / from_lsp / range_from_lsp — clangd had stored the wire column as a byte one.
+test('pos: the LSP wire converts both ways in the negotiated encoding; a wire range becomes a stored BYTE range (CART-2092)', function ()
+    local text = 'x = "é"; f(1)' -- `é`: 2 bytes, 1 utf-16 unit; `f` is byte 10, utf-16 9
+    eq({ line = 3, character = 9 }, pos.to_lsp(3, 10, 'utf-16', text))
+    eq({ line = 3, character = 10 }, pos.to_lsp(3, 10, 'utf-8', text), 'utf-8 IS bytes: no text needed')
+    local l, b = pos.from_lsp({ line = 3, character = 9 }, 'utf-16', text)
+    eq(3, l); eq(10, b)
+    local r = pos.range_from_lsp({ start = { line = 3, character = 9 }, ['end'] = { line = 3, character = 13 } }, 'utf-16',
+        function () return text end)
+    eq({ start = { line = 3, char = 10 }, ['end'] = { line = 3, char = 14 } }, r)
+    local none, why = pos.from_lsp({ line = 3, character = 9 }, 'utf-16', nil)
+    eq(nil, none); eq('needs-line-text', why)
+    eq('utf-16', pos.client_encoding({}), 'a client carrying no encoding is the LSP default')
+    eq('utf-8', pos.client_encoding({ offset_encoding = 'utf-8' }))
+end)
+
+test('clangd: a wire range is STORED in bytes through the client\'s encoding, never copied (CART-2092)', function ()
+    local clangd = require 'cartograph.providers.clangd'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.c', 'w')); fd:write('int z;\nchar *s = "é"; int y = g(1);\n'); fd:close()
+    local rd = pos.line_reader(root, nil)
+    local line = 'char *s = "é"; int y = g(1);'
+    local gb = line:find('g%(') - 1                          -- 0-based BYTE column of g
+    local gu = vim.str_utfindex(line, 'utf-16', gb, false)   -- its UTF-16 column
+    local wire = { start = { line = 1, character = gu }, ['end'] = { line = 1, character = gu + 1 } }
+    local stored = clangd._wire_at({ offset_encoding = 'utf-16' }, rd, 'a.c', wire)
+    eq({ start = { line = 1, char = gb }, ['end'] = { line = 1, char = gb + 1 } }, stored, 'the byte column, not the wire one')
+    eq(nil, clangd._wire_at({ offset_encoding = 'utf-16' }, rd, 'missing.c', wire), 'no line text: dropped, never stored wrong')
+    vim.fn.delete(root, 'rf')
+end)
