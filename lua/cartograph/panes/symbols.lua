@@ -3524,18 +3524,25 @@ function M.attach(win)
             if callrec.line(c) == line and callrec.callee(c) == callee and c.refused then return c end
         end
     end
+    -- ★ THE SUBJECT FIELDS ARE DERIVED FROM THE ALTITUDE REGISTRY, NOT LISTED (CART-2090). The hand list missed
+    -- `axis` and `syms`, so a trail or jumplist entry made there rebuilt a stale subject — and the history altitude
+    -- would inherit the gap. Every altitude keeps its key in M.view[view_key or its own name] (altitudes.key_of), so a
+    -- new altitude is captured and restored by declaring it; nothing here can forget one again.
+    local function subject_fields()
+        local fs = {}
+        for lvl, e in pairs(altitudes.REGISTRY) do fs[#fs + 1] = e.view_key or lvl end
+        table.sort(fs)
+        return fs
+    end
+    M._subject_fields = subject_fields
     local function view_loc()
-        return { level = M.view.level, file = M.view.file, fn = M.view.fn,
-            region = M.view.region, var = M.view.var, callers = M.view.callers,
-            block = M.view.block, lens = M.view.lens, -- lens rides the trail
-            live = M.view.live,
-            tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
-            refused = M.view.refused, regfor = M.view.regfor,
-            proto = M.view.proto, lintact = M.view.lintact,
-            suppressed = M.view.suppressed, unread = M.view.unread,
+        local l = { level = M.view.level,
+            lens = M.view.lens, -- lens rides the trail, and the jumplist (settled D9)
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
+        for _, f in ipairs(subject_fields()) do l[f] = M.view[f] end
+        return l
     end
     -- the node a view is anchored on (whose def the source pane should show).
     -- The NARROW flavour of the altitude's subject, on purpose: see M.subject.
@@ -3575,16 +3582,8 @@ function M.attach(win)
     -- to set (a descent already focused its target; an ascent defers).
     local function restore_loc(loc)
         M.files_mode = loc.files_mode or M.files_mode
-        M.view.file, M.view.fn, M.view.region, M.view.var, M.view.callers =
-            loc.file, loc.fn, loc.region, loc.var, loc.callers
-        M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
-        M.view.lit, M.view.refused = loc.lit, loc.refused
-        M.view.regfor, M.view.block = loc.regfor, loc.block
-        M.view.proto = loc.proto
-        M.view.lintact = loc.lintact
-        M.view.suppressed = loc.suppressed
-        M.view.unread = loc.unread
-        M.view.live = loc.live
+        -- (every altitude's subject field, from the registry — CART-2090)
+        for _, f in ipairs(subject_fields()) do M.view[f] = loc[f] end
         M.view.lens = loc.lens -- the lens rides the trail
         M._ghost = nil  -- fresh position: no ghosted lens node
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end

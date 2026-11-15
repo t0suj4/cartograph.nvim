@@ -1529,14 +1529,13 @@ end
 M._nav_back, M._nav_fwd = {}, {}
 M.loc_provider = nil -- { get = fn() -> loc, set = fn(loc) }, set by the browser
 
---- A JUMPLIST entry. The lens is deliberately dropped: <C-o> is a jump, and a
---- jump lands at the altitude's DEFAULT lens. Dropped here and not inside the
---- provider, because the provider's other callers are carrying a position across a
---- rebuild — they never moved, and must keep the lens they were reading in.
+--- A JUMPLIST entry: the FULL location, lens included. ★ SETTLED D9 (2026-11-12, kb axes-trails-review-reconciliation):
+--- history restores the LENS together with the node and the axis. This used to drop the lens ("a jump lands at the
+--- altitude's DEFAULT lens"), so <C-o> back to a view read in its `lints` lens came back in the default one; the h-trail
+--- kept it, the jumplist did not (CART-2090). A FRESH navigation still starts at the altitude's default lens — that is
+--- show()'s rule, unchanged; only RETURNING to a recorded place keeps what you were reading there.
 local function loc_for_jump()
-    local l = M.loc_provider and M.loc_provider.get() or nil
-    if l then l.lens = nil end
-    return l
+    return M.loc_provider and M.loc_provider.get() or nil
 end
 
 local function snapshot()

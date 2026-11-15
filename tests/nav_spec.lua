@@ -69,23 +69,53 @@ test('nav: history restores the browser location, not just the focus', function 
     store.loc_provider = nil
 end)
 
-test('nav: a JUMPLIST entry omits the lens, but the location itself keeps it',
+test('nav: a JUMPLIST entry keeps the lens — history restores lens + node + axis (settled D9, CART-2090)',
     function ()
-    -- The policy split that :CartographUndo exposed. A jump lands at the
-    -- altitude's default lens, so store.pivot strips it from its entry. But the
-    -- SAME provider is what refresh/init/re-attach use to carry a position across
-    -- a rebuild, where the user never moved — stripping inside the provider applied
-    -- the jumplist's policy to all of them, and undo dropped you out of `lints`.
+    -- This test used to pin the OPPOSITE policy ("a jump lands at the altitude's default lens", stripped at
+    -- loc_for_jump). Settled D9 (2026-11-12) overturned it: returning to a recorded place restores what you were
+    -- reading there. A FRESH navigation still starts at the default lens (show()'s rule, untouched).
     graph({ node('a', 'a'), node('b', 'b') })
+    local restored
     store.loc_provider = {
         get = function () return { level = 'fn', fn = store.focused, lens = 'lints' } end,
-        set = function () end,
+        set = function (loc) restored = loc end,
     }
     store.set_focus('a')
     store.pivot('b')
-    eq('lints', store.loc_provider.get().lens)          -- the location keeps it
-    eq(nil, store._nav_back[#store._nav_back].loc.lens) -- the JUMP entry does not
+    eq('lints', store.loc_provider.get().lens)              -- the location keeps it
+    eq('lints', store._nav_back[#store._nav_back].loc.lens) -- and so does the JUMP entry now
+    store.back()
+    eq('lints', restored.lens, '<C-o> restores the lens it recorded')
     store.loc_provider = nil
+end)
+
+-- CART-2090: view_loc's subject fields were a HAND LIST that missed `axis` and `syms`, so a trail / jumplist entry made
+-- at those altitudes rebuilt a stale subject. They are derived from the altitude registry now.
+test('nav: every altitude\'s subject field rides the location and is restored — axis and syms included (CART-2090)',
+    function ()
+    local symbols = require 'cartograph.panes.symbols'
+    local altitudes = require 'cartograph.panes.altitudes'
+    graph({ node('a', 'a'), node('b', 'b') })
+    vim.cmd('tabnew')
+    local w = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(w, symbols.create()); symbols.attach(w)
+    local fields = symbols._subject_fields()
+    local want = {}
+    for lvl, e in pairs(altitudes.REGISTRY) do want[e.view_key or lvl] = true end
+    for _, f in ipairs({ 'axis', 'syms' }) do ok(want[f], f .. ' is a registry altitude') end
+    eq(vim.tbl_count(want), #fields, 'one field per registry altitude, none listed by hand')
+    for i, f in ipairs(fields) do symbols.view[f] = 'subject-' .. f .. '-' .. i end
+    symbols.view.lens = 'some-lens'
+    local loc = store.loc_provider.get()
+    for i, f in ipairs(fields) do eq('subject-' .. f .. '-' .. i, loc[f], f .. ' is captured') end
+    eq('some-lens', loc.lens)
+    -- move away, then restore: every field comes back
+    for _, f in ipairs(fields) do symbols.view[f] = nil end
+    loc.level = 'files' -- (a root altitude: it renders without needing any subject to resolve)
+    store.loc_provider.set(loc)
+    for i, f in ipairs(fields) do eq('subject-' .. f .. '-' .. i, symbols.view[f], f .. ' is restored') end
+    eq('some-lens', symbols.view.lens)
+    vim.cmd('tabclose')
 end)
 
 test('nav: ingest resets the history', function ()
