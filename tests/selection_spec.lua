@@ -35,7 +35,9 @@ local function setup()
     local function go(r) -- a settled move, as nvim delivers a typed one
         vim.api.nvim_win_set_cursor(wsym, { r, 0 })
         vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
-        vim.wait(100, function () return symbols.selection and symbols.selection.row == r end, 5)
+        -- (a CONDITION wait with a generous ceiling: under the parallel suite the settle timer can slip past 100 ms,
+        -- and the publish then landed after the assertion read nil)
+        vim.wait(2000, function () return symbols.selection and symbols.selection.row == r end, 5)
     end
     local function done()
         symbols.CURSOR_SETTLE_MS = 60; symbols.share_selection = false

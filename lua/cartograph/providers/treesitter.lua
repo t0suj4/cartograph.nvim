@@ -1286,6 +1286,33 @@ end
 --- marked transport.lua's `release`, and the mark depended on which pass saw it.) No scope model / no binder (a global):
 --- the language names it. A binder with a row: n must be declared in that file at or after it (a forward declaration's
 --- later `function f`). A parameter: never
+-- ★ WHERE A BARE NAME NEVER DENOTES A DECLARED FUNCTION (CART-1969). In java an identifier argument is a VARIABLE — a
+-- local, parameter, field or record component — and a method is passed only as a method reference (`Foo::m`), another
+-- node. So `f(x)` names a function only when x's VALUE is one: a lambda bound to the name, minted as a `vfn` node
+-- (`static final Function<A, B> KEY_NAME = v -> …; xs.map(KEY_NAME)`, also inherited from a superclass or another
+-- file). A declared method or a record's accessor is never it: `new Status(growCount, capacity, …)` had linked the
+-- FIELDS to Status::capacity() / growCount(), `assertSliceOffsets(…, numCentroids)` the component to a method.
+-- A spec that says so (`arg_fn_values = false`) gates the callback upgrade on the TARGET. (The cbarg pre-scans need no
+-- gate: they look the argument up in the EXACT index, and java's functions are keyed qualified — `Status::capacity` —
+-- so a bare argument never reaches one there; measured, a gate in _arg_is_fn changed nothing and survived mutation.)
+-- (memo per file on M: this chunk is at Lua's 200-local limit)
+M._arg_fn_values_memo = {}
+function M._arg_fn_values(file)
+    if not file then return true end
+    local v = M._arg_fn_values_memo[file]
+    if v == nil then
+        local lang = M.lang_of(file)
+        local sp = lang and M.spec[lang]
+        v = not (sp and sp.arg_fn_values == false)
+        M._arg_fn_values_memo[file] = v
+    end
+    return v
+end
+--- may an identifier argument in `file` name function node `n` at all? (CART-1969: only a function VALUE, where the
+--- language has no bare method values)
+function M._arg_may_name(file, n)
+    return M._arg_fn_values(file) or (n and n.vfn) == true
+end
 function M._arg_is_fn(bd, file, n)
     if bd == nil or bd == -1 then return true end
     local row = bd >= 0 and bd or (bd <= -3 and -bd - 3) or nil
@@ -8493,6 +8520,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- rebinds it — the B3 this-typing walk needs to tell them apart
                     -- @langs-ok js/ts `arrow_function` — the B3 this-typing walk is a JS-family concern
                     arrow = defn:type() == 'arrow_function' or nil,
+                    -- a FUNCTION VALUE bound to a name (java `Function<A, B> KEY = v -> …`): the def node is one of the
+                    -- spec's value types, not a declaration — what an identifier argument may name where a bare name
+                    -- never denotes a declared method (spec.arg_fn_values = false, CART-1969)
+                    vfn = (spec.fn_value_types and spec.fn_value_types[defn:type()] and not aname) or nil,
                     cbarg = isfield or nil,
                     -- locals DERIVED from params (CART-1566): effects maps one handed to a mutating callee to its param
                     derived = not aname and M._derived_of(defn, src, spec.guards) or nil,
@@ -10887,6 +10918,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             if a.k == 'local' and a.name then
                 local t2, _ = resolve(a.name, p.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and M._arg_may_name(p.file, t2) -- (a declared method is no argument's value in java, CART-1969)
                     -- (BOUND at its site: its binder alone decides — the def it declares, `const cb = () => …; f(cb)`, and
                     -- nothing else; FREE: the fn-chain shadow gate, CART-1498 — CART-1598)
                     and not M._nested_unseen(t2, p.call.fn, parent_fn) -- (another function's local def, CART-1562)
@@ -11157,6 +11189,7 @@ local function build_symtab(nodes)
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab, drk = n.drk,
             ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
+            vfn = n.vfn, -- (the callback upgrade's target test in a language without bare method values, CART-1969)
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
             -- and the parallel graph disagrees with the inline one (CART-0616)
@@ -11781,6 +11814,7 @@ function M.relink(data, touched, opts)
                 end
                 local confirmed
                 if t2 and (t2.kind == 'function' or t2.kind == 'method')
+                    and M._arg_may_name(cfile, t2) -- (the extract's gate, mirrored: CART-1969 — parity needs both)
                     and not M._nested_unseen(t2, cfn, parent_fn) -- (another function's local def, CART-1562)
                     and (cv.aget(i, j, 'bound') ~= nil and not M._bound_veto(cv.aget(i, j, 'bound'), cv.aget(i, j, 'bate'), t2, cfile)
                         or cv.aget(i, j, 'bound') == nil and not M._arg_shadowed(aname, cfn and node_index[cfn], parent_fn, t2, cfile)) then -- (CART-1498 / 1598)

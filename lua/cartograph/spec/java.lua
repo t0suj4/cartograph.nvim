@@ -1426,6 +1426,11 @@ return {
         return file:match('^(.*)/[^/]*$') or ''
     end,
     id_fn_refs = false,
+    -- a bare identifier ARGUMENT names a function only when its VALUE is one — a lambda bound to the name (a `vfn` def,
+    -- the lambda_expression captured by `functions` above); a declared method or a record accessor never: a method value
+    -- is a method_reference (`Foo::m`), another node (CART-1969)
+    arg_fn_values = false,
+    fn_value_types = { lambda_expression = true },
     stdlib_names = { get = true, set = true, add = true, size = true,
         isEmpty = true, toString = true, equals = true, hashCode = true,
         valueOf = true, of = true, build = true, builder = true,

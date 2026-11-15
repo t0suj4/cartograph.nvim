@@ -130,6 +130,12 @@ M.SLOTS = {
                                    -- file is traversed twice (CART-0236)
     local_decls = 'SCOPE&KEY',     -- in-fn local bindings (local-shadow gate)
     id_fn_refs = 'SCOPE&KEY',      -- identifier arg = fn reference (callback)
+    -- false: a bare identifier ARGUMENT names a function only when the target is a function VALUE bound to a name (a node
+    -- minted from one of `fn_value_types`, field `vfn`) — never a declared method / accessor (java: `Foo::m` is the method
+    -- value). Gates the callback upgrade on the target. NOT id_fn_refs, which only silences the id
+    -- pass's mention refs (go / rust pass functions by bare name). php / erlang code measured 0 upgrades: not declared.
+    arg_fn_values = 'SCOPE&KEY', -- (CART-1969)
+    fn_value_types = 'SCOPE&KEY', -- the def node types that are a function VALUE bound to a name (CART-1969)
     dot_calls_are_methods = 'SCOPE&KEY',
     bare_calls_bind_bare = 'SCOPE&KEY', -- no implicit receiver: a bare call never tail-matches `T.f` (CART-1487)
     colon_calls_pass_self = 'SCOPE&KEY', -- `x:f()` reaches a method only, never a plain `M.f` (CART-1491)

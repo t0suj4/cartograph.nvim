@@ -23,7 +23,7 @@ M.NODE_FIELDS = {
     id = true, name = true, kind = true, file = true, range = true,
     order = true,
     -- extraction facts
-    params = true, locals = true, arrow = true, torn = true, decl = true, macro = true, cbarg = true,
+    params = true, locals = true, arrow = true, vfn = true, torn = true, decl = true, macro = true, cbarg = true,
     variadic = true, -- a varargs def: params are the fixed prefix (CART-0676)
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var

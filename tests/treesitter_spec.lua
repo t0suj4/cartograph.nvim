@@ -6712,8 +6712,10 @@ test('parallel parity: a registration only a slice could resolve does not surviv
     local jroot = vim.fn.tempname(); vim.fn.mkdir(jroot, 'p')
     local function jput(f, t) local fd = assert(io.open(jroot .. '/' .. f, 'w')); fd:write(t); fd:close() end
     jput('R.java', 'import java.util.Objects;\npublic record R(int count) {\n    static final Object O = Objects.requireNonNull(total);\n}\n')
-    jput('A.java', 'public class A {\n    public int total() { return 1; }\n}\n')
-    jput('B.java', 'public class B {\n    public int total() { return 2; }\n}\n')
+    -- (a FUNCTION VALUE, not a method: since CART-1969 a java identifier argument names only a lambda bound to the name —
+    -- a declared method total() is no argument's value, and the slice would register nothing)
+    jput('A.java', 'public class A {\n    static final Runnable total = () -> {};\n}\n')
+    jput('B.java', 'public class B {\n    static final Runnable total = () -> {};\n}\n')
     local jseq = ts.extract(jroot)
     local jset = ts.list_files(jroot)
     local jacc = { schema = 1, root = jroot, provider = 'treesitter', nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
@@ -6729,7 +6731,7 @@ test('parallel parity: a registration only a slice could resolve does not surviv
         for _, x in ipairs(chunk.extends or {}) do jacc.extends[#jacc.extends + 1] = x end
     end
     vim.fn.delete(jroot, 'rf')
-    eq('A.java::A::total@1', jsliced) -- the slice registered the method
+    eq('A.java::A::total@1', jsliced) -- the slice registered the lambda value
     par.audit(jacc)
     ts.relink(jacc)
     eq(regs(jseq), regs(jacc))
