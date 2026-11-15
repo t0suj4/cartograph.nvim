@@ -6347,9 +6347,10 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 or nt == 'compound_assignment_expr'
                 -- go `x := …` and `i++` / `i--` write their target (CART-1896, mirrored from flow's du for the same
                 -- reason as CART-0433's line above)
-                or nt == 'short_var_declaration' or nt == 'inc_statement' or nt == 'dec_statement' then
-                asgleft = n:field('left')[1] or n:field('name')[1]
-                    or n:child(0)
+                or nt == 'short_var_declaration' or nt == 'inc_statement' or nt == 'dec_statement'
+                or nt == 'update_expression' then -- c / c++ / js / ts / java / php `i++` (CART-2099, mirrored from flow)
+                asgleft = n:field('left')[1] or n:field('name')[1] or n:field('argument')[1]
+                    or (nt == 'update_expression' and n:named_child(0)) or n:child(0)
                 dfk = 1
             elseif nt == 'var_spec' or nt == 'const_spec' then -- go `var a, b = …`: every `name` binds (CART-1896)
                 declist = n:field('name')

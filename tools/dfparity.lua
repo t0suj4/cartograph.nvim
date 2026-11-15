@@ -149,7 +149,10 @@ M.EXPECTED = {
     -- the second time this repo has carried an untracked red matrix (CART-0232 was the
     -- first). The `struct`/`counts`/`fold`/`cache`/`par` columns stayed OK throughout, which
     -- is why nothing else noticed: this moves the coarse PARTITION and nothing else.
-    php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
+    -- recalib 2026-11-15 (CART-2099, `i++` DEFINES i): df-over-collects 35 -> 36. The one new row is a closure body the
+    -- legacy builder descends (BugFilterQuery.class.php:1635, `function (…) use (&$t_param_index) { … $t_param_index++ }`),
+    -- the closure-leak class. ⚠ HEAD was already 39 / flow-over 17 against this pin, unattributed: CART-2100, NOT blessed.
+    php = { ['df-over-collects'] = 36, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
     -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
@@ -224,7 +227,9 @@ M.EXPECTED = {
     -- flow={comparable_time,other,respond_to?} against df={comparable_time,
     -- respond_to?}, and `rescue LoadError => e` gives flow def={e} against df {}.
     -- flow > df in every sample; flow < df never.
-    jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 27, ['OTHER'] = 2,
+    -- recalib 2026-11-15 (CART-2099): flow-over-collects 27 -> 24, a FALL — `i++` now defines i on both builders, so
+    -- three rows where flow alone had the write agree.
+    jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 24, ['OTHER'] = 2,
         ['partition-mismatch'] = 35 },
     mootools = { ['df-over-collects'] = 29, ['flow-over-collects'] = 29,
         ['partition-mismatch'] = 36 }, -- was {} (perfect parity, js archaeology tier)
@@ -239,7 +244,11 @@ M.EXPECTED = {
     -- ★ NOTHING FELL, which is the review question: a df/flow divergence that DISAPPEARS when
     -- a population becomes visible would mean the population was being counted somewhere it
     -- did not belong.
-    libs = { OTHER = 3, ['df-over-collects'] = 1972, disjoint = 2, ['flow-over-collects'] = 322,
+    -- recalib 2026-11-15 (CART-2099, `i++` DEFINES i): df-over-collects +6 (9 rows new, 2 gone), every new one the
+    -- legacy builder's documented imprecision now visible because `++` defines: six `return new Itr() { … keyId++ … }`
+    -- anonymous-class bodies (swisshash), one lambda body, and two enhanced-for loop variables it still counts as uses.
+    -- ⚠ HEAD was already 1973 / flow-over 323 against this pin, unattributed: CART-2100, NOT blessed (1972 + 6).
+    libs = { OTHER = 3, ['df-over-collects'] = 1978, disjoint = 2, ['flow-over-collects'] = 322,
         ['partition-mismatch'] = 1083 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a

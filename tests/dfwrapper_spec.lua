@@ -12,13 +12,16 @@ test('dfparity: a go body parses into the same statement partition on both sides
     fd:write('package m\n\nfunc f(a int) int {\n\tb := a + 1\n\tc := b * 2\n\tif c > 3 {\n\t\tc = 0\n\t}\n\treturn c\n}\n')
     fd:close()
     local data = ts.extract(root, { legacy_df = true, cold = true })
-    vim.fn.delete(root, 'rf')
     local f
     for _, n in ipairs(data.nodes) do if n.name == 'f' then f = n end end
     local df = require 'cartograph.df'
     ok(f and df.present(f), 'the oracle df was built')
     eq(4, df.count(f), 'four statements, not one wrapper')
+    -- (check() re-reads the file: the root is deleted AFTER it — deleted first, it compared nothing and every assertion
+    -- below passed vacuously, found by CART-2099's mutation check)
     local r = dofile('tools/dfparity.lua').check(data)
+    vim.fn.delete(root, 'rf')
+    eq(1, r.nfn, 'the function was compared')
     local cats = r and (r.cats or r) or {}
     eq(nil, cats['partition-mismatch'], 'no partition mismatch')
     eq(nil, cats['unpaired'], 'no unpaired statement')

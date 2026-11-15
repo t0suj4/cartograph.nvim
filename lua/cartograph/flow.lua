@@ -302,9 +302,13 @@ local ASSIGN = { assignment_statement = true, assignment = true,
     -- ★ GO'S TWO OTHER WRITES (CART-1896): `x, y := a, b` (short_var_declaration, {left, right} like an assignment)
     -- and `i++` / `i--` (inc_statement / dec_statement: the operand is child 0, and the statement reads it too —
     -- see INCDEC). Neither was in this set, so go's `:=` defined NOTHING and a loop counter's `i++` was a bare read.
-    short_var_declaration = true, inc_statement = true, dec_statement = true }
--- an increment is a compound write: the target is def'd AND read (rmw), as `i += 1` is (CART-1896)
-local INCDEC = { inc_statement = true, dec_statement = true }
+    short_var_declaration = true, inc_statement = true, dec_statement = true,
+    -- ★ C / C++ / JS / TS / Java / PHP `i++` / `--i` (CART-2099): the same write as go's inc_statement, spelled as an
+    -- EXPRESSION. Absent here, a loop counter's step was a bare read (`i++;` def={} use={i}) and reaching definitions
+    -- saw no kill at it. Its operand is the `argument` field (java's grammar names none: the one named child).
+    update_expression = true }
+-- an increment is a compound write: the target is def'd AND read (rmw), as `i += 1` is (CART-1896, CART-2099)
+local INCDEC = { inc_statement = true, dec_statement = true, update_expression = true }
 -- ★ A COMPOUND ASSIGNMENT READS ITS TARGET (CART-0433). `a += b` is `a = a + b`, but the read rides on the OPERATOR,
 -- so no use-position `a` exists and the rmw rule (a use-position hit on a name already def'd) never fired: js / c /
 -- cpp / java / php / bash / zig recorded `def={a} use={b} rmw={}`. A target under a compound operator is def'd AND
@@ -582,7 +586,10 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
                 k = 8
             end
         elseif ASSIGN[t] then
-            asgleft = node:field('left')[1] or node:field('name')[1] or node:child(0)
+            -- (an increment's operand: its `argument` field, or its one NAMED child — child(0) of a prefix `--i` is the
+            -- operator token, CART-2099)
+            asgleft = node:field('left')[1] or node:field('name')[1]
+                or (INCDEC[t] and (node:field('argument')[1] or node:named_child(0))) or node:child(0)
             k = 1
             cmpd = INCDEC[t] or compound_op(node, src)
         elseif DECL[t] then
@@ -1388,10 +1395,13 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu, _, _, cblk = du(cond, src, false, lang, FN, DUSTOP)
+                -- (the rmw list too: `} while (++i < n)` writes AND reads i, and dropping the read here made the IR,
+                -- which reads it, disagree on every such condition, CART-2099)
+                local cd, cu, _, crmw, cblk = du(cond, src, false, lang, FN, DUSTOP)
                 local ci = #stmts + 1
                 stmts[ci] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu,
+                    rmw = (crmw and crmw[1]) and crmw or nil,
                     expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
                 emit_blocks(cblk, ci)
             end
