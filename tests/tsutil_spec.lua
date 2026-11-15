@@ -39,3 +39,34 @@ test('tsutil.parent: a memo entry is never served for a node of ANOTHER tree, ev
     idx.id = saved
     ok(got and got:id() == nb:parent():id(), 'B\'s node got B\'s parent, not the entry stored for A\'s node')
 end)
+
+-- CART-1114: tsutil defined M.unparen TWICE and the narrower copy, assigned last, won — ruby's parenthesized_statements
+-- was never peeled. One definition now, peeling a wrapper only when it holds exactly one non-comment named child.
+test('tsutil.unparen: ONE definition peels ruby / c / c++ wrappers; a comment is skipped, a multi-child wrapper stays (CART-1114)', function ()
+    for _, l in ipairs({ 'ruby', 'c', 'cpp' }) do
+        if not pcall(vim.treesitter.language.add, l) then skip('no ' .. l .. ' parser') end
+    end
+    -- the condition of every if / while in `src`, unparened, as its node type
+    local function conds(lang, src)
+        local out = {}
+        local function walk(n)
+            if n:type() == 'if' or n:type() == 'while' or n:type() == 'if_statement' or n:type() == 'while_statement' then
+                local u = tsutil.unparen(n:field('condition')[1])
+                out[#out + 1] = u and u:type() or 'nil'
+            end
+            for _, c in tsutil.inamed, n, -1 do walk(c) end
+        end
+        walk(vim.treesitter.get_string_parser(src, lang):parse()[1]:root())
+        return out
+    end
+    eq({ 'identifier', 'parenthesized_statements', 'true' },
+        conds('ruby', 'if (a) then b end\nif (x = 1; x) then b end\nwhile (true) do end\n'))
+    eq({ 'identifier', 'identifier' }, conds('c', 'void f(){ if ((x)) {} if (/*c*/ w) {} }'))
+    eq({ 'identifier', 'condition_clause', 'identifier', 'identifier' },
+        conds('cpp', 'void f(){ if (x) {} if (int y = g(); y) {} while (z) {} if (/*c*/ w) {} }'))
+    local defs = 0
+    for line in io.lines('lua/cartograph/spec/tsutil.lua') do
+        if line:match('^%s*function%s+M%.unparen%s*%(') or line:match('^%s*M%.unparen%s*=') then defs = defs + 1 end
+    end
+    eq(1, defs, 'exactly one M.unparen definition in tsutil.lua')
+end)

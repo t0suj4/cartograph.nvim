@@ -48,6 +48,7 @@ end
 M.PARENS = {
     parenthesized_expression = true,   -- most grammars
     parenthesized_statements = true,   -- ruby
+    condition_clause = true,           -- c++ `if (x)` / `while (x)` (CART-1576)
 }
 
 -- THE ELSEIF VOCABULARY, third resident of this file for the same reason as the
@@ -82,11 +83,19 @@ M.IF_HEAD = {
 }
 
 --- Peel paren wrappers off `node`, returning the innermost named child.
+--- ★ ONE DEFINITION (CART-1114): a second, narrower `M.unparen` further down this file was assigned LAST and won at
+--- runtime, so ruby's parenthesized_statements was never peeled and 350de63's fix was dead at its three sites.
+--- A wrapper is peeled only when it holds EXACTLY ONE non-comment named child. Both copies took named_child(0), which
+--- is the comment in `if (/*c*/ w)`, the init statement in c++'s `if (int y = g(); y)` and the assignment in ruby's
+--- `(x = 1; x)` — none of them the condition. Several children: the wrapper itself comes back, an unpeeled node every
+--- consumer already treats as not-a-simple-condition.
 function M.unparen(node)
     while node and M.PARENS[node:type()] do
-        local inner
-        for _, c in M.inamed, node, -1 do inner = c break end
-        if not inner then break end
+        local inner, n = nil, 0
+        for _, c in M.inamed, node, -1 do
+            if not M.COMMENT[c:type()] then inner, n = c, n + 1 end
+        end
+        if n ~= 1 then break end
         node = inner
     end
     return node
@@ -402,12 +411,6 @@ function M.cfamily_is_write(c, n)
     return false
 end
 
--- descend through parenthesized wrappers to the inner expression
-function M.unparen(n)
-    -- (and c++'s `condition_clause`: `if (x)` wraps its condition in one, CART-1576 — a node no other grammar has)
-    while n and (n:type() == 'parenthesized_expression' or n:type() == 'condition_clause') do n = n:named_child(0) end
-    return n
-end
 
 -- ── THE C-FAMILY GUARD GRAMMAR (CART-1576), shared by c and c++ ──────────────────────────────────────────────────────
 -- Lazy initialisation of globals and statics: `if (!g) g = …`, `if (p == NULL)` / `== nullptr` / `NULL == p`, the
