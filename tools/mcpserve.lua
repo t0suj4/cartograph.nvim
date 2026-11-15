@@ -353,7 +353,7 @@ while true do
                     -- the version this project's own client speaks (mcp.lua)
                     protocolVersion = '2024-11-05',
                     capabilities = { tools = vim.empty_dict() },
-                    serverInfo = { name = 'cartograph', version = '0.2' }, -- (0.2 = agent protocol 2: CHARACTER columns, CART-2086)
+                    serverInfo = { name = 'cartograph', version = '0.3' }, -- (0.3 = agent protocol 3: the `selection` verb, CART-2101; 2: CHARACTER columns, CART-2086)
                 })
             elseif method == 'ping' then
                 reply(id, vim.empty_dict())

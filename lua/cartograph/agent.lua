@@ -319,7 +319,7 @@ end
 -- line's characters misread on any non-ASCII line. The change is a deliberate client break, so it is made VISIBLE:
 -- every answer's `graph` carries `protocol` and `positions`, mcpserve's serverInfo version moved, and CHANGELOG.md /
 -- doc/cartograph.txt say so. A client that reads columns must check `graph.positions.unit == 'char'`.
-M.PROTOCOL = 2
+M.PROTOCOL = 3 -- 3: the `selection` verb, the list pane's current item (CART-2101); 2: CHARACTER columns (CART-2086)
 M.POSITIONS = { line = 1, col = 1, unit = 'char' }
 
 local function build_graph(store)
@@ -684,6 +684,8 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'portability_targets', 'portability_move', 'portability_move_calls',
     -- FEDERATION (CART-1160 step 9): this graph's PORTS, for a client that mounts this host as a band — a READ
     'ports',
+    -- THE LIST PANE'S CURRENT ITEM (CART-2101): a READ of what the source shares, absent on a headless host
+    'selection',
     -- INFRASTRUCTURE (CART-1048, CART-1297): Kubernetes manifests' soft edges, a Helm chart rendered and linted, a plain
     -- chart's stages — READS (a render goes to a temp directory)
     'k8s_findings', 'k8s_traces', 'helm_chart', 'helm_stages', 'kustomize_overlays', 'helmfile_releases',
@@ -3930,6 +3932,37 @@ local function v_txn_apply(store, args)
     }
 end
 
+-- ── verb: selection (CART-2101) ─────────────────────────────────────────────
+-- THE LIST PANE'S CURRENT ITEM, AS THE SOURCE SHARES IT. The pane publishes what is under its cursor (an item: node +
+-- typed position, or a non-item row's kind); a PROTOCOL client sees it only when the source opted in to share, and never
+-- the content of a local-only row (live runtime values) — it gets `shared = false`, "not shared". A headless host has no
+-- pane: absent, not an error.
+local function v_selection(store)
+    local sym = package.loaded['cartograph.panes.symbols']
+    if not (sym and sym.win and vim.api.nvim_win_is_valid(sym.win)) then
+        return { result = {}, absence = 'absent', absence_why = { premise = 'no-pane',
+            why = 'this host has no list pane open — a headless agent host serves no selection', evidence = {} } }
+    end
+    local ps, why = sym.protocol_selection()
+    if not ps then
+        return { result = {}, absence = 'absent', absence_why = { premise = tostring(why),
+            why = 'the list pane has published no selection yet (the cursor has not settled since it opened)', evidence = {} } }
+    end
+    if not ps.shared then return { subject = { shared = false }, result = { { shared = false, why = ps.why } } } end
+    local row = { shared = true, kind = ps.kind, node = nn(ps.node), level = nn(ps.level), file = nn(ps.file) }
+    if ps.pos then
+        local P = require 'cartograph.pos'
+        row.line = P.line(ps.pos, 1)
+        if ps.pos.col then -- (a column crosses into protocol 2's CHARACTER units through its line's text)
+            local nd = ps.node and store.node(ps.node)
+            local f = ps.file or (nd and nd.file)
+            local q = f and P.to(ps.pos, 'AGENT', line_text(store, f, row.line))
+            row.col = q and q.col or nil
+        end
+    end
+    return { subject = { shared = true, kind = ps.kind }, result = { row } }
+end
+
 -- ── verb: txn_undo ──────────────────────────────────────────────────────────
 
 local function v_txn_undo(store, args)
@@ -5014,6 +5047,16 @@ M.VERBS = {
                 desc = 'the same plan handle txn_preview was called with' },
         },
         run = v_txn_apply,
+    },
+    selection = {
+        answers = 'where-is-it',
+        refuses = {},
+        summary = 'the list pane\'s CURRENT ITEM as the source shares it: an item (node + 1-based line / character column) or a non-item row\'s kind (file, statement, group, header, blank, …). `shared = false` ("not shared") when the source has not opted in or the row is local-only (live runtime values) — never the content. Absent on a headless host (no pane)',
+        subject = 'graph',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = {},
+        run = v_selection,
     },
     txn_undo = {
         answers = 'review-apply',

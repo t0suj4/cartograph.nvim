@@ -2720,7 +2720,7 @@ function M.render()
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
         line_regfor = {}, line_block = {}, line_proto = {},
         line_lint = {}, line_act = {}, line_hushed = {}, line_unread = {},
-        line_about = {}, line_kind = {}, line_syms = {}, line_axis = {} }
+        line_about = {}, line_kind = {}, line_syms = {}, line_axis = {}, line_local = {} }
     local v = M.view
     if v.level == 'fn' and cur_lens() == 'lints' then
         render_lints(ctx, v.fn)
@@ -2732,9 +2732,15 @@ function M.render()
             render_files(ctx)
         end
     elseif v.level == 'file' then
-        if cur_lens() == 'live' then render_live(ctx, module_id(v.file))
+        if cur_lens() == 'live' then
+            render_live(ctx, module_id(v.file))
+            for i = 1, #ctx.lines do ctx.line_local[i] = true end
         else render_file(ctx, v.file) end
-    elseif v.level == 'live' then render_live(ctx, v.live)
+    elseif v.level == 'live' then
+        -- the process's own runtime VALUES: the source keeps them local-only (CART-2101) — a protocol client is told
+        -- "not shared", never the sample
+        render_live(ctx, v.live)
+        for i = 1, #ctx.lines do ctx.line_local[i] = true end
     elseif v.level == 'region' then render_region(ctx, v.region)
     elseif v.level == 'var' then render_var(ctx, v.var)
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
@@ -2768,6 +2774,7 @@ function M.render()
     M.line_hushed, M.line_unread = ctx.line_hushed, ctx.line_unread
     M.line_syms = ctx.line_syms
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
+    M.line_local = ctx.line_local -- (local-only rows: what protocol clients are never shown, CART-2101)
     M.line_axis = ctx.line_axis
 
     -- names come from arbitrary source text; a row must stay one row
@@ -3130,6 +3137,107 @@ function M.on_cursor(fn)
         end
     end
 end
+
+-- ── THE CURRENT ITEM, NOT THE CURSOR POSITION (CART-2101, the user's design: kb current-item-selection-design) ─────
+-- The pane publishes WHAT IS UNDER THE CURSOR as a fact, never a policy: an ITEM (a node id plus its typed GRAPH
+-- position, for jumping to source) or a NON-ITEM row with its kind, plus the raw cursor. Consumers OPT IN to what they
+-- follow; nothing is synced by default, and what a consumer does on a non-item row is its own business (the source
+-- pane and hover keep the last item, a highlight may clear, a summary may want the header).
+--
+--   M.selection = { kind = 'item', node = <id>, pos = <GRAPH pos|nil>, row = r, cursor = { row, col },
+--                   level = <altitude>, local_only = true|nil, meta = { text, file } }
+--               | { kind = 'statement'|'file'|'group'|'separator'|'state'|'lit'|'block'|'symbol'|'lint'|'header'|'blank',
+--                   pos = <GRAPH pos|nil>, file = <rel|nil>, row = r, cursor = …, level, local_only, meta }
+M.selection = nil
+M._sel_subs = {}
+M.line_local = {} -- rows the SOURCE marks local-only: protocol clients get "not shared", never the content
+--- Sharing the selection with PROTOCOL clients is opt-in (the source controls it); local consumers always see it.
+M.share_selection = false
+
+--- what row `r` IS — derived from the tables each renderer already fills, so no renderer can forget to declare it
+function M.selection_at(r)
+    -- (every table read nil-safe: a pane state built without one of them — a test's, an older render path — is still a
+    -- valid pane, and view_loc asks this of whatever row the cursor is on)
+    local function at(t) return t and t[r] end
+    local local_only = at(M.line_local) or nil
+    local id = at(M.line_node)
+    if id then
+        local n = store.node(id)
+        return { kind = 'item', node = id, pos = n and n.range and P.of_range(n.range) or nil, row = r,
+            local_only = local_only }
+    end
+    local st = at(M.line_site)
+    if st and st.fn then return { kind = 'item', node = st.fn, pos = st.pos, row = r, local_only = local_only } end
+    local sy = at(M.line_syms)
+    if sy then
+        return { kind = 'symbol', pos = sy.sr and P.new(sy.sr, sy.sc, 'GRAPH') or nil, row = r, local_only = local_only }
+    end
+    if at(M.line_stmt) then return { kind = 'statement', pos = at(M.line_stmt), row = r, local_only = local_only } end
+    if at(M.line_file) then return { kind = 'file', file = at(M.line_file), row = r, local_only = local_only } end
+    local k = (at(M.line_group) and 'group') or (at(M.line_sep) and 'separator') or (at(M.line_state) and 'state')
+        or (at(M.line_lit) and 'lit') or (at(M.line_block) and 'block') or at(M.line_kind)
+    if k then return { kind = k, row = r, local_only = local_only } end
+    local text = M.buf and vim.api.nvim_buf_is_valid(M.buf)
+        and (vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or '') or ''
+    return { kind = text:match('%S') and 'header' or 'blank', row = r, local_only = local_only }
+end
+
+--- the selection's IDENTITY, which is what a replay records (the trail, the jumplist): an item by its node, a row by its
+--- kind and anchor — never a screen coordinate alone
+function M.selection_key(sel)
+    if not sel then return nil end
+    if sel.kind == 'item' then return { kind = 'item', node = sel.node } end
+    return { kind = sel.kind, file = sel.file, line = sel.pos and P.line(sel.pos, 1) or nil }
+end
+
+--- Opt in. opts = { follow = 'item' | 'selection' | 'cursor', meta = bool, fn = function(sel) }:
+---   'item'      called when the current ITEM changes; a non-item row does not call it (the consumer keeps its item)
+---   'selection' called on every published selection, items and non-item rows alike
+---   'cursor'    called on every publish with the raw cursor
+--- meta = false (the default) drops `meta`. Returns the unsubscribe.
+function M.subscribe(opts)
+    local follow = opts and opts.follow
+    assert(follow == 'item' or follow == 'selection' or follow == 'cursor',
+        "symbols.subscribe: follow must be 'item', 'selection' or 'cursor'")
+    assert(type(opts.fn) == 'function', 'symbols.subscribe: fn is required')
+    local sub = { follow = follow, meta = opts.meta == true, fn = opts.fn }
+    table.insert(M._sel_subs, sub)
+    return function ()
+        for i, x in ipairs(M._sel_subs) do
+            if x == sub then table.remove(M._sel_subs, i); return end
+        end
+    end
+end
+
+function M._notify_selection(sel)
+    for _, sub in ipairs(M._sel_subs) do
+        local fire = true
+        if sub.follow == 'item' then
+            fire = sel.kind == 'item' and sel.node ~= sub.last_node
+            if fire then sub.last_node = sel.node end
+        end
+        if fire then
+            local out = sel
+            if sub.follow == 'cursor' then out = { cursor = sel.cursor, row = sel.row, level = sel.level }
+            elseif not sub.meta and sel.meta then
+                out = {}
+                for k, v in pairs(sel) do if k ~= 'meta' then out[k] = v end end
+            end
+            pcall(sub.fn, out)
+        end
+    end
+end
+
+--- what a PROTOCOL client (agent / MCP) may see of the selection: nothing unless the source opted in to share, and never
+--- the content of a local-only row. Positions are left GRAPH here; the agent converts them at its own boundary.
+function M.protocol_selection()
+    local sel = M.selection
+    if not sel then return nil, 'no-selection' end
+    if not M.share_selection then return { shared = false, why = 'not shared' } end
+    if sel.local_only then return { shared = false, why = 'not shared' } end
+    return { shared = true, kind = sel.kind, node = sel.node, pos = sel.pos, file = sel.file or (sel.meta and sel.meta.file), level = sel.level }
+end
+
 M._last_viewkey = nil
 
 --- Subscribe to view changes. fn receives { labels, selected, level }.
@@ -3417,15 +3525,31 @@ function M.attach(win)
         vim.defer_fn(function ()
             if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
             local r = row()
+            -- THE PUBLISHED SELECTION (CART-2101): the fact under the cursor, then every opted-in consumer — settle (the
+            -- hover / source follow / highlight / emit_view) first, as the pane's own follower of 'selection'
+            local sel = M.selection_at(r)
+            local cur = vim.api.nvim_win_get_cursor(win)
+            sel.cursor = { row = cur[1], col = cur[2] }
+            sel.level = M.view.level
+            local nd = sel.node and store.node(sel.node)
+            sel.meta = { text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1], file = sel.file or (nd and nd.file) }
+            M.selection = sel
             M.cursor = { row = r, level = M.view.level, node = M.line_node[r] }
-            settle(r)
+            M._notify_selection(sel)
             for _, fn in ipairs(M._cursor_subs) do pcall(fn, M.cursor) end
         end, M.CURSOR_SETTLE_MS)
     end
     M._publish_cursor = publish_cursor
+    -- the pane's own dependents are a SUBSCRIBER of the selection, first in line (re-attaching replaces it)
+    if M._settle_unsub then M._settle_unsub() end
+    M._settle_unsub = M.subscribe { follow = 'selection', fn = function (sel) settle(sel.row) end }
+    table.insert(M._sel_subs, 1, table.remove(M._sel_subs)) -- (to the front: it ran before every other follower)
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
-        callback = function () M._delivered_row = row(); publish_cursor() end,
+        callback = function ()
+            if M._compat_cm then return end -- (the pane's own compat emission below: already published)
+            M._delivered_row = row(); publish_cursor()
+        end,
     })
     -- ★ ONE PATH FOR EVERY MOVE NVIM DOES NOT DELIVER (CART-2098). A key run inside nvim_win_call from another window
     -- (the plane forwards j / k, G, gg, a search that way), an RPC call or a timer moves this cursor and fires no
@@ -3442,7 +3566,14 @@ function M.attach(win)
         callback = function ()
             if not (vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == M.buf) then return end
             if row() == M._delivered_row then return end
-            vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf }) -- (the handler records + publishes)
+            M._delivered_row = row()
+            publish_cursor() -- ONE publish path for every move (CART-2101): no CursorMoved needed to reach it
+            -- ⚠ COMPAT, TO BE REMOVED (CART-2101): the buffer's CursorMoved is still emitted for a move nvim did not
+            -- deliver, because W3's gate (s0_gate criterion 2) and preview mirror (research/plane/mirror.lua) listen
+            -- for it. Removed once they follow the published selection (symbols.subscribe) — the user's sequencing.
+            M._compat_cm = true
+            pcall(vim.api.nvim_exec_autocmds, 'CursorMoved', { buffer = M.buf })
+            M._compat_cm = false
         end,
     })
     -- debounced (publish_cursor): focus (or statement highlight) follows where the cursor SETTLES
@@ -3619,6 +3750,8 @@ function M.attach(win)
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
         for _, f in ipairs(subject_fields()) do l[f] = M.view[f] end
+        -- (a replay records WHAT was selected — the item, or the row's kind — not only where: CART-2101)
+        l.sel = M.selection_key(M.selection_at(l.row))
         return l
     end
     -- the node a view is anchored on (whose def the source pane should show).
@@ -3665,7 +3798,14 @@ function M.attach(win)
         M._ghost = nil  -- fresh position: no ghosted lens node
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
         M.show(loc.level)
-        if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
+        -- land on the recorded ITEM (CART-2101): its row when the list still holds it there, else wherever it moved to;
+        -- a row that is not an item, or an item that is gone, keeps the recorded row
+        local r = loc.row
+        if loc.sel and loc.sel.kind == 'item' then
+            local at = r and M.selection_at(r)
+            if not (at and at.kind == 'item' and at.node == loc.sel.node) then r = M.node_line[loc.sel.node] or r end
+        end
+        if r then pcall(vim.api.nvim_win_set_cursor, M.win, { r, 2 }) end
     end
     local function push_trail() M.trail[#M.trail + 1] = view_loc() end
     -- LAND ON A SOURCE LINE in the view just rendered. A row that names a SITE

@@ -385,6 +385,8 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         -- the federation wire: this fixture's graph minted (or had no profile), so it serves NO ports — an absence
         -- that names the host flag that would change it
         ports = {},
+        -- the list pane's current item (CART-2101): a headless host has no pane — an ABSENCE naming it
+        selection = {},
         -- INFRASTRUCTURE (CART-1048, CART-1297): this fixture holds no manifest and no helm command line — two
         -- ABSENCES naming their premise — and a chart path that is no chart is a REFUSAL with or without a helm binary
         k8s_findings = {},

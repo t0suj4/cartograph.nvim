@@ -616,7 +616,7 @@ test('why: columns are 1-based CHARACTERS (protocol 2), converted through the li
     local bchar = vim.fn.strchars(L2:sub(1, bbyte - 1)) + 1 -- its 1-based CHARACTER column
     ok(bchar == bbyte - 1, 'the fixture really differs by one: ' .. bchar .. ' vs ' .. bbyte)
     local d = agent.answer(store, 'why', { file = 'm.lua', line = 2 })
-    eq(2, d.graph.protocol, 'the envelope names the protocol')
+    eq(3, d.graph.protocol, 'the envelope names the protocol')
     eq({ line = 1, col = 1, unit = 'char' }, d.graph.positions, 'and the position contract')
     local brow
     for _, r in ipairs(d.result) do if r.callee == 'b' then brow = r end end

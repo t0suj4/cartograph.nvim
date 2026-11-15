@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-15 — agent protocol 3: the `selection` verb (agent surface, additive)
+
+- New verb `selection`: the list pane's CURRENT ITEM as the source shares it — an item (`node`, 1-based `line`,
+  1-based character `col`) or a non-item row's `kind` (file, statement, group, header, blank, …). It answers
+  `shared = false` ("not shared") unless the editor opted in (`symbols.share_selection`) and the row is not
+  local-only; the live altitude's runtime values are always local-only. A headless host has no pane: `absent`.
+- Detect it: `graph.protocol = 3`, `serverInfo.version` `0.3`. Columns are unchanged from protocol 2 (CART-2101).
+- In-process (not the wire): `symbols.selection`, `symbols.subscribe { follow = 'item' | 'selection' | 'cursor', meta, fn }`.
+  The list pane's buffer still emits CursorMoved for a move made from another window; that compat emission is
+  marked for removal once the 2D-plane research consumers follow `symbols.subscribe`.
+
 ## 2026-11-15 — `txn_undo` takes the journal id it should undo (agent surface, additive)
 
 - `txn_undo { journal = <id> }` undoes THAT entry: the `subject.journal` txn_apply returned. While a newer entry
