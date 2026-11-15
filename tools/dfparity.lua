@@ -165,7 +165,13 @@ M.EXPECTED = {
     -- try statement differs on two names out of ~100.
     cppmodern = { OTHER = 1, ['df-over-collects'] = 276, ['flow-over-collects'] = 221,
         ['line-skew'] = 3, ['partition-mismatch'] = 268 }, -- line-skew 11->8: a for-init row now heads the coarse stmt at the INIT's line, which is the loop's own line
-    go = { ['df-over-collects'] = 34, ['flow-over-collects'] = 6, ['OTHER'] = 1,
+    -- recalib 2026-11-15 (CART-1896, GO WRITES ARE DEFS): flow-over-collects 6 -> 8. Both new rows are flow-correct, the
+    -- class this note already describes for other languages: the legacy builder drops a read once the name was def'd
+    -- earlier IN THE SAME COARSE STATEMENT, so an upward-exposed read across a loop iteration or an else path vanishes —
+    -- common/paths/path.go:220 (`target = append(target, …)` and `!wasHyphen` inside `for i, r := range s`, both reading
+    -- the values from before the loop), config/allconfig/load.go:81 (`configs` read on the else path). Invisible
+    -- before because no go assignment was a def on EITHER side; both builders now define go's targets alike.
+    go = { ['df-over-collects'] = 34, ['flow-over-collects'] = 8, ['OTHER'] = 1,
         ['line-skew'] = 17, ['partition-mismatch'] = 22 }, -- +3 @ v51 anon-callback fns (alpinejs); +line-skew (labels);
     -- df-over-collects=27 closure-leaks; partition-mismatch=21 was the re-parse
     -- artifact (minified vendored JS), gone with stored flow.

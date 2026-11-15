@@ -16,6 +16,7 @@ local FX = {
     python = 'def f(a, b):\n  a += b\n  a = a + b\n',
     ruby = 'def f(a, b)\n  a += b\n  a = a + b\nend\n',
     php = '<?php\nfunction f($a, $b) {\n  $a += $b;\n  $a = $a + $b;\n}\n',
+    go = 'package m\nfunc f(a, b int) {\n\ta += b\n\ta = a + b\n}\n', -- (both were def={} use={a,b}: CART-1896)
 }
 
 test('compound assignment: `a += b` defs a, reads b, and records the self-read in rmw — like `a = a + b`', function ()

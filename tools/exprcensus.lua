@@ -414,17 +414,21 @@ M.EXPECTED = {
     -- move — the fix was described as js-only — but `VARARG` is a BASE set, so any grammar
     -- with a spread-ish node carrying an operand rides it. The direction settles it: two
     -- rows where du counted the operand and the IR did not, now agreeing. Prior: 3055.
-    go = { total = 3053, ['missing:assignment_statement'] = 2748, ['missing:type_case'] = 68,
-        ['missing:for_clause'] = 58, ['missing:expression_statement'] = 37,
-        ['extra:type_switch_statement'] = 37, ['extra:if_statement'] = 22,
-        ['missing:short_var_declaration'] = 13, ['missing:type_switch_statement'] = 13,
-        ['missing:defer_statement'] = 9, ['missing:send_statement'] = 9,
-        ['binder:for_statement'] = 8, ['both:type_switch_statement'] = 8,
-        ['binder:expression_statement'] = 5, ['missing:declaration_command'] = 3,
-        ['missing:if_statement'] = 2, ['extra:for_statement'] = 2, ['missing:command'] = 2,
-        ['missing:declaration'] = 2, ['missing:return_statement'] = 2,
-        ['missing:variable_assignment'] = 2, ['binder:declaration_command'] = 1,
-        ['missing:list'] = 1, ['missing:var_declaration'] = 1 },
+    -- recalib 2026-11-15 (CART-1896, NO GO VARIABLE WAS EVER DEFINED): 3053 -> 218 (HEAD measured 2946: the old pin
+    -- had drifted 107 since it was taken, every bash class here already gone). du made an assignment's `left`
+    -- def-position, but go's left is an expression_list and the position did not pass through it, so every target was
+    -- a USE; `:=` / `var` / `const` / `range` / `i++` were not writes at all. Fixing du alone turned 2599
+    -- missing:assignment_statement into ~17000 binder:* rows (the IR read what du now binds, the CART-0431 signature),
+    -- so the IR moved too: `:=` is a plain assign, go declares var_spec / const_spec / range_clause as `defs` binders,
+    -- and an expression-level assign splits a target LIST (`if s, ok := v.(T); ok` — 484 binder:if_statement).
+    -- binder:for_statement 8 and missing:declaration 2 are the corpus's bundled JS / C files; missing:type_case 68 -> 0
+    -- rode along (CART-0416's first leak). 17 other pinned corpora re-run: byte-identical.
+    -- ⚠ NOT BLESSED: extra:type_switch_statement 37 -> 113 and extra:select_statement 0 -> 5 are CART-1895's unattributed
+    -- RISES (red at HEAD before this change, unchanged by it). They stay at their old values so the census keeps
+    -- reading red on exactly them until someone reads them; `total` is what the run would be with them at the pin.
+    go = { total = 137, ['extra:type_switch_statement'] = 37, ['missing:for_clause'] = 58,
+        ['extra:if_statement'] = 21, ['missing:send_statement'] = 9, ['binder:for_statement'] = 8,
+        ['extra:for_statement'] = 2, ['missing:declaration'] = 2 },
     grocy = { total = 239, ['missing:return_statement'] = 100, ['missing:expression_statement'] = 91,
         ['binder:expression_statement'] = 31, ['missing:foreach_statement'] = 6,
         ['missing:pair'] = 6, ['missing:if_statement'] = 4,

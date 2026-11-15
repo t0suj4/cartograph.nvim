@@ -278,7 +278,9 @@ local function binder_nodes(lang)
             -- missing:for_numeric_clause 0 -> 504 — trading one language's fix for
             -- another's regression. So a spec opts in per binder, and the number that
             -- justifies it is in that spec's comment.
-            if b.node and not b.child and b.defs then set[b.node] = true end
+            -- (where the names hang: only the `field` child when one is declared, and inside a `child` LIST
+            -- container — go's `for k, v := range m` holds them in an expression_list, CART-1896)
+            if b.node and b.defs then set[b.node] = { field = b.field, child = b.child } end
         end
     end
     binder_cache[lang] = set
@@ -738,13 +740,14 @@ local build, build_core
 -- `--` between operands of a multi-line expression would otherwise shift
 local ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, augmented_assignment_expression = true,
-    variable_assignment = true }
+    variable_assignment = true,
+    short_var_declaration = true } -- go `x, y := a, b`: {left, right}, the targets written (CART-1896)
 -- ASSIGN minus the augmented forms — the ones whose target is written and NOT read.
 -- Ruby's `operator_assignment` is in neither table: ruby `x += 1` is unmodelled
 -- today, and widening that here would be a separate change with its own measurement
 -- (CART-0316).
 local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
-    assignment_expression = true, variable_assignment = true }
+    assignment_expression = true, variable_assignment = true, short_var_declaration = true }
 local compound_tok -- (defined beside assign_sides below; forward-declared because build() reads it first, CART-0433)
 -- erlang (CART-0957), tabled because this module's @langs does not include it:
 --   PATMATCH  `Pat = Expr`: the pattern side BINDS (flow.pattern_names, the rule du uses), the value side reads
@@ -1346,6 +1349,21 @@ function build_core(node, src, lang)
         local val = node:field('right')[1] or o[2]
         if tgt and val then
             local T, V = build(tgt, src, lang), build(val, src, lang)
+            -- ★ A TARGET LIST WRITES EACH NAME IN IT (CART-1896). go's `if str, ok := v.(string); ok {` puts a
+            -- two-name expression_list in an assignment that is an EXPRESSION here (the if's initializer), and the
+            -- list built as one `?` read both names: 484 hugo rows where du defines `str` and the IR read it. The
+            -- row-level path already splits a target list (list_children); this one did not. Each NAME is a
+            -- valueless assign (the binder convention, CART-0665); a field / index target still reads its base.
+            if UNWRAP[tgt:type()] and tgt:named_child_count() > 1 then
+                local tk = {}
+                for _, c in tsutil.inext, tgt, -1 do
+                    if c:named() and not tsutil.is_comment(c) then
+                        local cn = build(c, src, lang)
+                        tk[#tk + 1] = cn.k == 'name' and { k = 'assign', t = cn, v = nil, kids = { cn } } or cn
+                    end
+                end
+                T = { k = '?', t = tgt:type(), kids = tk, at = T.at }
+            end
             return { k = 'assign', t = T, v = V, kids = { T, V } }
         end
     end
@@ -1369,10 +1387,26 @@ function build_core(node, src, lang)
     -- the locality pass ([[cartograph-cross-project]]); reading the same declaration is
     -- what keeps this from being one more place a grammar can be forgotten.
     local bnd = binder_nodes(lang)
+    local bspec = bnd and bnd[t]
     local kids = {}
-    for _, c in tsutil.inext, node, -1 do
+    for c, fld in node:iter_children() do
         if c:named() and not tsutil.is_comment(c) then
-            if bnd and bnd[t] and NAMEISH[c:type()] then
+            local binds = bspec and (not bspec.field or fld == bspec.field)
+            if binds and bspec.child and c:type() == bspec.child then
+                -- a LIST of bound names (CART-1896): each name a valueless assign, anything else read as usual
+                local inner = {}
+                for _, g in tsutil.inext, c, -1 do
+                    if g:named() and not tsutil.is_comment(g) then
+                        if NAMEISH[g:type()] then
+                            local gn = build(g, src, lang)
+                            inner[#inner + 1] = { k = 'assign', t = gn, v = nil, kids = { gn } }
+                        else
+                            inner[#inner + 1] = build(g, src, lang)
+                        end
+                    end
+                end
+                kids[#kids + 1] = { k = '?', t = c:type(), kids = inner }
+            elseif binds and NAMEISH[c:type()] then
                 -- ⚠ BUILT ONCE AND SHARED, not built twice (CART-0743). This
                 -- used to call `build` for `t` and again for `kids[1]`, so the
                 -- node's two accessors held EQUAL BUT DISTINCT tables — and a

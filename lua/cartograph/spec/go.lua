@@ -335,6 +335,9 @@ end
 return {
     lexical_scopes = GO_LEXICAL_SCOPES, -- CART-1598
     fn_locals = go_fn_locals,
+    -- a go df DEF is a WRITE, not a declaration (`x = …` and `for x = range` assign an outer binding): the binding
+    -- gate reads declarations from fn_locals alone (CART-1896, providers/treesitter.lua callee_binding)
+    df_binds = false,
     qualify_call = go_qualify_call, -- (CART-1599)
     -- a PACKAGE-QUALIFIED member `pkg.Var` (selector_expression: operand / field) reads the var of that name in the
     -- package the file imports as pkg (CART-1580)
@@ -361,6 +364,16 @@ return {
     write_gate = { expression_list = true, selector_expression = true,
         index_expression = true, unary_expression = true,
         inc_statement = true, dec_statement = true, range_clause = true },
+    -- ★ GO'S BINDERS, AS DEFS (CART-1896). du defines these names since go's assignments were fixed (`var a = 1`,
+    -- `const c = 3`, `for k, v := range m`), and the expression IR read them — on hugo the census went
+    -- missing:assignment_statement 2599 -> 0 and opened binder:var_declaration / range_clause / for_statement
+    -- instead, the CART-0431 signature: fixing one side of a shared error exposes the other. `defs = true` is what
+    -- tells the IR a binder's names are bindings (expr.binder_nodes); `field` / `child` say where they hang.
+    binders = {
+        { node = 'var_spec', field = 'name', defs = true },
+        { node = 'const_spec', field = 'name', defs = true },
+        { node = 'range_clause', field = 'left', child = 'expression_list', defs = true },
+    },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

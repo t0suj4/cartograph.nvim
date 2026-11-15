@@ -298,7 +298,13 @@ local ASSIGN = { assignment_statement = true, assignment = true,
     -- ★ THE COMPOUND FORMS THAT HAVE A NODE TYPE OF THEIR OWN (CART-0433): python `a += b`, ruby `a += b`, rust
     -- `a += b` — each one grammar's alone (language.inspect), each `{left, operator, right}`. Absent here, the target
     -- was NEVER A DEF: `def={} use={a,b}`, so a loop accumulator had no definition and an earlier one flowed past it.
-    augmented_assignment = true, operator_assignment = true, compound_assignment_expr = true }
+    augmented_assignment = true, operator_assignment = true, compound_assignment_expr = true,
+    -- ★ GO'S TWO OTHER WRITES (CART-1896): `x, y := a, b` (short_var_declaration, {left, right} like an assignment)
+    -- and `i++` / `i--` (inc_statement / dec_statement: the operand is child 0, and the statement reads it too —
+    -- see INCDEC). Neither was in this set, so go's `:=` defined NOTHING and a loop counter's `i++` was a bare read.
+    short_var_declaration = true, inc_statement = true, dec_statement = true }
+-- an increment is a compound write: the target is def'd AND read (rmw), as `i += 1` is (CART-1896)
+local INCDEC = { inc_statement = true, dec_statement = true }
 -- ★ A COMPOUND ASSIGNMENT READS ITS TARGET (CART-0433). `a += b` is `a = a + b`, but the read rides on the OPERATOR,
 -- so no use-position `a` exists and the rmw rule (a use-position hit on a name already def'd) never fired: js / c /
 -- cpp / java / php / bash / zig recorded `def={a} use={b} rmw={}`. A target under a compound operator is def'd AND
@@ -411,7 +417,11 @@ end
 -- named child IS the inner declarator — so it rides the blanket WRAP path.
 -- the sticky def-position of a PATTERN subtree (du, CART-0957): truthy, and distinct from `true`
 local PAT = 'pat'
-local WRAP = { variable_list = true, variable_name = true,
+-- ★ `expression_list` IS GO'S `variable_list` (CART-1896): go assigns LISTS (`a, b = b, a`), so an assignment's left
+-- field is an expression_list, and without it here def-position stopped at the list and every target fell to a USE —
+-- `a = a + b` read def={} use={a,b}, in every go assignment. Only ever reached IN def-position (an assignment's left);
+-- the grammars that also have the type (lua, python) put it only on a right-hand side, where nothing passes def-position.
+local WRAP = { variable_list = true, variable_name = true, expression_list = true,
     reference_declarator = true, exception_variable = true, -- ruby `rescue … => e`
     list_literal = true } -- php `list($p, $q) = …` / `[$p, $q] = …`: each name a DEF (they read as uses: CART-1667)
 -- C/C++ declarator wrappers WITH a `declarator` field (a `*`/`[]` around the
@@ -433,7 +443,8 @@ local DECLWRAP = { pointer_declarator = true, array_declarator = true }
 -- (and ruby's `for x in xs`, its binder in `pattern` — in no registered corpus, so no gate had seen it read
 -- def={} use={x,xs}: CART-0377)
 local LOOPVAR = { enhanced_for_statement = 'name', for_in_statement = 'left',
-    for_range_loop = false, ['for'] = 'pattern' }
+    for_range_loop = false, ['for'] = 'pattern',
+    range_clause = 'left' } -- go `for k, v := range m`: an expression_list, passed through like `=`'s (CART-1896)
 -- cpp for_range_loop's non-binder fields; every other named child is the declarator
 local RANGE_HEAD = { 'type', 'right', 'body' }
 
@@ -573,7 +584,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         elseif ASSIGN[t] then
             asgleft = node:field('left')[1] or node:field('name')[1] or node:child(0)
             k = 1
-            cmpd = compound_op(node, src)
+            cmpd = INCDEC[t] or compound_op(node, src)
         elseif DECL[t] then
             decld = node:field('declarator')[1] or node:field('name')[1]; k = 3
         elseif t == 'let_declaration' then
@@ -628,6 +639,10 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
             k = 6 -- bash `local/declare x`: a direct variable_name child is a DEF
         elseif defpos and DECLWRAP[t] then
             decld = node:field('declarator')[1]; k = 3 -- C/C++ *ptr / arr[]: continue to the inner name
+        elseif t == 'var_spec' or t == 'const_spec' then
+            -- go `var a, b = 1, 2` / `const c = 3`: every `name` field binds (CART-1896); the `type` and the `value`
+            -- list are not names it declares. Was def={} use={a,b}: no go `var` ever defined its variable.
+            declist = node:field('name'); k = 7
         elseif t == 'declaration' then
             -- C/C++ declaration: EVERY `declarator`-field child is def-position
             -- (or continues to one — bare `int x;`, `Foo *p;`, multi `int a, b;`,

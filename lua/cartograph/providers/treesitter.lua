@@ -4402,10 +4402,31 @@ local function dfdef_set(f)
 end
 -- -> regime, and for 'higher-order' the OWNER fn node and the parameter's index (CART-1495: the effects fixpoint
 -- substitutes what a call to the owner passes there)
+-- ★ A df DEF IS A BINDING ONLY WHERE ASSIGNING DECLARES (CART-1896). `hasdf` reads every name a function's df defines
+-- as a local of it — lua's convention, where df tracks locals and fn.locals is empty. In go an assignment WRITES an
+-- existing binding (`for x = range xs`, `x = f()`) and declares nothing, and the gate is position-blind, so once go's
+-- df started defining its targets `gwrp := wrap(gwrp)` read its own argument as the new local and a package function
+-- named by an outer-scope write lost its link. A spec that says so (`df_binds = false`) has its own declared-locals
+-- model (fn_locals -> fn.locals, the `x := x()` exception included), and only that answers.
+-- (fields, not locals: this chunk is at Lua's 200-local limit)
+M._df_binds_memo = {}
+function M._df_binds(f)
+    local file = f and f.file
+    if not file then return true end
+    local v = M._df_binds_memo[file]
+    if v == nil then
+        local lang = M.lang_of(file)
+        local sp = lang and M.spec[lang]
+        v = not (sp and sp.df_binds == false)
+        M._df_binds_memo[file] = v
+    end
+    return v
+end
 local function callee_binding(callee, fn, parent_fn)
     local function hasp(f) for pi, p in ipairs(f.params or {}) do if p == callee then return pi end end end
     local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
     local function hasdf(f)
+        if not M._df_binds(f) then return nil end
         -- light path (F2 build_symtab): dfdef is the precomputed set of names df defines
         -- — the only projection of df resolution reads. Else the set read once per node.
         if f.dfdef then return f.dfdef[callee] == true end
@@ -6323,10 +6344,19 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- python / ruby / rust COMPOUND assignment (`a += b`): its target is a DEF too — flow's du got this in
                 -- CART-0433, and this independent builder must say the same or dfparity reads the fix as a mismatch
                 or nt == 'augmented_assignment' or nt == 'operator_assignment'
-                or nt == 'compound_assignment_expr' then
+                or nt == 'compound_assignment_expr'
+                -- go `x := …` and `i++` / `i--` write their target (CART-1896, mirrored from flow's du for the same
+                -- reason as CART-0433's line above)
+                or nt == 'short_var_declaration' or nt == 'inc_statement' or nt == 'dec_statement' then
                 asgleft = n:field('left')[1] or n:field('name')[1]
                     or n:child(0)
                 dfk = 1
+            elseif nt == 'var_spec' or nt == 'const_spec' then -- go `var a, b = …`: every `name` binds (CART-1896)
+                declist = n:field('name')
+                dfk = 7
+            elseif nt == 'range_clause' then -- go `for k, v := range m`: the left list binds (CART-1896)
+                decld = n:field('left')[1]
+                dfk = 3
             elseif nt == 'declaration_command' then -- bash local/declare
                 dfk = 2
             elseif nt == 'init_declarator' or nt == 'variable_declarator' then
@@ -6352,7 +6382,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- `reference_declarator` (`Type &r`) has no declarator field —
                 -- its lone named child IS the inner declarator.
                 dfk = defpos and (nt == 'variable_list'
-                    or nt == 'variable_name' or nt == 'reference_declarator')
+                    or nt == 'variable_name' or nt == 'reference_declarator'
+                    or nt == 'expression_list') -- go's target list (CART-1896): only ever reached in def position
             end
         end
         local i, c = 0, n:named_child(0) -- (named children only: every per-child action below needs a named one — a mention, a statement, a df use — and the 40% that are tokens were 7.9 M node handles per corpus run, CART-1664)
