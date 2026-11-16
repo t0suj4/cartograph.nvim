@@ -7831,6 +7831,7 @@ end
 --- — otp's port must not mint a javascript call, node's not an erlang one
 function M._mint_bounds(data, node_index, bounds)
     local B = require 'cartograph.boundary'
+    local total = 0
     for _, rt in ipairs(B.runtimes(bounds)) do
         local prof = _profile_mod.load(rt)
         if prof and prof.mint then
@@ -7841,13 +7842,31 @@ function M._mint_bounds(data, node_index, bounds)
                 if m == nil then m = B.resolve(bounds, file, M.lang_of(file)) == rt; memo[file] = m end
                 return m
             end
-            mint_nodes(data, node_index, prof.runtime .. '::', prof.runtime, function (cget, i)
+            total = total + (mint_nodes(data, node_index, prof.runtime .. '::', prof.runtime, function (cget, i)
                 local f = cget(i, 'file')
                 if not (f and mine(f)) then return nil end
                 return port(cget, i)
-            end)
+            end) or 0)
         end
     end
+    return total
+end
+
+--- ★ THE MINT, THEN THE RETURN ROUNDS ONCE MORE (CART-2110). The profile mint runs after every resolution pass, so a
+--- chained call whose determining call only the MINT resolves (`xform.querySelectorAll('f').forEach(…)`: the receiver
+--- is untyped, the profile's mint path names ParentNode.querySelectorAll, whose return is NodeListOf) was decided before
+--- that return type existed — refused `vocab` cold, while a warm relink, which starts from the minted node, typed it to
+--- NodeListOf.forEach. Re-running the rounds over the still-deferred calls when the mint resolved anything, then minting
+--- what they staged, gives the cold graph the warm one's answer. Both are idempotent: on a warm relink nothing new lands.
+function M._mint_with_returns(data, node_index, exact, addref, mint)
+    local r = mint() or 0
+    if r == 0 then return end
+    local cv = require('cartograph.callview').of(data)
+    resolve_returns(cv, node_index, exact, addref, data)
+    for i = 1, cv.n do
+        if cv.get(i, 'to') and not cv.get(i, 'prov') then cv.set(i, 'prov', 'returns') end
+    end
+    mint()
 end
 
 -- A namespace-aperture refusal resolver: if `name` is prefixed by a registered
@@ -11315,9 +11334,9 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- (a FEDERATED extraction — opts.profile_mint = false — leaves the disposed calls as PORTS: the profile is
         -- mounted as its own band and the linkage is derived over the namespace, cartograph.federation)
         if bounds and data.profile_mint ~= false then
-            M._mint_bounds(data, node_index, bounds)
+            M._mint_with_returns(data, node_index, exact, addref, function () return M._mint_bounds(data, node_index, bounds) end)
         elseif active_profile and active_profile.mint and data.profile_mint ~= false then
-            mint_profile_nodes(data, node_index, active_profile)
+            M._mint_with_returns(data, node_index, exact, addref, function () return (mint_profile_nodes(data, node_index, active_profile)) end)
         end
     else
         -- the parallel driver needs each slice's function extents AND
@@ -12174,9 +12193,9 @@ function M._relink(data, touched, opts)
     -- profile resolution face: covers the parallel parent (relink recomputes
     -- active_profile; data.profile isn't restamped here). Idempotent like above.
     if bounds and data.profile_mint ~= false then
-        M._mint_bounds(data, node_index, bounds)
+        M._mint_with_returns(data, node_index, exact, addref, function () return M._mint_bounds(data, node_index, bounds) end)
     elseif active_profile and active_profile.mint and data.profile_mint ~= false then
-        mint_profile_nodes(data, node_index, active_profile)
+        M._mint_with_returns(data, node_index, exact, addref, function () return (mint_profile_nodes(data, node_index, active_profile)) end)
     end
     -- federated_resolve: cbarg marks the pre-scan added went to the light STUBS
     -- (node_index/exact are stubs); replay them onto the real graph nodes (the sole

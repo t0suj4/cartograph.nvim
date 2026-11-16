@@ -2,6 +2,12 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — a chain whose head only a profile resolves is typed on the first open (graph; cache v311)
+
+- `x.querySelectorAll(s).forEach(…)`, where the node profile resolves `querySelectorAll` and declares its return type
+  `NodeListOf`, now resolves `forEach` to `NodeListOf.forEach` when the graph is first built. Before, only a later
+  refresh resolved it. converse.js: +3. A cold graph and a refreshed one now agree (CART-2110).
+
 ## 2026-11-16 — C++ member calls are typed by their receiver's declared class (graph; cache v310)
 
 - A C++ call `x->m()` / `x.m()` whose receiver is a parameter or local declared as a class, a `this->m()`, or a bare
