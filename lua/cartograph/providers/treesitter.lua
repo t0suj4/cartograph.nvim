@@ -8984,8 +8984,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                         end
                     end
                     prev.range['end'] = sp['end']
+                    -- (the END COLUMN moves with the end line, CART-2115: it stayed the first clause's, so on the last
+                    -- clause's last line every call past that column was owned by no function — 156 on ejabberd,
+                    -- `str:join(lists:sort(L), …)` had its inner call orphaned)
                     for _, r in ipairs(fnRanges[file] or {}) do
-                        if r.id == prev.id then r.e = sp['end'].line break end
+                        if r.id == prev.id then r.e = sp['end'].line; r.ec = sp['end'].char break end
                     end
                     fnDefLines[sp.start.line] = true
                     goto fn_done

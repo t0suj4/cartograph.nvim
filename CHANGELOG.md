@@ -2,6 +2,12 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — Erlang / Haskell: calls on a multi-clause function's last line have their caller (graph; cache v316)
+
+- In a function with several clauses (Erlang) or equations (Haskell), a call on the last line past the first
+  clause's end column belonged to no function, so it had no caller edge. ejabberd: 156 calls; ghc compiler/GHC/Core:
+  135. Nothing resolves differently (CART-2115).
+
 ## 2026-11-16 — C++ name matches that contradict the receiver's declared class are withdrawn (graph; cache v315)
 
 - A C++ call resolved by name into a method of a class unrelated to its receiver's declared (or enclosing, or field)
