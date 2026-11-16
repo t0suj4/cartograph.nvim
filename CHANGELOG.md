@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — Java: nested types and lambda parameters are typed correctly (graph; cache v322)
+
+- A receiver declared as a nested generic type (`ImmutableOpenMap.Builder<K, V>`) is typed as that nested class. It
+  is the outer class's nested class, not the caller's own class of the same name, when the tree has the outer
+  class's file.
+- An untyped lambda parameter (`(handlers, x) -> handlers.addMethod(…)`) no longer borrows the type of a field it
+  shadows. A nested JDK type (`Map.Entry`, `System.Logger`) stays external instead of joining a project class of the
+  same simple name.
+- elasticsearch/server: +253 resolved, 32 retargeted to the right `Builder`, 67 wrong joins withdrawn (CART-1963).
+
 ## 2026-11-16 — `type-cycles` finds JPA relationships traversed from both ends (graph field; cache v321)
 
 - `data.typerefs` rows now record each field's JPA relation (`jpa`, `mappedby`) and its Lombok exclusions (`xeq`,

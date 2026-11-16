@@ -2487,7 +2487,8 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     local tl = refs_of('PetController::tally')
     ok(tl['VisitService::count'], 'tally -> count (typed block local)')
     -- SHADOW WALK-OUT, resolve-but-mark (scope-model step 2): a local whose
-    -- scoped-generic type java_base_type cannot name (Map.Entry<...> -> nil)
+    -- type java_base_type cannot name (an array, Integer[] -> nil; it was
+    -- Map.Entry<...>, which CART-1963 names as the JDK's)
     -- must NOT terminate the walk — the shadowed typed FIELD still resolves
     -- (recall kept), but the qualification was a GUESS, so the call carries a
     -- hedge and the edge is capped at ~ even where the name-match is

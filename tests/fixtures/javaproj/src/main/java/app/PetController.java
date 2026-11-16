@@ -20,10 +20,11 @@ public class PetController {
         return svc.count();
     }
 
-    // the local's scoped-generic type has an un-nameable base (Map.Entry<...>);
+    // the local's type has no class name to key by (an array, Integer[]);
     // the receiver lookup must walk past it to the typed `visits` field
+    // (it was Map.Entry<...>, which CART-1963 now names: the JDK's)
     public int shadowedTally() {
-        Map.Entry<String, Integer> visits = null;
+        Integer[] visits = null;
         return visits.count() + 1;
     }
 
@@ -31,7 +32,7 @@ public class PetController {
     // name-match would be same-file CONFIDENT; the hedged qualification
     // must cap the edge at ~ anyway (resolve-but-mark)
     public int shadowedSameFile() {
-        Map.Entry<String, Integer> counter = null;
+        Integer[] counter = null;
         return counter.count() + 1;
     }
 

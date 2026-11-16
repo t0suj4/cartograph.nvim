@@ -95,6 +95,7 @@ M.SLOTS = {
     -- (CART-0735) a file's namespace + `use` aliases + trait uses, and the language's class-name rule over them: the
     -- resolver's class veto compares a class-keyed call's class with its target's by these
     class_names = 'SCOPE&KEY', class_fqcn = 'SCOPE&KEY',
+    nested_file = 'SCOPE&KEY', -- (CART-1963) java: the file a qualified nested class `Outer.Inner` lives in
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection

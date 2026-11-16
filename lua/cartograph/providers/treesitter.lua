@@ -1511,7 +1511,47 @@ local function class_members(data, spec)
     MEMBERS[data] = m
     return m
 end
+M._NAMEIDX = setmetatable({}, { __mode = 'k' })
+M._BASENAMES = setmetatable({}, { __mode = 'k' })
+--- does the graph hold a file of this basename (`ImmutableOpenMap.java`)? memo per data
+function M._has_basename(data, base)
+    if not data then return false end
+    local set = M._BASENAMES[data]
+    if not set then
+        set = {}
+        for f in pairs(data.stamps or {}) do local b = f:match('([^/]+)$'); if b then set[b] = true end end
+        for _, n in ipairs(data.nodes or {}) do
+            if n.kind == 'module' and n.file then local b = n.file:match('([^/]+)$'); if b then set[b] = true end end
+        end
+        M._BASENAMES[data] = set
+    end
+    return set[base] == true
+end
 function M._class_chain_pick(qcls, full, file, data, spec)
+    -- (the nested-class pick, CART-1963: the ONE `Inner::m` defined in the outer class's file)
+    if qcls and full and spec and spec.nested_file and qcls:find('.', 1, true) then
+        local want = spec.nested_file(qcls)
+        if not (want and M._has_basename(data, want)) then return nil end
+        local idx = data and M._NAMEIDX[data]
+        if data and not idx then
+            idx = {}
+            for _, n in ipairs(data.nodes or {}) do
+                if n.name and (n.kind == 'method' or n.kind == 'function') then
+                    local l = idx[n.name]; if not l then l = {}; idx[n.name] = l end
+                    l[#l + 1] = n
+                end
+            end
+            M._NAMEIDX[data] = idx
+        end
+        local hit
+        for _, n in ipairs((want and idx and idx[full]) or {}) do
+            if (n.file or ''):match('([^/]+)$') == want then
+                if hit then return nil end
+                hit = n
+            end
+        end
+        return hit
+    end
     local classnames = data and data.classnames
     if not (qcls and full and spec and spec.class_fqcn and classnames) then return nil end
     local mem = full:match('::([%w_]+)$')
@@ -1536,6 +1576,21 @@ function M._class_chain_pick(qcls, full, file, data, spec)
     return nil
 end
 function M._class_veto(target, qcls, file, data, spec)
+    -- ★ A NESTED CLASS WRITTEN QUALIFIED (java `ImmutableOpenMap.Builder`, CART-1963): the target must live in the
+    -- outer class's file — the same-file tier had landed it on the CALLER's own nested Builder
+    -- outer class's file — the same-file tier had landed it on the CALLER's own nested Builder. NARROW, measured on
+    -- elasticsearch/server: only when the tree HAS a file named for the outer class (`TestClusterNodes.TestClusterNode`
+    -- names an outer class that is itself nested, `DocValuesParameter.Values` too) and only against a target in the
+    -- caller's OWN file (a target elsewhere may be the inner class's INHERITED method, FieldMapper.Builder ->
+    -- Mapper.Builder::leafName)
+    if target and qcls and spec and spec.nested_file and qcls:find('.', 1, true) then
+        local want = spec.nested_file(qcls)
+        local base = (file or ''):match('([^/]+)$')
+        if want and M._has_basename(data, want) and target.file == file and base ~= want then
+            return tsutil.refusal('blocked', { target })
+        end
+        return nil
+    end
     local classnames = data and data.classnames
     if not (target and qcls and spec and spec.class_fqcn and classnames) then return nil end
     local fq = spec.class_fqcn(qcls, classnames[file])

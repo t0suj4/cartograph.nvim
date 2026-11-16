@@ -61,6 +61,30 @@ local function java_basenames(files)
     return idx
 end
 
+local JAVA_JDK_TYPES = {} -- (filled below; declared here so java_base_type sees it)
+-- a scoped name `A.B.C`, generics dropped -> C, or the whole dotted name when its HEAD is a JDK type: `Map.Entry` is
+-- java.util.Map.Entry, and keying it `Entry` joined project classes named Entry (and their getKey) by the name alone
+local function java_scoped_name(txt)
+    txt = txt:gsub('%s+', '')
+    local head = txt:match('^([%w_]+)')
+    if head and (JAVA_JDK_TYPES[head] or head == 'java' or head == 'javax' or head == 'jdk') then
+        -- (a fully qualified JDK name keys from its first class segment: java.util.Map.Entry -> Map.Entry)
+        local cls = txt:match('^[%l_%.]*%.(%u.*)$')
+        return cls or txt
+    end
+    return txt:match('([%w_]+)$')
+end
+-- the QUALIFIED written name of a nested project type (`ImmutableOpenMap.Builder`, generics dropped) — what the
+-- resolver needs to tell ImmutableOpenMap's Builder from the hundred other classes named Builder (CART-1963); nil for
+-- a simple name and for a JDK-headed one (java_scoped_name keeps that whole)
+local function java_qual_type(tnode, src)
+    if tnode and tnode:type() == 'generic_type' then tnode = tnode:child(0) end
+    if not (tnode and tnode:type() == 'scoped_type_identifier') then return nil end
+    local txt = node_text(tnode, src):gsub('%s+', '')
+    local head = txt:match('^([%w_]+)')
+    if head and (JAVA_JDK_TYPES[head] or head == 'java' or head == 'javax' or head == 'jdk') then return nil end
+    return txt
+end
 local function java_base_type(tnode, src)
     if not tnode then return nil end
     local t = tnode:type()
@@ -71,8 +95,15 @@ local function java_base_type(tnode, src)
         if first and first:type() == 'type_identifier' then
             return node_text(first, src)
         end
+        -- ★ A NESTED GENERIC, `Outer.Inner<K, V>`, is Inner — as `Outer.Inner` without arguments already is (CART-1963).
+        -- It returned nothing, so the binder was UNTYPED and the lookup walked out to an outer same-named binder:
+        -- IndexMetadata.Builder's `ImmutableOpenMap.Builder<…> rolloverInfos` was keyed by the outer class's
+        -- `ImmutableOpenMap rolloverInfos` (ImmutableOpenMap::putAllFromMap), a `FieldMapper.Parameter<Script>` by Script
+        if first and first:type() == 'scoped_type_identifier' then
+            return java_scoped_name(node_text(first, src))
+        end
     elseif t == 'scoped_type_identifier' then
-        return node_text(tnode, src):match('([%w_]+)%s*$')
+        return java_scoped_name(node_text(tnode, src))
     end
     return nil
 end
@@ -80,7 +111,6 @@ end
 -- JDK types whose methods are stdlib vocabulary, not project defs: a
 -- receiver of this type must NOT be qualified (Optional::get would tail-match
 -- a project get()). Best-effort — the common collection/util/lang surface.
-local JAVA_JDK_TYPES = {}
 for _, t in ipairs({ 'String', 'StringBuilder', 'StringBuffer', 'CharSequence',
     'Object', 'Class', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte',
     'Short', 'Character', 'Number', 'Math', 'System', 'Thread', 'Optional',
@@ -348,7 +378,8 @@ local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
                     if nm then
-                        local b = { ty = ty, row = row, at = row, ate = (select(3, c:range())) } -- (at / ate: CART-1598)
+                        local b = { ty = ty, row = row, at = row, ate = (select(3, c:range())), -- (at / ate: CART-1598)
+                            tyq = ty and java_qual_type(c:field('type')[1], src) or nil } -- (tyq: CART-1963)
                         if ty == nil then
                             -- typed only by the INITIALIZER: `new Foo()`
                             -- names the type right here; a call's return
@@ -385,10 +416,20 @@ local function java_compact_params(node)
 end
 local function jvt_params(node, src, out) -- name -> {ty}
     local ps = node:field('parameters')[1] or java_compact_params(node)
+    -- ★ AN UNTYPED LAMBDA PARAMETER BINDS ITS NAME, with no type (CART-1963): `(handlers, ignored) -> handlers.addMethod(…)`
+    -- was no binder, so `handlers` resolved to the enclosing class's FIELD of that name (a PathTrie) and the call keyed
+    -- PathTrie::addMethod. A binder with no type stops the lookup: unknown, never another binding's type
+    if ps and ps:type() == 'identifier' then out[node_text(ps, src)] = {}; return end
+    if ps and ps:type() == 'inferred_parameters' then
+        for _, c in inext, ps, -1 do
+            if c:type() == 'identifier' then out[node_text(c, src)] = {} end
+        end
+        return
+    end
     for _, c in (ps and inext or NOOP), ps, -1 do
         if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
             local nm = c:field('name')[1]
-            if nm then out[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
+            if nm then out[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src), tyq = java_qual_type(c:field('type')[1], src) } end
         end
     end
 end
@@ -403,7 +444,8 @@ local function jvt_fields(node, src, out) -- name -> {ty}
                 local nm = p:field('name')[1]
                 if nm then
                     local sr, _, er = p:range()
-                    out[node_text(nm, src)] = { ty = java_base_type(p:field('type')[1], src), at = sr, ate = er }
+                    out[node_text(nm, src)] = { ty = java_base_type(p:field('type')[1], src), at = sr, ate = er,
+                        tyq = java_qual_type(p:field('type')[1], src) }
                 end
             end
         end
@@ -411,12 +453,13 @@ local function jvt_fields(node, src, out) -- name -> {ty}
     for _, c in inext, node, -1 do
         if c:type() == 'field_declaration' then
             local ty = java_base_type(c:field('type')[1], src)
+            local tyq = java_qual_type(c:field('type')[1], src)
             for _, d in inext, c, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
                     -- (`at` / `ate`: the DECLARATION's rows — not `row`, a field is visible above it — so a lambda-valued
                     -- field `Function<A, B> KEY =⏎ v -> …`, annotated or wrapped, is the def an argument KEY names, CART-1598)
-                    if nm then local sr, _, er = c:range(); out[node_text(nm, src)] = { ty = ty, at = sr, ate = er } end
+                    if nm then local sr, _, er = c:range(); out[node_text(nm, src)] = { ty = ty, at = sr, ate = er, tyq = tyq } end
                 end
             end
         end
@@ -940,7 +983,7 @@ local function java_var_type(sm, ident, from, fields_only)
         local b = chain[i]
         if b.kind == 'param' or b.ty ~= nil then
             return b.ty, (skipped and b.ty ~= nil)
-                and { rule = 'shadow-walkout', row = skipped.row } or nil
+                and { rule = 'shadow-walkout', row = skipped.row } or nil, nil, b.tyq -- (4th: the qualified nested type, CART-1963)
         end
         if b.init then return nil, nil, b.init end
         skipped = skipped or b
@@ -1284,7 +1327,13 @@ return {
         return ret, nil, java_ret_flow(defn, src, tvars)
     end,
     scan_fields = java_scan_fields,
-    scan_typerefs = java_scan_typerefs, -- the class names each field's type refers to: data.typerefs (CART-0697)
+    scan_typerefs = java_scan_typerefs,
+    -- a NESTED class written qualified (`Outer.Inner`) lives in Outer's file — a top-level class names its file: the
+    -- resolver's class veto / pick read it (CART-1963). The call's qcls carries the written name
+    nested_file = function (qcls)
+        local head = qcls and qcls:match('^([%w_$]+)%.')
+        return head and (head .. '.java') or nil
+    end, -- the class names each field's type refers to: data.typerefs (CART-0697)
     qualify_call = function (calln, name, src, model)
         -- ★ `new T(…)` CALLS T's CONSTRUCTOR (CART-2070): the row carried the bare class name and the constructor node
         -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /
@@ -1306,7 +1355,7 @@ return {
         local obj = calln:field('object')[1]
         -- how: the MECHANISM that named cls (CART-0695) — self (the enclosing class), super (its extends clause),
         -- binder (a variable's / field's declared type), ctor (`new T().m()`), written (a class the source names)
-        local cls, hedge, defer, qual, how
+        local cls, hedge, defer, qual, how, wq
         if not obj then -- implicit this
             cls, how = java_enclosing_class(calln, src), 'self'
         else
@@ -1322,7 +1371,7 @@ return {
                 cls = sup and sup:named_child(0) and java_super_name(sup:named_child(0), src, me) or nil
             elseif ot == 'identifier' then
                 local objname = node_text(obj, src)
-                cls, hedge, defer = java_var_type(model, objname, calln)
+                cls, hedge, defer, wq = java_var_type(model, objname, calln)
                 how = 'binder'
                 -- a @Qualifier on the receiver field disambiguates which of
                 -- an interface's several impls it holds (resolve_interface)
@@ -1363,7 +1412,8 @@ return {
             elseif ot == 'field_access' then
                 local fo, ff = obj:field('object')[1], obj:field('field')[1]
                 if fo and fo:type() == 'this' and ff then
-                    cls, hedge = java_var_type(
+                    local _
+                    cls, hedge, _, wq = java_var_type(
                         model, node_text(ff, src), calln, true)
                     how = 'binder'
                 elseif ff and fo and fo:type() == 'identifier' and not node_text(ff, src):match('^_*%u') then
@@ -1422,7 +1472,7 @@ return {
         -- the resulting edge INFERRED even where resolution is confident.
         -- 4th value = the receiver field's @Qualifier bean name (or nil).
         return cls and (cls .. '::' .. name) or nil, cls and hedge or nil,
-            (not cls) and defer or nil, cls and qual or nil, nil, cls and how or nil
+            (not cls) and defer or nil, cls and qual or nil, cls and wq or nil, cls and how or nil
     end,
     -- single-inheritance chain (superclass ONLY here — a class implements
     -- MANY interfaces, which would collapse build_super's one-parent map to
