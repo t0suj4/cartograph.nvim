@@ -1349,6 +1349,7 @@ end
 function M.call_nargs(c)
     local av = require 'cartograph.argv'
     local n = av.n(c)
+    if c.method and n <= 1 then return 0 end -- (`o:m()`: slot 1 is the receiver placeholder, kind `expr`)
     if n > 0 then
         local last = av.at(c, n)
         local k = last and last.k

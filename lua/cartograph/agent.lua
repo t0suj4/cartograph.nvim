@@ -2666,7 +2666,10 @@ local function v_portability_sites(store, args)
             if sd then
                 fit, fitwhy = port.arity_fit(sd.pa, sd.pb, port.call_nargs(c))
                 sigs.by_arity[fit] = sigs.by_arity[fit] + 1
-                if fit ~= 'fits' then v = 'signature-changed' end
+                -- only a call PROVEN not to fit is a port site; `unknown` stays kept with its arity said (1.1's
+                -- find_entities_filtered{…} -> 2.0's one EntitySearchFilters table is the same call, which the parameter
+                -- lists alone cannot tell)
+                if fit == 'breaks' or fit == 'shifted' then v = 'signature-changed' end
             end
             total = total + 1
             by_site[v] = by_site[v] + 1
@@ -2708,7 +2711,7 @@ local function v_portability_sites(store, args)
     local not_measured = have_sigs and { 'behaviour-changed' } or { 'signature-changed', 'behaviour-changed' }
     local notes = move_notes(store, { { kind = 'verdict-is-the-names', premise = 'granularity',
         why = have_sigs
-            and 'the profiles answer per NAME: every site of a name carries that name\'s verdict — except `signature-changed`, a SITE\'s: a kept method whose parameters changed, at a site whose argument count breaks or shifts against them (a site that still fits stays `kept`). A changed BEHAVIOUR is not measured'
+            and 'the profiles answer per NAME: every site of a name carries that name\'s verdict — except `signature-changed`, a SITE\'s: a kept method whose parameters changed, at a site whose argument count breaks or shifts against them (a site that still fits, or whose fit is `unknown` — a table argument — stays `kept` with `arity` said). A changed BEHAVIOUR is not measured'
             or 'the profiles answer per NAME: every site of a name carries that name\'s verdict. `kept` means the NAME is kept, not that the call still works — the api artifacts carry no parameter lists here, so a changed SIGNATURE is not measured, nor a changed BEHAVIOUR',
         evidence = { not_measured = not_measured } } })
     if not fs then

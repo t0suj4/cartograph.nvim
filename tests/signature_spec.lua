@@ -67,6 +67,7 @@ test('portability_sites: a kept method whose parameters changed is signature-cha
         '  surface.spill_item_stack({x, y}, {name = "iron-plate", count = 1}, false, nil, false)', -- 3: breaks (one table now)
         '  player.teleport({x, y})',                                                               -- 4: kept: only optional params added
         '  local i = string.find("ab", "b")',                                                      -- 5: the language's own library
+        '  local es = surface.find_entities_filtered{name = "rail"}',                              -- 6: {keys} -> one table concept: unknown, KEPT
         'end',
         'return M', '' }, '\n'))
     fd:close()
@@ -79,6 +80,8 @@ test('portability_sites: a kept method whose parameters changed is signature-cha
     ok(by[3].signature.to:match('^{position, stack'), 'the new form: ' .. tostring(by[3].signature.to))
     eq({ 'kept', vim.NIL }, { by[4].verdict, by[4].signature }, 'a compatible change is no signature finding')
     eq(vim.NIL, by[5].signature, 'string.find is no Factorio class\'s `find`')
+    eq({ 'kept', 'unknown' }, { by[6].verdict, by[6].arity }, 'an unknown fit is said, never made a port site')
+    ok(by[6].signature ~= vim.NIL, 'and the changed signature rides along')
     eq(1, a.subject.by_site['signature-changed'])
     eq(1, a.subject.signatures.by_arity.breaks)
     local g
@@ -91,12 +94,12 @@ test('call_nargs: a multi-valued last argument is an unknown count; a `:` call\'
     if not parser_available('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w'))
-    fd:write('local M = {}\nfunction M.f(o, ...)\n  o.a(1, 2)\n  o.b(1, g())\n  o.c(...)\n  o:d(1)\nend\nreturn M\n'); fd:close()
+    fd:write('local M = {}\nfunction M.f(o, ...)\n  o.a(1, 2)\n  o.b(1, g())\n  o.c(...)\n  o:d(1)\n  o:e()\nend\nreturn M\n'); fd:close()
     local data = ts.extract(root); data.root = root
     store.ingest(data)
     local n = {}
     for _, c in ipairs(store.data.calls) do if c.full and c.full:match('^o[.:]') then n[c.full:sub(3)] = port.call_nargs(c) or 'unknown' end end
-    eq({ a = 2, b = 'unknown', c = 'unknown', d = 1 }, n)
+    eq({ a = 2, b = 'unknown', c = 'unknown', d = 1, e = 0 }, n)
     vim.fn.delete(root, 'rf')
 end)
 
