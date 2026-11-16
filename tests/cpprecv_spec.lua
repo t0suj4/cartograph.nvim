@@ -124,3 +124,43 @@ test('cpp recv: INHERITANCE — base rows; an inherited method and field resolve
     eq(nil, at(data, 'd.cpp', 4).to, 'Left::both and Right::both at one level: refused')
     eq({ 'b.cpp::Base::baseOnly@2', 'recv', 'binder' }, pv(7))
 end)
+
+test('cpp veto: a name match the declared class contradicts is withdrawn; a descendant, an alias, a nested class and an undeclared project class are kept (CART-2114)', function ()
+    if not parser_available('cpp') then skip 'no cpp parser' end
+    local data = ts.extract(tree({
+        ['m.h'] = table.concat({
+            'class Mesh { public: int fillAll(); };',
+            'class Shape { public: virtual int area(); int perim(); };', -- (perim defined: Shape is a project class)
+            'class Square : public Shape { public: int area(); };',
+            'class Real { public: int poke(); };',
+            'typedef Real Alias;',
+            'class Outer { public: static int helperX(); class Inner { public: int go(); }; };',
+            '' }, '\n'),
+        ['m.cpp'] = table.concat({
+            '#include "m.h"',
+            'int Mesh::fillAll() { return 1; }',
+            'int Square::area() { return 4; }',
+            'int Real::poke() { return 2; }',
+            'int Outer::helperX() { return 3; }',
+            'int Outer::Inner::go() { return helperX(); }',  -- 5: nested -> outer: kept
+            'int use(video::IImage *img, Shape *s, Alias *a) {',
+            '  img->fillAll();',                             -- 7: a library type unrelated to Mesh: withdrawn
+            '  s->area();',                                  -- 8: a descendant's override: kept
+            '  a->poke();',                                  -- 9: through the alias: kept
+            '  return 0;',
+            '}',
+            'int Ghost::run() { return fillAll(); }',        -- 12: Ghost is declared OUTSIDE the tree: its bases are unknown
+            'int Shape::perim() { return 0; }',
+            '' }, '\n'),
+    }))
+    local c7 = at(data, 'm.cpp', 7)
+    eq(nil, c7.to)
+    eq({ 'external', 'typed-receiver', 'IImage' }, { c7.ext.disp, c7.ext.why, c7.ext.type })
+    eq('m.cpp::Outer::helperX@4', at(data, 'm.cpp', 5).to)
+    eq('m.cpp::Square::area@2', at(data, 'm.cpp', 8).to)
+    eq('m.cpp::Real::poke@3', at(data, 'm.cpp', 9).to)
+    eq('m.cpp::Mesh::fillAll@1', at(data, 'm.cpp', 12).to, 'an undeclared project class vetoes nothing')
+    local edge
+    for _, e in ipairs(data.edges) do if e.kind == 'ref' and e.to == 'm.cpp::Mesh::fillAll@1' and e.from:match('use@') then edge = e end end
+    eq(nil, edge, 'the withdrawn call leaves no ref edge')
+end)

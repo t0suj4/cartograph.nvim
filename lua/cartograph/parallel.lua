@@ -263,6 +263,10 @@ local function merge_chunk(s, chunk)
     for _, x in ipairs(chunk.fieldtypes or {}) do
         if not seen[x.file] then acc.fieldtypes[#acc.fieldtypes + 1] = x end
     end
+    -- type aliases (cpp typedef / using, CART-2114): file-tagged, deduped the same way
+    for _, x in ipairs(chunk.typealiases or {}) do
+        if not seen[x.file] then acc.typealiases = acc.typealiases or {}; acc.typealiases[#acc.typealiases + 1] = x end
+    end
     -- regobs (CART-0722): file-tagged list, deduped like extends — the
     -- OBSERVED registrar rows, which store.ingest joins against every node's
     -- `annos`. Dropping it here would leave a parallel extract with the
@@ -751,6 +755,7 @@ function M.extract(root, o)
         reorder(acc.extends or {}, function (x) return x.file end)
         reorder(acc.implements or {}, function (x) return x.file end)
         reorder(acc.fieldtypes or {}, function (x) return x.file end)
+        reorder(acc.typealiases or {}, function (x) return x.file end)
         -- CART-0722. The JOIN is order-independent by construction (it takes
         -- the lexicographically first registrar), so `regfrom` would agree
         -- either way — but the ROWS reach the cache and the gate snapshot, and

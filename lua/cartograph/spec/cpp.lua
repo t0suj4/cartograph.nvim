@@ -137,6 +137,36 @@ local function cpp_scan_fields(tsroot, src)
     return out
 end
 
+--- ★ TYPE ALIASES (CART-2114): `typedef Foo Bar;` / `using Bar = ns::Foo;` -> rows { alias, target, ptr } (target =
+--- the class the alias names, tsutil.c_decl_type; ptr = a pointer alias's depth). A receiver declared through an
+--- alias is its target's — without this a typed receiver `Bar *b` would read as unrelated to Foo's methods
+local function cpp_scan_aliases(tsroot, src)
+    local out = {}
+    local stack = { tsroot }
+    while #stack > 0 do
+        local n = table.remove(stack)
+        local t = n:type()
+        if t == 'type_definition' then
+            local tyn = n:field('type')[1]
+            for _, d in ipairs(n:field('declarator')) do
+                local id = d
+                while id and id:type() ~= 'type_identifier' do id = id:field('declarator')[1] end
+                local ty, ptr = tsutil.c_decl_type(tyn, d, src)
+                local a = id and node_text(id, src)
+                if a and ty and a ~= ty then out[#out + 1] = { alias = a, target = ty, ptr = ptr } end
+            end
+        elseif t == 'alias_declaration' then
+            local nm, td = n:field('name')[1], n:field('type')[1]
+            local tyn = td and td:field('type')[1]
+            local ty, ptr = tsutil.c_decl_type(tyn, td and td:field('declarator')[1], src)
+            local a = nm and node_text(nm, src)
+            if a and ty and a ~= ty then out[#out + 1] = { alias = a, target = ty, ptr = ptr } end
+        end
+        for _, c in tsutil.inamed, n, -1 do stack[#stack + 1] = c end
+    end
+    return out
+end
+
 local function cpp_recv_class(calln, src, model)
     if calln:type() ~= 'call_expression' or not model then return nil end
     local f = calln:field('function')[1]
@@ -182,6 +212,7 @@ end
 return {
     recv_class = cpp_recv_class, -- the receiver's declared / enclosing class, a side fact for the `recv` pass (CART-2111)
     scan_fields = cpp_scan_fields, -- a class's fields and their declared class: data.fieldtypes (CART-2112)
+    scan_aliases = cpp_scan_aliases, -- typedef / using aliases of a class: data.typealiases (CART-2114)
     -- ★ INHERITANCE (CART-2116): one data.extends row per BASE of a class / struct (C++ recorded none, so every typed
     -- pass stopped at the declared class). Multiple bases are several rows: build_super's single-parent map refuses
     -- such a class, the recv pass walks them level by level

@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C++ name matches that contradict the receiver's declared class are withdrawn (graph; cache v315)
+
+- A C++ call resolved by name into a method of a class unrelated to its receiver's declared (or enclosing, or field)
+  class is now external, `ext.why = 'typed-receiver'` with the declared type. Unrelated means not that class, not an
+  ancestor, not a descendant. luanti/src: 70 withdrawn, e.g. irrlicht `IImage::fill` had linked to a project
+  `MeshMakeData::fill`. When the ancestry is not fully in the tree nothing is withdrawn (CART-2114).
+- typedef / `using` aliases of a class are recorded (`data.typealiases`), so a receiver declared through an alias is
+  its class's.
+
 ## 2026-11-16 — C++ inheritance is recorded (graph; cache v314)
 
 - A C++ class's base classes are `data.extends` rows, one per base. A typed member call (binder, field, implicit this)

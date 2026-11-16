@@ -5178,7 +5178,9 @@ local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
-    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail, x.data.fieldtypes, x.data.extends) end },
+    { name = 'recv', run = function (x)
+        return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail,
+            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases)) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
@@ -5272,6 +5274,12 @@ local RESOLVE_PASSES = {
             return n
         end
         return resolve_receiver_type(x.cv, x.data, x.exact, x.tail) end },
+    -- a C++ name match the receiver's DECLARED class contradicts is withdrawn (CART-2114): LAST, so no later pass
+    -- re-joins it by name; it returns 0 — a withdrawal resolves nothing
+    { name = 'recv_veto', run = function (x)
+        x.recv_vetoed = M._veto_recv(x.cv, x.data, x.node_index,
+            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases))
+        return 0 end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
@@ -5298,9 +5306,9 @@ end
 --- binder class / enclosing class) resolves to `<class>::<callee>` when exactly one definition of that key, in the
 --- call's language, exists. ADDITIVE: it never touches a resolved call; an overload pair or a missing key leaves the
 --- call as it was (an inherited method is the super pass's)
-function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes, extends)
-    local cget, cset = cv.get, cv.set
-    local n = 0
+--- the C++ RECEIVER ENVIRONMENT shared by the recv pass and its veto (CART-2111..2116, CART-2114): the bases of a
+--- class, a field receiver's declared class (inherited fields too), and a class name through its typedef / using alias
+function M._recv_env(fieldtypes, extends, aliases)
     -- ★ THE BASES (CART-2116): child -> its parent list, from data.extends rows of C / C++ files only; a class named in
     -- two files with different base lists keys nothing (false). Walked level by level, nearest level answering
     local parents
@@ -5364,8 +5372,141 @@ function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes, extends)
         if (op == '->') ~= (t[2] == 1) or (op == '.' and t[2] ~= 0) then return nil end
         return t[1]
     end
+    -- (CART-2114) alias -> its target class: a non-pointer alias only (a pointer alias changes the operator a receiver
+    -- needs), and one every row agrees on
+    local amap
+    local function unalias(c)
+        if not c then return nil end
+        if not amap then
+            amap = {}
+            for _, a in ipairs(aliases or {}) do
+                if a.alias and a.target then
+                    local cur = amap[a.alias]
+                    local v = (a.ptr == 0) and a.target or false
+                    if cur == nil then amap[a.alias] = v elseif cur ~= v then amap[a.alias] = false end
+                end
+            end
+        end
+        for _ = 1, 4 do
+            local t = amap[c]
+            if not t then break end
+            c = t
+        end
+        return c
+    end
+    return { bases = bases, field_type = function (rf) return unalias(field_type(rf)) end, unalias = unalias,
+        parents_of = function (c) bases(c); return parents[c] end } -- (nil = no row, false = ambiguous)
+end
+
+--- ★ THE VETO (CART-2114): a call the name lookup resolved (`base`) into a METHOD of class T, whose receiver's class
+--- C is known (a declared binder, the enclosing class, a field's type — through aliases), is withdrawn when T is
+--- neither C, nor an ancestor of C, nor a descendant of C (a virtual override: the dynamic target is right). The
+--- withdrawn call becomes external, typed by its receiver. NOT vetoed, because the relation is unknowable here:
+--- a class with an ambiguous base list, a target whose ancestry leaves the tree (a base the project does not
+--- define — it may derive from C through it), a constructor, and a target class that ENCLOSES the caller (a nested
+--- class calls its outer class's members unqualified). Measured on luanti/src: IImage.fill had joined
+--- MeshMakeData::fill, Client's bare free() CurlHandlePool::free
+function M._veto_recv(cv, data, node_index, env)
+    local cget, cset = cv.get, cv.set
+    -- projclass: a class the tree has METHODS or bases of; declared: a class whose DECLARATION the tree holds (a C / C++
+    -- type node, ctype) — only then is its base list known. 7kaa's root is src/ and its classes are declared in
+    -- ../include: `Nation : public NationBase` is never seen, and reading that as "no bases" vetoed 616 right calls
+    local projclass, declared
+    local function index()
+        projclass, declared = {}, {}
+        for _, nd in ipairs(data.nodes or {}) do
+            local k = nd.kind == 'method' and nd.name and nd.name:match('([%w_]+)::[%w_~]+$')
+            if k then projclass[k] = true end
+            if nd.kind == 'var' and nd.ctype and nd.file then
+                local l = elang_for(nd.file)
+                if l == 'cpp' or l == 'c' then declared[nd.name] = true end
+            end
+        end
+        for _, e in ipairs(data.extends or {}) do if e.child then projclass[e.child] = true end end
+    end
+    local function project_class(c) if not projclass then index() end return projclass[c] end
+    local function is_declared(c) if not declared then index() end return declared[c] end
+    local function reaches(from, to) -- is `to` among from's ancestors? nil when the walk meets an ambiguous base list
+        local seen, st = { [from] = true }, { from }
+        while #st > 0 do
+            local x = table.remove(st)
+            local ps = env.parents_of(x)
+            if ps == false then return nil end
+            for _, p in ipairs(ps or {}) do
+                if p == to then return true end
+                if not seen[p] then seen[p] = true; st[#st + 1] = p end
+            end
+        end
+        return false
+    end
+    local function leaves_tree(c) -- some ancestor of c is no project class (or an ambiguous list)
+        local seen, st = { [c] = true }, { c }
+        while #st > 0 do
+            local x = table.remove(st)
+            local ps = env.parents_of(x)
+            if ps == false then return true end
+            for _, p in ipairs(ps or {}) do
+                if not project_class(p) then return true end
+                if not seen[p] then seen[p] = true; st[#st + 1] = p end
+            end
+        end
+        return false
+    end
+    local refidx, emptied
+    local function unref(from, to, at)
+        if not refidx then
+            refidx = {}
+            for _, e in ipairs(data.edges or {}) do if e.kind == 'ref' then refidx[e.from .. '\31' .. e.to] = e end end
+        end
+        local e = refidx[from .. '\31' .. to]
+        if not (e and at and e.at) then return end
+        for j = #e.at, 1, -1 do
+            local x = e.at[j]
+            if rawequal(x, at) or (atr.sl(x) == atr.sl(at) and atr.sc(x) == atr.sc(at)) then table.remove(e.at, j); break end
+        end
+        if #e.at == 0 then emptied = emptied or {}; emptied[e] = true end
+    end
+    local n = 0
     for i = 1, cv.n do
-        local rc = not cget(i, 'to') and cget(i, 'rcls')
+        local to = cget(i, 'prov') == 'base' and cget(i, 'to')
+        if to then
+            local how = cget(i, 'qhow')
+            local C = (how == 'binder' or how == 'self') and env.unalias(cget(i, 'rcls')) or nil
+            if not C and cget(i, 'rfld') then C = env.field_type(cget(i, 'rfld')) end
+            local tn = C and node_index[to]
+            local T = tn and tn.kind == 'method' and tn.name and tn.name:match('([%w_]+)::[%w_~]+$')
+            local callee = cget(i, 'callee')
+            if T and T ~= C and T ~= callee then
+                local cfn = cget(i, 'fn')
+                local fnn = cfn and node_index[cfn]
+                local encl = fnn and fnn.name and ('::' .. fnn.name):find('::' .. T .. '::', 1, true)
+                local up, down = reaches(C, T), reaches(T, C)
+                -- (C's bases are known when the tree declares C; a C the tree only has methods of is a project class
+                -- declared elsewhere — unknown. A C the tree neither declares nor implements is a library type)
+                local cknown = is_declared(C) or not project_class(C)
+                if not encl and cknown and is_declared(T) and up == false and down == false and not leaves_tree(T) then
+                    if cfn then unref(cfn, to, cget(i, 'at')) end
+                    cset(i, 'to', nil); cset(i, 'prov', nil); cset(i, 'inferred', nil)
+                    cset(i, 'ext', { disp = 'external', why = 'typed-receiver', inferred = true, type = C })
+                    n = n + 1
+                end
+            end
+        end
+    end
+    if emptied then
+        local E, w = data.edges, 0
+        for r = 1, #E do local e = E[r]; if not emptied[e] then w = w + 1; E[w] = e end end
+        for r = #E, w + 1, -1 do E[r] = nil end
+    end
+    return n
+end
+
+function M._resolve_recv_class(cv, exact, addref, tail, env)
+    local cget, cset = cv.get, cv.set
+    local n = 0
+    local bases, field_type = env.bases, env.field_type
+    for i = 1, cv.n do
+        local rc = not cget(i, 'to') and env.unalias(cget(i, 'rcls'))
         local rf = not rc and not cget(i, 'to') and cget(i, 'rfld')
         local byfield = false
         if rf then rc = field_type(rf); byfield = rc ~= nil end
@@ -10334,6 +10475,13 @@ local MATCH_OPTS = { match_limit = 65536 }
                 data.fieldtypes = data.fieldtypes or {}
                 data.fieldtypes[#data.fieldtypes + 1] = { typename = f.typename,
                     field = f.field, ftype = f.ftype, file = file, ptr = f.ptr } -- (ptr: cpp's pointer depth, CART-2112)
+            end
+        end
+        -- type aliases (cpp typedef / using, CART-2114): the recv pass and its veto read a receiver's class through them
+        if spec.scan_aliases then
+            for _, a in ipairs(spec.scan_aliases(tsroot, src)) do
+                data.typealiases = data.typealiases or {}
+                data.typealiases[#data.typealiases + 1] = { alias = a.alias, target = a.target, ptr = a.ptr, file = file }
             end
         end
     end
