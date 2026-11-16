@@ -2,6 +2,13 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — Java: an inherited method is found through the right class's parent (graph; cache v323)
+
+- When a call on a class must walk up to a parent class, the class is now the one its name means from the calling
+  file: the caller's own file, its import, or the same package. An imported `p.a.Bound` no longer reaches the parent of
+  an unrelated nested `Holder.Bound`. A nested subclass whose simple name collides elsewhere now finds its parent:
+  elasticsearch/libs +21, server +6 (CART-1964).
+
 ## 2026-11-16 — Java: nested types and lambda parameters are typed correctly (graph; cache v322)
 
 - A receiver declared as a nested generic type (`ImmutableOpenMap.Builder<K, V>`) is typed as that nested class. It

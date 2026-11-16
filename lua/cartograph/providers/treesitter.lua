@@ -2555,11 +2555,43 @@ end
 -- Upgrade still-refused `Head::method` calls in place (addref + inferred);
 -- returns how many resolved. `exact` and `addref` come from whichever pass
 -- calls this (extract or relink) so it reads the CURRENT full node set.
-local function resolve_super(cv, extends, exact, addref, node_index)
+local function resolve_super(cv, extends, exact, addref, node_index, edges)
     if not (extends and extends[1]) then return 0 end
     local super = build_super(extends)
     local cget, cset = cv.get, cv.set
     local n = 0
+    -- ★ A CLASS IS (FILE, NAME) WHERE THE LANGUAGE SAYS SO (CART-1964): build_super keys a child by its SIMPLE NAME, so
+    -- every java class named Bound shared one parent — a call on an imported p.a.Bound (no parent) reached the parent
+    -- of an unrelated nested Holder.Bound. Where the spec resolves class names by package (spec.class_by_package), the
+    -- head is the class its name means FROM THE CALLING FILE (that file's own, its import binding, the same package's
+    -- Head.java) and each hop is that declaring file's extends row. A head whose file cannot be named keeps the old
+    -- simple-name answer
+    local superAt, classfiles, bind_of
+    local function class_file(name, from)
+        if not superAt then
+            superAt, classfiles = {}, {}
+            for _, e in ipairs(extends) do
+                if e.file and e.child then
+                    local t = superAt[e.file]; if not t then t = {}; superAt[e.file] = t end
+                    if t[e.child] == nil then t[e.child] = e.parent elseif t[e.child] ~= e.parent then t[e.child] = false end
+                    local c = classfiles[e.child]; if not c then c = {}; classfiles[e.child] = c end
+                    c[e.file] = true
+                end
+            end
+            for _, nd in pairs(node_index or {}) do
+                local c0 = (nd.kind == 'method' or nd.kind == 'function') and nd.name and nd.name:match('^([%w_$]+)::')
+                if c0 and nd.file then local c = classfiles[c0]; if not c then c = {}; classfiles[c0] = c end; c[nd.file] = true end
+            end
+            bind_of = M._binding_index(edges or {})
+        end
+        if classfiles[name] and classfiles[name][from] then return from end
+        local b = bind_of and bind_of[from] and bind_of[from][name]
+        if b then return b end
+        local dir = from:match('^(.*)/[^/]*$')
+        local cand = (dir and (dir .. '/') or '') .. name .. '.java'
+        if classfiles[name] and classfiles[name][cand] then return cand end
+        return nil
+    end
     for i = 1, cv.n do
         local crefused, cfull = cget(i, 'refused'), cget(i, 'full')
         if not cget(i, 'to') and crefused and crefused.cands and cfull then
@@ -2578,25 +2610,35 @@ local function resolve_super(cv, extends, exact, addref, node_index)
                 local fn = node_index and cfn and node_index[cfn]
                 head = fn and fn.name and fn.name:match('^(.+)[.:][%w_]+$') or nil
             end
-            if head and sep and super[head] then
+            if head and sep and super[head] ~= nil then
                 local clang = elang_for(cget(i, 'file'))
+                local _, cspec = elang_for(cget(i, 'file'))
+                local byfile = cspec and cspec.class_by_package and edges
+                local curfile = byfile and class_file(head, cget(i, 'file')) or nil
                 local seen, cur, target = { [head] = true }, head, nil
                 for _ = 1, SUPER_STEP_LIMIT do
-                    local par = super[cur]
+                    local par
+                    if curfile then
+                        par = superAt[curfile] and superAt[curfile][cur]
+                        if par == false then break end -- (two rows in one file disagree: decide nothing)
+                    else
+                        par = super[cur]
+                    end
                     if not par or seen[par] then break end -- top of chain / cycle
                     seen[par] = true
+                    local parfile = curfile and class_file(par, curfile) or nil
                     local cands = exact[par .. sep .. method]
                     if cands then
                         local fit, dup = nil, false
                         for _, node in ipairs(cands) do
-                            if elang_for(node.file) == clang then
+                            if elang_for(node.file) == clang and (not parfile or node.file == parfile) then
                                 if fit then dup = true else fit = node end
                             end
                         end
                         if dup then break end -- ambiguous where defined: refuse
                         if fit then target = fit; break end
                     end
-                    cur = par
+                    cur, curfile = par, parfile
                 end
                 if target then
                     cset(i, 'to', target.id)
@@ -5257,7 +5299,7 @@ end
 
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
-        return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
+        return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index, x.data.edges) end },
     -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
     { name = 'recv', run = function (x)
         return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail,

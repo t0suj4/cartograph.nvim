@@ -66,3 +66,24 @@ test('java Map.Entry<K, V> is the JDK\'s: never a project class named Entry (CAR
     eq('Map.Entry::getKey', c.full)
     eq(nil, c.to)
 end)
+
+test('java super: a class is (file, name) — an imported p.a.Bound never reaches the parent of another Bound (CART-1964)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    for _, dir in ipairs { 'p/a', 'p/n', 'p/x' } do vim.fn.mkdir(root .. '/' .. dir, 'p') end
+    local function w(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    w('p/a/Bound.java', 'package p.a;\npublic class Bound { }\n')
+    w('p/n/Base.java', 'package p.n;\npublic class Base { public int own(int x) { return x; } }\n')
+    w('p/n/Holder.java', 'package p.n;\npublic class Holder {\n  public static class Bound extends Base { int run() { return own(1); } }\n}\n')
+    w('p/n/Other.java', 'package p.n;\npublic class Other { public int own(int x) { return 0; } }\n')
+    w('p/x/Use.java', 'package p.x;\nimport p.a.Bound;\npublic class Use {\n  int go(Bound b) { return b.own(4); }\n}\n')
+    local d = ts.extract(root)
+    local use, inner
+    for _, c in ipairs(d.calls) do
+        if c.file == 'p/x/Use.java' and c.callee == 'own' then use = c end
+        if c.file == 'p/n/Holder.java' and c.callee == 'own' then inner = c end
+    end
+    eq(nil, use.to, 'p.a.Bound has no parent: ' .. tostring(use.to))
+    eq('p/n/Base.java::Base::own@1', inner.to, 'Holder.Bound\'s own() is still its parent\'s')
+    vim.fn.delete(root, 'rf')
+end)
