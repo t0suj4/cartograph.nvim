@@ -159,3 +159,22 @@ test('class_spaces: each profile\'s class table on its own minor; one version ag
     local none, why = port.class_spaces(TO, TO)
     eq(nil, none); ok(tostring(why):match('itself'), tostring(why))
 end)
+
+test('portability_sites: a name the AUDIT already sent through the class space (the tree declares its version) is decided between THIS move\'s versions, never left not-adjudicable (CART-1939)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    -- minimised from Von-Neumann (1.1): `chest3.set_request_slot` — 9 calls in crash-site.lua, REMOVED in 2.0, the
+    -- port guide's §3.3. With info.json declaring 1.1 the audit refines the untyped receiver itself (member-removed),
+    -- and the verb read that reason as "neither profile holds it" -> not-adjudicable
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
+    w('info.json', '{ "name": "m", "version": "0.0.1", "factorio_version": "1.1" }\n')
+    w('control.lua', 'local M = {}\nfunction M.build(chest3)\n  chest3.set_request_slot({ name = "rail", count = 100 }, 1)\nend\nreturn M\n')
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local a = ask()
+    local r = at(a, 3)
+    ok(r, vim.inspect(a.result))
+    eq({ 'lost', 'member-removed', 'member-name' }, { r.verdict, r.reason, r.confidence })
+    eq({ 'LuaEntity' }, r.classes)
+    vim.fn.delete(root, 'rf')
+end)

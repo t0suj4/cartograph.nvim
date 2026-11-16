@@ -2582,8 +2582,12 @@ local function v_portability_sites(store, args)
     -- receiver that worked still works); it left SOME classes -> member-moved, still not adjudicable (which class the
     -- receiver is decides it). Weaker evidence than a profile verdict, and every such row says so: confidence
     -- `member-name`, not `profile`.
+    -- (and a name the AUDIT already sent through the class space — it does for an untyped receiver when the tree
+    -- declares its version — is decided again HERE, between this move's own two versions: the audit's origin is the
+    -- tree's declared one, which need not be `from`, and its member-removed must not fall into `not-adjudicable`)
     local REFINABLE = { ['receiver-typed'] = true, ['receiver-ambiguous'] = true, ['receiver-class-present'] = true,
-        ['receiver-class-chain'] = true, ['receiver-nearmiss'] = true, ['receiver-nomatch'] = true }
+        ['receiver-class-chain'] = true, ['receiver-nearmiss'] = true, ['receiver-nomatch'] = true,
+        ['member-removed'] = true, ['member-supplied'] = true, ['member-moved'] = true, ['not-a-runtime-member'] = true }
     local bymember, refined = {}, { removed = 0, supplied = 0, moved = 0, not_member = 0 }
     local fs, tsp, cmeta = port.class_spaces(args.from, args.to)
     if fs then
