@@ -2,6 +2,13 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C++ calls on a global variable are typed (graph; cache v320)
+
+- `g_settings->get(...)`: a receiver that is a global variable now resolves through the global's declared class
+  (`qhow = 'global'`). luanti: +111 resolved. 7kaa: +295. Inside a member function this applies only when the
+  class and all its bases are declared in the tree, since a member of the same name would shadow the global.
+- C / C++ module variables carry `tcls` / `tptr`: the declared class and its pointer depth (CART-2119).
+
 ## 2026-11-16 — C / C++ reference, array and double-pointer parameters are listed (graph; cache v319)
 
 - A function's `params` (and `param_types` on its row) now include parameters declared as `const Foo &r`,

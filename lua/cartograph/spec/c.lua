@@ -14,6 +14,7 @@ return {
     guards = tsutil.CFAMILY_GUARDS, -- (CART-1576)
     lexical_scopes = tsutil.CFAMILY_LEXICAL_SCOPES, fn_locals = tsutil.cfamily_fn_locals, -- (CART-1598)
     decl_type = tsutil.c_binder_type, -- a binder's declared type as written (CART-0696)
+    decl_class = tsutil.c_binder_class, -- a module var's class + pointer depth (CART-2119)
     macro_text = { preproc_arg = true }, -- (a macro body's identifiers read their vars, CART-1578)
     -- the PREFILTER: every immediate parent type a write mention can have here.
     -- Without it the classifier is never invoked (v147 shipped that mistake).

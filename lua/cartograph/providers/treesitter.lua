@@ -5206,7 +5206,7 @@ local RESOLVE_PASSES = {
     -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
     { name = 'recv', run = function (x)
         return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail,
-            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases)) end },
+            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases, x.data.nodes)) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
@@ -5304,14 +5304,14 @@ local RESOLVE_PASSES = {
     -- re-joins it by name; it returns 0 — a withdrawal resolves nothing
     { name = 'recv_veto', run = function (x)
         x.recv_vetoed = M._veto_recv(x.cv, x.data, x.node_index,
-            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases))
+            M._recv_env(x.data.fieldtypes, x.data.extends, x.data.typealiases, x.data.nodes))
         return 0 end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
 --- the mechanisms of qualify_call's 6th value that are RECEIVER TYPING (CART-0695): the key's class was inferred for
 --- the receiver, not written at the call. `written` (a class the source names) and any other value are not
-M.RECV_HOW = { binder = true, self = true, super = true, ctor = true, field = true }
+M.RECV_HOW = { binder = true, self = true, super = true, ctor = true, field = true, global = true }
 --- 'recv' when the call's typed key itself matched its target exactly, else 'base'
 function M._base_prov(how, full, to, exact, rkey, node_index)
     -- (rkey: the receiver-class key a spec recorded as a side fact — cpp's rcls::callee, CART-2111 — counts the same,
@@ -5334,7 +5334,7 @@ end
 --- call as it was (an inherited method is the super pass's)
 --- the C++ RECEIVER ENVIRONMENT shared by the recv pass and its veto (CART-2111..2116, CART-2114): the bases of a
 --- class, a field receiver's declared class (inherited fields too), and a class name through its typedef / using alias
-function M._recv_env(fieldtypes, extends, aliases)
+function M._recv_env(fieldtypes, extends, aliases, nodes)
     -- ★ THE BASES (CART-2116): child -> its parent list, from data.extends rows of C / C++ files only; a class named in
     -- two files with different base lists keys nothing (false). Walked level by level, nearest level answering
     local parents
@@ -5354,6 +5354,44 @@ function M._recv_env(fieldtypes, extends, aliases)
         end
         return parents[c] or nil
     end
+    local gmap, declared
+    local function global_of(name)
+        if not gmap then
+            gmap, declared = {}, {}
+            for _, nd in ipairs(nodes or {}) do
+                -- (a TORN var is a declaration a damaged parse surfaced at file level — 7kaa's UnitArray::process local
+                -- `Unit* unitPtr;` — never a global)
+                if nd.kind == 'var' and nd.file and not nd.torn then
+                    local l = elang_for(nd.file)
+                    if l == 'cpp' or l == 'c' then
+                        if nd.ctype then declared[nd.name] = true
+                        else
+                            local cur = gmap[nd.name]
+                            local v = nd.tcls and { nd.tcls, nd.tptr or 0 } or false
+                            if cur == nil then gmap[nd.name] = v
+                            elseif not (cur and v and cur[1] == v[1] and cur[2] == v[2]) then gmap[nd.name] = false end
+                        end
+                    end
+                end
+            end
+        end
+        return gmap[name] or nil
+    end
+    local function global_ok(own)
+        if own == '' then return true end
+        global_of('') -- (builds `declared`)
+        -- the owner and every ancestor declared in the tree, no ambiguous base list
+        local seen, st = { [own] = true }, { own }
+        while #st > 0 do
+            local x = table.remove(st)
+            if not declared[x] then return false end
+            bases(x)
+            local ps = parents and parents[x]
+            if ps == false then return false end
+            for _, p in ipairs(ps or {}) do if not seen[p] then seen[p] = true; st[#st + 1] = p end end
+        end
+        return true
+    end
     -- (CART-2112) owner \31 field -> { ftype, ptr } from data.fieldtypes; two different declarations of one owner's field
     -- (same-named classes in two files) decide nothing — false
     local fmap
@@ -5371,8 +5409,8 @@ function M._recv_env(fieldtypes, extends, aliases)
                 end
             end
         end
-        local t = fmap[own .. '\31' .. fld]
-        if t == nil then -- an INHERITED field: the nearest base declaring it, one per level (CART-2116)
+        local t = own ~= '' and fmap[own .. '\31' .. fld] or nil
+        if t == nil and own ~= '' then -- an INHERITED field: the nearest base declaring it, one per level (CART-2116)
             local level, seen = { own }, { [own] = true }
             for _ = 1, 8 do
                 local nxt, hit = {}, nil
@@ -5393,10 +5431,15 @@ function M._recv_env(fieldtypes, extends, aliases)
                 level = nxt
             end
         end
+        -- ★ A GLOBAL (CART-2119): no field of that name — in a free function (own '') or a member of a class whose whole
+        -- chain the tree declares (members shadow globals, and an unknown base may hold the field) — is the ONE c / cpp
+        -- module var so named, typed by its declaration (tcls / tptr)
+        local glob = false
+        if t == nil and global_ok(own) then t = global_of(fld); glob = t ~= nil end
         if not t then return nil end
         -- the operator must fit the declarator, as for a binder: `->` on a pointer, `.` on a value / reference
         if (op == '->') ~= (t[2] == 1) or (op == '.' and t[2] ~= 0) then return nil end
-        return t[1]
+        return t[1], glob
     end
     -- (CART-2114) alias -> its target class: a non-pointer alias only (a pointer alias changes the operator a receiver
     -- needs), and one every row agrees on
@@ -5420,7 +5463,7 @@ function M._recv_env(fieldtypes, extends, aliases)
         end
         return c
     end
-    return { bases = bases, field_type = function (rf) return unalias(field_type(rf)) end, unalias = unalias,
+    return { bases = bases, field_type = function (rf) local c, g = field_type(rf); return unalias(c), g end, unalias = unalias,
         parents_of = function (c) bases(c); return parents[c] end } -- (nil = no row, false = ambiguous)
 end
 
@@ -5534,8 +5577,8 @@ function M._resolve_recv_class(cv, exact, addref, tail, env)
     for i = 1, cv.n do
         local rc = not cget(i, 'to') and env.unalias(cget(i, 'rcls'))
         local rf = not rc and not cget(i, 'to') and cget(i, 'rfld')
-        local byfield = false
-        if rf then rc = field_type(rf); byfield = rc ~= nil end
+        local byfield, glob = false, false
+        if rf then rc, glob = field_type(rf); byfield = rc ~= nil end
         if rc then
             local file = cget(i, 'file')
             local callee = tostring(cget(i, 'callee'))
@@ -5581,7 +5624,7 @@ function M._resolve_recv_class(cv, exact, addref, tail, env)
                 cset(i, 'to', cands[1].id)
                 cset(i, 'refused', nil)
                 cset(i, 'ext', nil)
-                if byfield then cset(i, 'qhow', 'field') end
+                if byfield then cset(i, 'qhow', glob and 'global' or 'field') end
                 local cfn = cget(i, 'fn')
                 if cfn then
                     local cline = cget(i, 'line')
@@ -9297,6 +9340,10 @@ local MATCH_OPTS = { match_limit = 65536 }
                         ty = spec.decl_type and spec.decl_type(namen, src) or nil, -- the declared type as written (CART-0696)
                         data = type(d) == 'table' and d or nil,
                         vlocal = spec.var_local and spec.var_local(defn) or nil }
+                    if spec.decl_class then -- (CART-2119: a global receiver's class)
+                        local vn = nodes[#nodes]
+                        vn.tcls, vn.tptr = spec.decl_class(namen, src)
+                    end
                     if not torn then
                         varsByName[name] = varsByName[name] or {}
                         table.insert(varsByName[name], nodes[#nodes])

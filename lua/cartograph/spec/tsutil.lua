@@ -511,6 +511,26 @@ local function c_decl_type(tynode, d, src)
 end
 M.c_decl_type = c_decl_type
 
+--- THE CLASS A BINDER IS DECLARED AS (CART-2119): c_decl_type's narrow answer (a class name + pointer depth, nothing
+--- for a primitive / auto / std:: / template) read from the binder's identifier — the declarator containing it, up to
+--- its declaration. Stored on a module var (tcls / tptr) so the recv pass can type a GLOBAL receiver
+function M.c_binder_class(id, src)
+    local d, n = id, id and id:parent()
+    while n do
+        local t = n:type()
+        if t == 'pointer_declarator' or t == 'reference_declarator' or t == 'init_declarator'
+            or t == 'parenthesized_declarator' or t == 'array_declarator' then
+            d = n
+        elseif t == 'declaration' or t == 'field_declaration' or t == 'parameter_declaration' then
+            return c_decl_type(n:field('type')[1], d, src)
+        else
+            return nil
+        end
+        n = n:parent()
+    end
+    return nil
+end
+
 --- ★ THE DECLARED TYPE OF A BINDER, AS WRITTEN (CART-0696): from the binder's identifier up through its declarator to
 --- the declaration / parameter, -> the `type:` text with the declarator's pointers and reference spelled after it
 --- (`Foo*`, `const char*` — the declaration's qualifiers lead), or nil when no type is

@@ -164,3 +164,29 @@ test('cpp veto: a name match the declared class contradicts is withdrawn; a desc
     for _, e in ipairs(data.edges) do if e.kind == 'ref' and e.to == 'm.cpp::Mesh::fillAll@1' and e.from:match('use@') then edge = e end end
     eq(nil, edge, 'the withdrawn call leaves no ref edge')
 end)
+
+test('cpp recv: a GLOBAL receiver is typed by its declaration; a member of a class with an unknown base keeps its name unread (CART-2119)', function ()
+    if not parser_available('cpp') then skip 'no cpp parser' end
+    local data = ts.extract(tree({
+        ['g.h'] = 'class Misc { public: int atoiX(const char *s); int roll(); };\nclass Other { public: int atoiX(const char *s); int roll(); };\nextern Misc misc;\nextern Misc *pmisc;\n',
+        ['g.cpp'] = '#include "g.h"\nMisc misc;\nMisc *pmisc;\nint Misc::atoiX(const char *s) { return 0; }\nint Misc::roll() { return 1; }\nint Other::atoiX(const char *s) { return 2; }\nint Other::roll() { return 3; }\n',
+        ['u.cpp'] = table.concat({
+            '#include "g.h"',
+            'int freefn() { return misc.atoiX("1") + pmisc->roll(); }', -- 1: globals in a free function
+            'class User { public: int go(); };',
+            'int User::go() { return pmisc->roll(); }',                    -- 3: a member of a DECLARED class
+            'class Ext : public LibBase { public: int run(); };',
+            'int Ext::run() { return pmisc->roll(); }',                    -- 5: LibBase is not in the tree: may hold pmisc
+            '' }, '\n'),
+    }))
+    local function at2(line, callee)
+        for _, c in ipairs(data.calls) do if c.file == 'u.cpp' and c.line == line and c.callee == callee then return c end end
+    end
+    eq({ 'g.cpp::Misc::atoiX@3', 'recv', 'global' }, { at2(1, 'atoiX').to, at2(1, 'atoiX').prov, at2(1, 'atoiX').qhow })
+    eq('g.cpp::Misc::roll@4', at2(1, 'roll').to)
+    eq('g.cpp::Misc::roll@4', at2(3, 'roll').to)
+    eq(nil, at2(5, 'roll').to, 'an unknown base may declare a member pmisc: the global is not assumed')
+    local tc = {}
+    for _, n in ipairs(data.nodes) do if n.kind == 'var' and n.name == 'pmisc' then tc[#tc + 1] = n.tcls .. ':' .. n.tptr end end
+    eq({ 'Misc:1', 'Misc:1' }, tc, 'the extern declaration and the definition agree')
+end)

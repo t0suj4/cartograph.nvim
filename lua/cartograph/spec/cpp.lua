@@ -87,6 +87,28 @@ local function cpp_enclosing_class(n, src)
         n = n:parent()
     end
 end
+-- is `n` inside a MEMBER function (a qualified `C::m` definition, or one written in a class body)? A member whose class
+-- cannot be named must not be read as a free function: its unbound names may be fields
+local function cpp_in_member(n)
+    while n do
+        local t = n:type()
+        if t == 'function_definition' then
+            local d = n:field('declarator')[1]
+            while d and d:type() ~= 'function_declarator' do d = d:field('declarator')[1] end
+            local nm = d and d:field('declarator')[1]
+            if nm and nm:type() == 'qualified_identifier' then return true end
+            local p = n:parent()
+            while p do
+                if p:type() == 'class_specifier' or p:type() == 'struct_specifier' then return true end
+                if p:type() == 'translation_unit' then return false end
+                p = p:parent()
+            end
+            return false
+        end
+        n = n:parent()
+    end
+    return false
+end
 local function cpp_template_param(n, name, src)
     while n do
         if n:type() == 'template_declaration' then
@@ -188,9 +210,14 @@ local function cpp_recv_class(calln, src, model)
     end
     -- (3rd value, CART-2112: a FIELD receiver — `m_env->step()` with m_env bound by no param or local, or
     -- `this->m_env->step()` — as owner class \31 field \31 operator; the recv pass looks the field's type up)
+    -- (outside any member function the owner is '' — the name can only be a GLOBAL, CART-2119)
     local function field_fact(fname)
         local own = cpp_enclosing_class(calln, src)
-        return own and (own .. '\31' .. fname .. '\31' .. opt) or nil
+        if not own then
+            if cpp_in_member(calln) then return nil end
+            own = ''
+        end
+        return own .. '\31' .. fname .. '\31' .. opt
     end
     if arg:type() == 'field_expression' then
         local ta, top, tf = arg:field('argument')[1], arg:field('operator')[1], arg:field('field')[1]
@@ -214,6 +241,7 @@ return {
     scan_fields = cpp_scan_fields, -- a class's fields and their declared class: data.fieldtypes (CART-2112)
     scan_aliases = cpp_scan_aliases, -- typedef / using aliases of a class: data.typealiases (CART-2114)
     decl_type = tsutil.c_binder_type, -- a binder's declared type as written: var `ty`, function `ptypes` (CART-0696)
+    decl_class = tsutil.c_binder_class, -- a module var's class + pointer depth: var `tcls` / `tptr` (CART-2119)
     -- ★ INHERITANCE (CART-2116): one data.extends row per BASE of a class / struct (C++ recorded none, so every typed
     -- pass stopped at the declared class). Multiple bases are several rows: build_super's single-parent map refuses
     -- such a class, the recv pass walks them level by level

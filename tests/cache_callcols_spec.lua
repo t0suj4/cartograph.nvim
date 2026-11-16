@@ -91,6 +91,7 @@ test('cache: every resolver input the pass table reads survives the round trip',
     -- fields that need no shard, each for a stated reason
     local EXEMPT = {
         edges = 'already persisted',
+        nodes = 'already persisted (the graph itself): the recv pass reads module vars\' tcls (CART-2119)',
         root = 'already persisted (manifest)',
         -- a polyglot root's boundaries are the WHOLE TREE's, not a file's: they ride the manifest (cache.manifest_of,
         -- restored by empty_data) and the read gate compares their canonical key (CART-2108)
