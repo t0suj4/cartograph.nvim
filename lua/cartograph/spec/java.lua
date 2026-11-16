@@ -1450,6 +1450,8 @@ return {
     -- (the scoped identifier is the declaration's LAST named child) keeps the WILDCARDS out: `import a.b.*;` and
     -- `import static a.b.C.*;` end in an `asterisk` and bind no name — guessing one is the fabrication fabcensus counts
     import_reexports = false, -- (an import is a dependency, never a re-export: a binding reaches its own file, CART-0671)
+    -- a class's SIMPLE NAME means the single-type-imported one, else the same package's top-level one (CART-2074)
+    class_by_package = true,
     import_query = [=[
         (import_declaration (scoped_identifier) @path)
         (import_declaration (scoped_identifier name: (identifier) @bind) @path .)

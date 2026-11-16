@@ -5093,6 +5093,68 @@ function M._resolve_arity(cv, node_index, addref)
     return n
 end
 
+--- A CLASS NAME IN TWO PACKAGES (CART-2074): a `Class::m` call refused `ambiguous` whose candidates are all `Class::m`
+--- in DIFFERENT files — `u.foo()` with `U u` in package b, where a.U and b.U both declare foo() — is decided the way
+--- Java decides which `U` the simple name means, in a language that declares this visibility (spec.class_by_package):
+---   · the calling file's single-type IMPORT binding of the class name (`import a.U;`, the import edge's bind) -> the
+---     file it resolves to;
+---   · else the SAME PACKAGE: the candidate whose file sits in the calling file's directory AND is that class's own
+---     top-level file (`U.java`) — a class NESTED in another top-level class of the package is not visible by its
+---     simple name, so it is never picked by this rule.
+--- One candidate in the chosen file -> resolved; several (overloads of the chosen class) -> the refusal is NARROWED to
+--- them, for the arity pass after this one. A truncated candidate list, an import naming a file no candidate is in, or
+--- no same-package top-level class decides nothing.
+function M._resolve_class_package(cv, node_index, addref, edges)
+    local cget, cset = cv.get, cv.set
+    local n, bind_of = 0, nil
+    for i = 1, cv.n do
+        local r = cget(i, 'refused')
+        local full = cget(i, 'full')
+        local cls = full and full:match('^([%w_$]+)::[%w_$]+$')
+        if cls and type(r) == 'table' and r.rule == 'ambiguous' and tsutil.complete(r) then
+            local file = cget(i, 'file')
+            local _, sp = elang_for(file)
+            if sp and sp.class_by_package then
+                local byfile, nfiles, same = {}, 0, true
+                for _, id in ipairs(r.cands) do
+                    local nd = node_index[id]
+                    if not (nd and nd.name == full and nd.file) then same = false; break end
+                    if not byfile[nd.file] then byfile[nd.file] = {}; nfiles = nfiles + 1 end
+                    table.insert(byfile[nd.file], nd)
+                end
+                if same and nfiles >= 2 then
+                    bind_of = bind_of or (M._binding_index(edges))
+                    local pick = bind_of and bind_of[file] and bind_of[file][cls]
+                    if not pick then
+                        local dir = file:match('^(.*)/[^/]*$') or ''
+                        for f in pairs(byfile) do
+                            if (f:match('^(.*)/[^/]*$') or '') == dir and f:match('([^/]+)%.%w+$') == cls then pick = f end
+                        end
+                    end
+                    local keep = pick and byfile[pick]
+                    if keep and #keep == 1 then
+                        cset(i, 'to', keep[1].id)
+                        cset(i, 'refused', nil)
+                        local cfn = cget(i, 'fn')
+                        if cfn then
+                            local cline = cget(i, 'line')
+                            addref(cfn, keep[1].id, cget(i, 'at') or { start = { line = cline, char = 0 },
+                                ['end'] = { line = cline, char = 0 } }, false)
+                        end
+                        n = n + 1
+                    elseif keep then
+                        local ids = {}
+                        for _, nd in ipairs(keep) do ids[#ids + 1] = nd.id end
+                        table.sort(ids)
+                        cset(i, 'refused', { rule = 'ambiguous', cands = ids, n = #ids })
+                    end
+                end
+            end
+        end
+    end
+    return n
+end
+
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
@@ -5115,6 +5177,9 @@ local RESOLVE_PASSES = {
     -- ★ ARITY SEPARATES OVERLOADS OF ONE CLASS (CART-0676). Ahead of `returns`, because the return-type rounds need
     -- the base resolved: `getBean(X.class)` refused ambiguous between getBean(Class) and getBean(Class, String), so
     -- the shipped class-literal inference never ran, on cross_db's top unresolved callee (882 sites).
+    -- (a class name in two packages is decided by import / package FIRST, CART-2074: what it narrows to one class's
+    -- overloads, arity then decides)
+    { name = 'class_package', run = function (x) return M._resolve_class_package(x.cv, x.node_index, x.addref, x.data.edges) end },
     { name = 'arity', run = function (x) return M._resolve_arity(x.cv, x.node_index, x.addref) end },
     { name = 'returns', run = function (x)
         local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref, x.data)
