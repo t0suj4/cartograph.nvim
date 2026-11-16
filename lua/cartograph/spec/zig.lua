@@ -586,10 +586,10 @@ return {
             if not obj or obj:type() ~= 'identifier' then return nil end
             local recv = node_text(obj, src)
             if recv:match('^%u') then -- PascalCase receiver = the type itself
-                return recv .. '.' .. name, { rule = 'type-recv' }
+                return recv .. '.' .. name, { rule = 'type-recv' }, nil, nil, nil, 'written' -- (CART-0695)
             end
             local ty = zig_recv_type(calln, recv, src)
-            if ty then return ty .. '.' .. name, { rule = 'recv-typed' } end
+            if ty then return ty .. '.' .. name, { rule = 'recv-typed' }, nil, nil, nil, 'binder' end
             return nil
         end,
         -- a typed receiver key (`Type.method`) is exact-or-nothing: a miss is an

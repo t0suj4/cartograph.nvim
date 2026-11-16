@@ -224,7 +224,7 @@ local function rs_qualify_call(calln, name, src, model)
     local chain, k = model.resolve(node_text(v, src), calln)
     local ty = k > 0 and chain[1].ty
     if not ty then return nil end
-    return ty .. '::' .. node_text(fld, src)
+    return ty .. '::' .. node_text(fld, src), nil, nil, nil, nil, 'binder' -- (the binder's type, CART-0695)
 end
 local RUST_LEXICAL_SCOPES = {
     function_item = { kind = 'param', harvest = rs_params }, closure_expression = { kind = 'param', harvest = rs_params },

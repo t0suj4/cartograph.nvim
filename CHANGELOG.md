@@ -2,6 +2,18 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `prov = 'recv'`: a resolution the receiver's TYPE keyed is no longer `base` (graph field; cache v309)
+
+- A call resolved by an exact match on a key the language spec qualified from the receiver's inferred type is
+  `prov = 'recv'`. The cases are a declared binder type (java / go / rust / zig / php), the enclosing class of an
+  implicit this / self / `$this` / super (java / php / ruby), or a `new T()` receiver. `base` now means a name
+  matched: a bare name, a class the source wrote (`T::m`, `Class.m()`), or a typed key that missed and landed by its
+  tail. Targets are unchanged. elasticsearch/libs: base 16,669 -> base 6,656 + recv 10,013. ripgrep: 504 recv.
+  luanti/src: 0 (CART-0695).
+- A call record carries `qhow`, the mechanism: `binder` / `self` / `super` / `ctor` / `written`. `edges_callers` rows
+  and `census.by_prov` show the new value. No protocol bump: `prov` was always an open set of resolver names.
+- Cache VERSION 309: every cached graph re-extracts once.
+
 ## 2026-11-16 — a polyglot root applies a profile PER BOUNDARY (agent surface + graph fields, additive)
 
 - A root whose build markers below (up to two directories down: `rebar.config`, `package.json`, …) add a language

@@ -5273,6 +5273,19 @@ local RESOLVE_PASSES = {
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
+--- the mechanisms of qualify_call's 6th value that are RECEIVER TYPING (CART-0695): the key's class was inferred for
+--- the receiver, not written at the call. `written` (a class the source names) and any other value are not
+M.RECV_HOW = { binder = true, self = true, super = true, ctor = true }
+--- 'recv' when the call's typed key itself matched its target exactly, else 'base'
+function M._base_prov(how, full, to, exact)
+    if how and M.RECV_HOW[how] and full and exact then
+        for _, n in ipairs(exact[full] or {}) do
+            if n.id == to then return 'recv' end
+        end
+    end
+    return 'base'
+end
+
 -- run the pipeline over a ctx; returns the total count resolved. THE one place
 -- the pass order lives — extract runs it over the full call set, relink over
 -- the touched subset (ctx.consts differs: extract folds const keys, relink nil).
@@ -5294,8 +5307,16 @@ local function run_resolve_passes(ctx)
     -- newly resolves (c.to now set, prov still unstamped). A later REWRITE
     -- (reassign) that retargets an already-attributed call does NOT re-stamp —
     -- prov names who first linked it. (Minting stamps 'stdlib' at mint time.)
+    -- ★ `base` SPLITS (CART-0695): an exact match on a key the spec QUALIFIED FROM A TYPE it inferred for the receiver
+    -- (qualify_call's mechanism, c.qhow: a binder's declared type, the enclosing class of an implicit this / self /
+    -- super, a `new T()` receiver) is `recv`; a bare name match, a class the source WROTE (`T::m`, `Class.m()`) and a
+    -- typed key that missed exact and landed by its tail stay `base`. Decided here, once, for extract and relink alike
+    local exact = ctx.exact
     for i = 1, cv.n do
-        if cget(i, 'to') and not cget(i, 'prov') then cset(i, 'prov', 'base') end
+        local to = cget(i, 'to')
+        if to and not cget(i, 'prov') then
+            cset(i, 'prov', M._base_prov(cget(i, 'qhow'), cget(i, 'full'), to, exact))
+        end
     end
     local n = 0
     -- ★ A PASS THAT READS THE WHOLE CALL POPULATION (`whole = true`) gets the whole graph's calls even when the
@@ -9619,10 +9640,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- may rewrite the resolution key to Class::name —
                     -- exact match beats every tail fallback; inheritance
                     -- still falls through to tails
-                    local qhedge, qdefer, qqual, qcls
+                    -- (6th: the qualification's MECHANISM, CART-0695 — binder / self / super / ctor / written)
+                    local qhedge, qdefer, qqual, qcls, qhow
                     if spec.qualify_call then
-                        local q, h, d, qn, qc = spec.qualify_call(calln, full, src, jvt_sm)
+                        local q, h, d, qn, qc, hw = spec.qualify_call(calln, full, src, jvt_sm)
                         full, qhedge, qdefer, qqual, qcls = q or full, h, d, qn, qc
+                        qhow = q and hw or nil
                     end
                     -- ★ A STRING RECEIVER MAKES IT THE STDLIB'S (CART-1062): `('%s'):format(x)` keys `string.format`,
                     -- which the spec's stdlib prefixes answer as external — instead of the name-match landing it on
@@ -10024,6 +10047,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qualifier = qqual, -- @Qualifier bean name on the
                         -- receiver field (resolve_interface narrows on it)
                         qcls = qcls, -- the class AS WRITTEN that the key names (php, CART-0735: the class veto)
+                        qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         -- identifier receiver (`x.foo`): the local name, for
@@ -10064,10 +10088,10 @@ local MATCH_OPTS = { match_limit = 65536 }
             for _, bc in ipairs(spec.scan_bare_calls(tsroot, src)) do
                 local id, name = bc.node, bc.name
                 if not (spec.call_skip or {})[name] then
-                    local full, qhedge = name, nil
+                    local full, qhedge, qhow = name, nil, nil
                     if spec.qualify_call then
-                        local qk, h = spec.qualify_call(id, name, src, jvt_sm)
-                        full, qhedge = qk or name, h
+                        local qk, h, _, _, _, hw = spec.qualify_call(id, name, src, jvt_sm)
+                        full, qhedge, qhow = qk or name, h, qk and hw or nil
                     end
                     local sp = pos_of(id)
                     local encl = in_function(id, spec, ifmemo)
@@ -10075,7 +10099,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if spec.is_top then is_top = spec.is_top(id, src) end
                     local c = { callee = name, args = {}, argv = {},
                         file = file, line = sp.start.line,
-                        full = full ~= name and full or nil, hedge = qhedge,
+                        full = full ~= name and full or nil, hedge = qhedge, qhow = qhow,
                         at = pos_of(id), top = is_top or nil, bare = true }
                     calls[#calls + 1] = c
                     pending[#pending + 1] = { call = c, file = file, full = full,

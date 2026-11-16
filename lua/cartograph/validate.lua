@@ -202,6 +202,7 @@ M.CALL_FIELDS = {
     -- retrieval (LibStub("X")/:GetModule("Y")) resolves to (the registered table)
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     qcls = true, -- the class as written a qualified key names (php's class veto, CART-0735)
+    qhow = true, -- qualify_call's MECHANISM: binder / self / super / ctor / written — prov `recv` vs `base` (CART-0695)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
     bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
     superx = true, -- ruby `super`: {cls,member,sing} → ancestor's method (R4)

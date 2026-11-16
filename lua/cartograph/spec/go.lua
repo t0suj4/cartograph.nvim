@@ -251,7 +251,7 @@ local function go_qualify_call(calln, name, src, model)
     local chain, k = model.resolve(node_text(op, src), calln)
     local ty = k > 0 and chain[1].ty
     if not ty then return nil end
-    return ty .. '.' .. node_text(fld, src)
+    return ty .. '.' .. node_text(fld, src), nil, nil, nil, nil, 'binder' -- (the binder's type, CART-0695)
 end
 local GO_DIR_FILES = setmetatable({}, { __mode = 'k' }) -- (files set -> { dir -> its first non-test .go file })
 -- an import path of THIS module, as a directory relative to the graph root: go.mod (found at or above root) names the

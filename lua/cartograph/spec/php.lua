@@ -692,9 +692,9 @@ return {
             if name == 'self' or name == 'static' or name == 'parent' then
                 local cls, written = php_enclosing(calln, src, name == 'parent' and 'parent' or 'self')
                 if not cls then return nil end
-                return cls .. '::__construct', nil, nil, nil, written
+                return cls .. '::__construct', nil, nil, nil, written, 'written'
             end
-            return php_key_class(calln, src, name) .. '::__construct', nil, nil, nil, name
+            return php_key_class(calln, src, name) .. '::__construct', nil, nil, nil, name, 'written'
         end
         if name:find(':', 1, true) then return nil end
         local kind
@@ -706,14 +706,14 @@ return {
             elseif o and o:type() == 'variable_name' then
                 -- (a TYPED parameter receiver, CART-1967: keyed by its declared class, the class veto decides)
                 local tw, hedge = php_param_class(calln, node_text(o, src), src)
-                if tw then return php_key_class(calln, src, tw) .. '::' .. name, hedge, nil, nil, tw end
+                if tw then return php_key_class(calln, src, tw) .. '::' .. name, hedge, nil, nil, tw, 'binder' end
             elseif o and o:type() == 'member_access_expression' then
                 -- (a TYPED PROPERTY of the enclosing class, `$this->repo->m()`, CART-1967)
                 local base, pn = o:field('object')[1], o:field('name')[1]
                 if base and base:type() == 'variable_name' and node_text(base, src) == '$this'
                     and pn and pn:type() == 'name' then
                     local tw = php_prop_class(calln, '$' .. node_text(pn, src), src)
-                    if tw then return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw end
+                    if tw then return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw, 'binder' end
                 end
             end
         elseif t == 'scoped_call_expression' then
@@ -726,7 +726,7 @@ return {
                 -- across every class — T::make beside U::make refused ambiguous, T::s() fell to the short-name noise
                 -- floor. Keyed by the real class (an alias names its class), the class veto decides)
                 local tw = node_text(s, src)
-                return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw
+                return php_key_class(calln, src, tw) .. '::' .. name, nil, nil, nil, tw, 'written'
             end
         end
         if not kind then return nil end
@@ -735,7 +735,8 @@ return {
         -- class name; the 5th value keeps the name as written for the class veto (CART-0735)
         local cls, written = php_enclosing(calln, src, kind)
         if not cls then return nil end
-        return cls .. '::' .. name, nil, nil, nil, written
+        -- (6th = the mechanism, CART-0695: $this-> / self:: / static:: name the enclosing class, parent:: its parent)
+        return cls .. '::' .. name, nil, nil, nil, written, kind == 'parent' and 'super' or 'self'
     end,
     mention_types = { name = true },
     -- OO extends: child class -> superclass name (bare last segment,

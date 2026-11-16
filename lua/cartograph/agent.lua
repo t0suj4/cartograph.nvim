@@ -1288,7 +1288,8 @@ local function callees_empty(n, refused, external, unresolved, self_calls)
 end
 
 --- ★ WHICH RESOLVER LANDED AN EDGE (CART-0683): the `prov` of the call records behind a ref edge — `base` (the
---- exact / name-match lookup), `super`, `typed_receiver`, `alias` … (treesitter.lua RESOLVE_PASSES' names). The tier
+--- exact / name-match lookup, no type used), `recv` (an exact match on a key qualify_call keyed from the receiver's
+--- inferred type, CART-0695), `super`, `typed_receiver`, `alias` … (treesitter.lua RESOLVE_PASSES' names). The tier
 --- stays the headline; prov is the MECHANISM behind it, an observation about which resolver ran, not a strength claim.
 --- `inferred` covered both "matched by name" and "matched by name BECAUSE THE SUPER CHAIN WAS UNAVAILABLE" — a working
 --- analyzer and a bug — and the generic-supertype defect (31% of extends, 38% of implements) was invisible in every
@@ -5043,7 +5044,7 @@ M.VERBS = {
     edges_callers = {
         answers = 'who-uses-it',
         refuses = { 'ambiguous-file', 'no-address', 'no-subject', 'stale-ref', 'unknown-file', 'unknown-node' },
-        summary = 'who calls this — each row with its own resolution tier and `prov`, the resolvers that landed its edge (base, super, typed_receiver, … ; not-a-call for a reference)',
+        summary = 'who calls this — each row with its own resolution tier and `prov`, the resolvers that landed its edge (base = a name match, recv = the receiver TYPE keyed it, super, typed_receiver, … ; not-a-call for a reference)',
         subject = 'node',
         tier_basis = 'resolution', tier_headline = 'floor', needs_calls = true,
         absences = { 'absent', 'refused', 'frontier' },

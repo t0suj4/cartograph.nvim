@@ -1172,19 +1172,23 @@ return {
             -- org.elasticsearch.logging.LogManager's constructor)
             local written = node_text(ty, src):gsub('%b<>', ''):gsub('%s+', '')
             local fq = written:find('.', 1, true) and written or java_imports(src)[cls]
-            if fq and java_jdk_import(fq) then return fq .. '::' .. cls end
-            return cls .. '::' .. cls
+            -- (6th value = the qualification's MECHANISM, CART-0695: `written` — the class is the source's)
+            if fq and java_jdk_import(fq) then return fq .. '::' .. cls, nil, nil, nil, nil, 'written' end
+            return cls .. '::' .. cls, nil, nil, nil, nil, 'written'
         end
         if calln:type() ~= 'method_invocation' then return nil end
         local obj = calln:field('object')[1]
-        local cls, hedge, defer, qual
+        -- how: the MECHANISM that named cls (CART-0695) — self (the enclosing class), super (its extends clause),
+        -- binder (a variable's / field's declared type), ctor (`new T().m()`), written (a class the source names)
+        local cls, hedge, defer, qual, how
         if not obj then -- implicit this
-            cls = java_enclosing_class(calln, src)
+            cls, how = java_enclosing_class(calln, src), 'self'
         else
             local ot = obj:type()
             if ot == 'this' then
-                cls = java_enclosing_class(calln, src)
+                cls, how = java_enclosing_class(calln, src), 'self'
             elseif ot == 'super' then
+                how = 'super'
                 -- (the superclass clause keyed as the extends row is, CART-0690: `Base<T>` and `Outer.Inner` name a
                 -- class, a package-qualified library class and the child's own simple name do not)
                 local me, cnode = java_enclosing_class(calln, src)
@@ -1193,11 +1197,13 @@ return {
             elseif ot == 'identifier' then
                 local objname = node_text(obj, src)
                 cls, hedge, defer = java_var_type(model, objname, calln)
+                how = 'binder'
                 -- a @Qualifier on the receiver field disambiguates which of
                 -- an interface's several impls it holds (resolve_interface)
                 if cls then qual = java_field_qualifier(calln, objname, src) end
                 -- (a class name may lead with underscores: thrift nests `_Fields` in every struct, CART-1077)
                 if not cls and not defer and objname:match('^_*%u') then
+                    how = 'written'
                     -- no binder and PascalCase: a STATIC call on the
                     -- class named right here (convention-sound; the
                     -- qualification just exact/tail-matches like any
@@ -1227,12 +1233,13 @@ return {
                 end
             elseif ot == 'object_creation_expression' then
                 -- new Foo().m(): the type is right here
-                cls = java_base_type(obj:field('type')[1], src)
+                cls, how = java_base_type(obj:field('type')[1], src), 'ctor'
             elseif ot == 'field_access' then
                 local fo, ff = obj:field('object')[1], obj:field('field')[1]
                 if fo and fo:type() == 'this' and ff then
                     cls, hedge = java_var_type(
                         model, node_text(ff, src), calln, true)
+                    how = 'binder'
                 elseif ff and fo and fo:type() == 'identifier' and not node_text(ff, src):match('^_*%u') then
                     -- ★ `var.f.m()` with var's type KNOWN (CART-1077): f's declared type in var's class types the
                     -- receiver. That class may be in a file not parsed yet, so the call is DEFERRED to the
@@ -1260,7 +1267,7 @@ return {
                     if ok then
                         local ht = node_text(head, src)
                         local vt, _, vd = java_var_type(model, ht, calln)
-                        if vt == nil and vd == nil then cls = node_text(ff, src) end
+                        if vt == nil and vd == nil then cls, how = node_text(ff, src), 'written' end
                     end
                 end
             end
@@ -1282,14 +1289,14 @@ return {
             local fq = java_imports(src)[cls]
             if fq and (fq:match('^java%.') or fq:match('^javax%.') or fq:match('^jdk%.')
                 or fq:match('^sun%.') or fq:match('^com%.sun%.')) then
-                return fq .. '::' .. name, hedge, nil, qual
+                return fq .. '::' .. name, hedge, nil, qual, nil, how
             end
         end
         -- the hedge rides the qualification: a hedged qualification makes
         -- the resulting edge INFERRED even where resolution is confident.
         -- 4th value = the receiver field's @Qualifier bean name (or nil).
         return cls and (cls .. '::' .. name) or nil, cls and hedge or nil,
-            (not cls) and defer or nil, cls and qual or nil
+            (not cls) and defer or nil, cls and qual or nil, nil, cls and how or nil
     end,
     -- single-inheritance chain (superclass ONLY here — a class implements
     -- MANY interfaces, which would collapse build_super's one-parent map to

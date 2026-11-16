@@ -677,7 +677,7 @@ return {
                     or node_text(recv, src):match('([%w_]+)%s*$')
                 if not cn or cn == '' then return nil end
                 if name == 'new' then return nil end -- R1b
-                return cn .. '.' .. name
+                return cn .. '.' .. name, nil, nil, nil, nil, 'written' -- (CART-0695)
             end
             if recv == nil or rt == 'self' then
                 local p, inst, owner = calln:parent(), nil, nil
@@ -701,7 +701,7 @@ return {
                 -- by it, and the edge caps at ~ (dynamic dispatch may hit a
                 -- subclass override of this self-method).
                 return owner .. (inst and '#' or '.') .. name,
-                    { rule = 'self-dispatch' }
+                    { rule = 'self-dispatch' }, nil, nil, nil, 'self' -- (the enclosing class, CART-0695)
             end
             return nil
         end,
