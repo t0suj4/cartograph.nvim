@@ -2030,12 +2030,78 @@ local function v_sites(store, args)
             end
         end
     end
+    -- ★ STRING-LITERAL SITES (CART-1983, from flowpath FLOW-0052): "where does flowtype translate a call of the builtin
+    -- loadstring?" lived in `fname == 'loadstring'` comparisons — the NAME as a string literal, which is no call, no
+    -- reference and no mention, so no verb could place it below file altitude (mentions: 35 files, flowtype.lua
+    -- unranked). `kind = 'literal'` finds every string literal whose content IS the name: files are pre-filtered by
+    -- their text, every candidate is confirmed by PARSING it (a syntax fact, never a text match), and each row names its
+    -- enclosing function; a note ranks the functions by their literal sites — "who handles builtin X" over a dispatch
+    -- on its name. Only on request: a literal is not a use.
+    local byfn = {}
+    if want == 'literal' then
+        local tsm = require 'cartograph.providers.treesitter'
+        local files, fseen = {}, {}
+        if only then files[1] = only
+        else
+            for f in pairs(store.by_file or {}) do if not fseen[f] then fseen[f] = true; files[#files + 1] = f end end
+            table.sort(files)
+        end
+        local function inner(t)
+            local body = t:match('^%[(=*)%[.*%]%1%]$') and t:match('^%[=*%[(.*)%]=*%]$')
+            if body then return body end
+            t = t:gsub('^[%a_]+(["\'`])', '%1') -- (a python / c++ prefix: r'…', u8"…")
+            local q = t:sub(1, 1)
+            if (q == '"' or q == "'" or q == '`') and #t >= 2 and t:sub(-1) == q then return t:sub(2, -2) end
+            return nil
+        end
+        for _, f in ipairs(files) do
+            local lines = store.content({ file = f })
+            local src = lines and table.concat(lines, '\n')
+            if src and src:find(name, 1, true) then
+                local plang = tsm.parse_lang(f)
+                local okp, parser = pcall(vim.treesitter.get_string_parser,
+                    require('cartograph.parseview').view(src, plang), plang)
+                local okt, tree = false, nil
+                if okp then okt, tree = pcall(function () return parser:parse()[1] end) end
+                if okt and tree then
+                    local function walk(nd)
+                        local ty = nd:type()
+                        -- (the OUTER string node: its text carries the delimiters `inner` strips; the walk stops there)
+                        if ty:find('string', 1, true) then
+                            local sr, sc0 = nd:range()
+                            if inner(vim.treesitter.get_node_text(nd, src)) == name then
+                                local fnode = M.enclosing_fn(store, f, sr, sc0)
+                                local q = P.to(P.new(sr, sc0, 'GRAPH'), 'AGENT', lines[sr + 1])
+                                rows[#rows + 1] = { kind = 'literal', file = f, line = sr + 1, col = q and q.col or nil,
+                                    fn = fnode and fnode.id or NUL, status = 'literal' }
+                                local k = fnode and fnode.id or (f .. ' (file scope)')
+                                byfn[k] = (byfn[k] or 0) + 1
+                                return
+                            end
+                        end
+                        for _, c in tsutil.inamed, nd, -1 do walk(c) end
+                    end
+                    walk(tree:root())
+                end
+            end
+        end
+    end
     table.sort(rows, function (a, b)
         if a.file ~= b.file then return a.file < b.file end
         if a.line ~= b.line then return a.line < b.line end
         return (a.col or 0) < (b.col or 0)
     end)
     local total, notes = #rows, {}
+    if next(byfn) then
+        local ranked = {}
+        for k, n in pairs(byfn) do ranked[#ranked + 1] = { fn = k, sites = n } end
+        table.sort(ranked, function (a, b) if a.sites ~= b.sites then return a.sites > b.sites end return a.fn < b.fn end)
+        for i = #ranked, 11, -1 do ranked[i] = nil end
+        notes[#notes + 1] = { kind = 'literal-by-function', premise = 'ranking',
+            why = ('the functions holding the most string literals equal to %q (a dispatch on the name handles it there): %s'):format(
+                tostring(name), table.concat(vim.tbl_map(function (r) return ('%s (%d)'):format(r.fn, r.sites) end, ranked), ', ')),
+            evidence = { functions = ranked } }
+    end
     if total > limit then
         for i = total, limit + 1, -1 do rows[i] = nil end
         notes[#notes + 1] = { kind = 'clipped', premise = 'limit',
@@ -2055,6 +2121,21 @@ local function v_sites(store, args)
             evidence = { name = name, file = nn(only) } }, notes = notes }
     end
     return { subject = { name = name, file = nn(only), total = total }, result = rows, notes = notes }
+end
+
+--- the innermost FUNCTION / METHOD node of `file` containing the 0-based (line, col) -> node | nil (file scope)
+function M.enclosing_fn(store, file, l0, c0)
+    local best, bspan
+    for _, n in ipairs((store.by_file or {})[file] or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and n.range then
+            local sl, sc, el, ec = atr.sl(n.range), atr.sc(n.range), atr.el(n.range), atr.ec(n.range)
+            if (sl < l0 or (sl == l0 and sc <= c0)) and (el > l0 or (el == l0 and ec >= c0)) then
+                local span = (el - sl) * 100000 + (ec - sc)
+                if not bspan or span < bspan then best, bspan = n, span end
+            end
+        end
+    end
+    return best
 end
 
 local function v_mentions(store, args)
@@ -5060,7 +5141,7 @@ M.VERBS = {
         args = {
             { name = 'name', type = 'string', required = true, desc = 'the name: a call matches its callee or the callee\'s last segment', aliases = { 'query' } },
             { name = 'file', type = 'string', desc = 'only sites in this file' },
-            { name = 'kind', type = 'string', enum = { 'call', 'reference', 'read' }, desc = 'only this kind of site' },
+            { name = 'kind', type = 'string', enum = { 'call', 'reference', 'read', 'literal' }, desc = 'only this kind of site; `literal` (only on request) = a STRING LITERAL equal to the name (`fname == \'loadstring\'`), each with its enclosing function, ranked in a note' },
             { name = 'limit', type = 'integer', desc = 'max rows (default 200); a clip is reported as a note' },
         },
         run = v_sites,

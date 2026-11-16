@@ -2,6 +2,12 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `sites { kind = 'literal' }`: where a name is handled as a STRING (agent surface, additive)
+
+- `sites` takes `kind = 'literal'`: every string literal whose content is the name (`fname == 'loadstring'`), found
+  by parsing, with its enclosing function. A `literal-by-function` note ranks the functions. Only on request: the
+  default kinds are unchanged (CART-1983).
+
 ## 2026-11-16 — every answer names the environment profile in force (agent surface, additive)
 
 - `graph.profile` on every envelope: `{ name, selected, below }`. `name` is the profile in force (null when none);
