@@ -470,15 +470,33 @@ local function run_row(name)
     if wanted('fold') then
         local flow = require 'cartograph.flow'
         local bearing = {}
-        for _, n in ipairs(data.nodes or {}) do
+        -- ★ RE-ARMED (CART-2105). Since flow is folded at PRODUCTION (P3) the shared graph holds no raw rows, and this
+        -- column found nothing to round-trip on any corpus for months — a `--` the liveness collector exposed
+        -- (CART-1927). Its subject is now a RAW extraction of a deterministic SAMPLE of the flow-bearing files
+        -- (opts.raw_flow skips only the production fold): the real extraction path's rows, at a few dozen files'
+        -- memory, never a second copy of the corpus (the double-hold the scale corpora cannot afford)
+        local subject, nfiles, nall = data, nil, nil
+        if data._flowcol ~= nil then
+            local files, seen = {}, {}
+            for _, n in ipairs(data.nodes or {}) do
+                if n.file and not seen[n.file] and flow.has(n) then seen[n.file] = true; files[#files + 1] = n.file end
+            end
+            table.sort(files)
+            nall = #files
+            local sample = {}
+            local step = math.max(1, math.floor(#files / 40))
+            for i = 1, #files, step do sample[#sample + 1] = files[i] end
+            if #sample > 0 and (corpus.provider or 'treesitter') == 'treesitter' then
+                subject = bench.extract(name, { cold = true, files = sample, raw_flow = true })
+                nfiles = #sample
+            end
+        end
+        for _, n in ipairs(subject.nodes or {}) do
             if n.flow and n.flow.stmts then bearing[#bearing + 1] = n end
         end
         if #bearing == 0 then
-            -- ★ SAY WHY (CART-1927 -> CART-2105): since flow is folded at PRODUCTION (P3) no extracted graph holds raw
-            -- rows, so this oracle has had nothing to round-trip on any corpus — a decline, named, never a bare dash
-            local folded = data._flowcol ~= nil
-            cell('fold', '--', { folded
-                and 'flow arrives FOLDED (the production fold, P3): no raw rows to round-trip — this oracle checks nothing until re-armed (CART-2105)'
+            cell('fold', '--', { data._flowcol ~= nil and nfiles
+                and ('the raw re-extraction of %d sampled file(s) holds no raw flow rows — the production fold is not skipped (CART-2105)'):format(nfiles)
                 or 'no flow-bearing functions' })
         else
             -- deterministic sample (cap ~2000 fns): copying EVERY raw row
@@ -490,8 +508,8 @@ local function run_row(name)
                 picked[#picked + 1] = bearing[i]
                 pre[bearing[i]] = fnsig(flow.record(bearing[i]))
             end
-            flow.fold(data)
-            local again = flow.fold(data) -- idempotence: second fold no-ops
+            flow.fold(subject)
+            local again = flow.fold(subject) -- idempotence: second fold no-ops
             local bad = {}
             for _, n in ipairs(picked) do
                 if fnsig(flow.record(n)) ~= pre[n] then bad[#bad + 1] = n.id end
@@ -506,7 +524,9 @@ local function run_row(name)
                 cell('fold', 'FAIL', d, { n = #picked, unit = 'fns sampled' })
             else
                 cell('fold', 'OK',
-                    { ('%d fns sampled (of %d)'):format(#picked, #bearing) }, { n = #picked, unit = 'fns sampled' })
+                    { ('%d fns sampled (of %d)%s'):format(#picked, #bearing, nfiles
+                        and (' from %d of %d flow-bearing files re-extracted raw'):format(nfiles, nall) or '') },
+                    { n = #picked, unit = 'fns sampled' })
             end
         end
     end

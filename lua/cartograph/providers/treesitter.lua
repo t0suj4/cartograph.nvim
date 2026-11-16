@@ -11137,7 +11137,9 @@ local MATCH_OPTS = { match_limit = 65536 }
     -- the folded columns are now serializable — P3a — so the cache round-trips the FOLDED
     -- form). SKIP for worker CHUNKS (skip_idpass): their per-chunk cols can't merge; the
     -- parallel PARENT folds the merged graph. Readers are fold-agnostic (P2), so unaffected.
-    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only)) then
+    -- opts.raw_flow: an ORACLE's opt-out (CART-2105) — the matrix's fold column round-trips RAW rows through the fold,
+    -- and since this fold no extracted graph held any, so the oracle had checked nothing on any corpus
+    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only or opts.raw_flow)) then
         dfmod.fold(data)
         flowmod.fold(data)
     end
