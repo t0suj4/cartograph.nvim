@@ -1961,6 +1961,8 @@ local function fn_locals(def, spec, src)
     return #out > 0 and out or nil
 end
 
+-- @langs-ok c / cpp declarators that wrap a parameter's identifier (fn_params, CART-2118)
+M._PARAM_WRAP = { pointer_declarator = true, reference_declarator = true, array_declarator = true }
 local function fn_params(def, spec, src, method)
     -- ★ `params_of` IS THE POSITIONAL TWIN OF `params_field`, and this reader did not consult
     -- it while flow's `param_names` did (CART-0438). A hook honoured by ONE of its two
@@ -1999,8 +2001,17 @@ local function fn_params(def, spec, src, method)
                         break
                     end
                     -- @langs-ok same param-name chain (c/cpp pointer declarator)
-                    if id:type() == 'pointer_declarator' then
-                        local inner = id:field('declarator')[1]
+                    -- ★ A WRAPPING DECLARATOR names its identifier inside: `Foo *p`, `Foo **pp`, `const Foo &r`, `Foo &&rv`,
+                    -- `int a[]` (CART-2118 — a reference, a double pointer and an array were never params: 1,506 reference
+                    -- parameters on luanti alone). A function pointer (`int (*cb)(int)`) stays out, as before
+                    -- @langs-ok same param-name chain (c/cpp pointer / reference / array declarator inner name)
+                    local WRAP = M._PARAM_WRAP
+                    if WRAP[id:type()] then
+                        local inner = id
+                        -- @langs-ok same param-name chain (c/cpp declarators unwrap to the identifier)
+                        while inner and (WRAP[inner:type()] or inner:type() == 'parenthesized_declarator') do
+                            inner = inner:field('declarator')[1] or inner:named_child(0)
+                        end
                         -- @langs-ok same param-name chain (c/cpp pointer declarator inner name)
                         if inner and inner:type() == 'identifier' then
                             out[#out + 1] = node_text(inner, src); typeof(inner)

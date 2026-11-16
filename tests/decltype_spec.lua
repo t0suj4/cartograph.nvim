@@ -55,3 +55,10 @@ test('decl type: the agent row names it — a var\'s `type`, a function\'s `para
     local lr = row('M.go')
     eq({ nil, nil }, { lr.type, lr.param_types }, 'a language without the slot: no field')
 end)
+
+test('params: a reference, an rvalue reference, an array and a double pointer are parameters; a function pointer is not (CART-2118)', function ()
+    if not parser_available('cpp') then skip 'no cpp parser' end
+    local _, by = graph({ ['a.cpp'] = 'class Foo {};\nint f(const Foo &r, Foo &&rv, int a[], int (*cb)(int), Foo **pp, int n) { return n; }\n' })
+    eq({ 'r', 'rv', 'a', 'pp', 'n' }, by.f.params, 'luanti: 1,256 functions had lost such parameters')
+    eq({ 'const Foo&', 'Foo&', '', 'Foo**', 'int' }, by.f.ptypes, 'an array writes no plain type')
+end)

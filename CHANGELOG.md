@@ -2,6 +2,12 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C / C++ reference, array and double-pointer parameters are listed (graph; cache v319)
+
+- A function's `params` (and `param_types` on its row) now include parameters declared as `const Foo &r`,
+  `Foo &&rv`, `int a[]` or `Foo **pp`. They were missing, so a C++ function could look as if it had fewer
+  parameters than it does. luanti: 1,256 functions affected. Calls and edges are unchanged (CART-2118).
+
 ## 2026-11-16 — the Java type graph, and a `type-cycles` tactic (graph field; cache v318)
 
 - Java fields record the class names their type refers to, including generic arguments and array elements:
