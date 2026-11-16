@@ -504,6 +504,10 @@ local PHP_LEXICAL_SCOPES = {
 
 return {
     lexical_scopes = PHP_LEXICAL_SCOPES, -- CART-1598
+    -- a function's variable may BE the file's (CART-2076): an included file's top level runs in its INCLUDER's function
+    -- scope (flowpath probes/loaders: mantisbt's require_api includes inside a function), so a bound php variable keeps
+    -- its same-file link — the inner-bound rule other languages apply stops only at a real shadow here
+    function_vars_reach_file = true,
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

@@ -6571,8 +6571,16 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                                 -- a java field's own scope, or php, whose scope model holds no module bindings, keep
                                 -- their linking. ★ A java FIELD is such an outer binding too (CART-2075): `U(int size) {
                                 -- check(size); }` reads the parameter, and had made `use U::U -> var:size`)
-                                local outer = false
-                                if ak[j] == 'local' or ak[j] == 'param' then
+                                -- ★ AND WITH NO OUTER BINDING IN THE CHAIN TOO (CART-2076): a local / parameter names that
+                                -- local whatever else in the FILE bears its name. java `IndexInput input = values.getSlice()`
+                                -- in Int4VectorScorer.create linked `use create -> var:input` — the field of the NESTED class
+                                -- ScorerImpl, in no binder of create's chain, reached by the same-file name match
+                                local outer = ak[j] == 'local' or ak[j] == 'param'
+                                -- (EXCEPT where the language declares a function's variable may BE the file's — php, whose
+                                -- included file runs in its includer's function scope: there only a real shadow of an outer
+                                -- binding counts, CART-1010's rule as it was)
+                                if outer and spec.function_vars_reach_file then
+                                    outer = false
                                     for k = j - 1, 1, -1 do
                                         if ak[k] == 'module' or ak[k] == 'field' then outer = true; break end
                                     end
