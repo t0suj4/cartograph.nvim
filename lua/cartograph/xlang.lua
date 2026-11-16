@@ -282,7 +282,44 @@ end
 --- Resolve the handler of an export call: a resolved function argv first,
 --- then a textual scan of the call's source for a qualified/plain function
 --- name (the &Class::Method inside base::BindRepeating spans lines).
-local function find_handler(c, root, exact, export, tails)
+local function find_handler(c, root, exact, export, tails, disc)
+    -- ★ A DISCOVERED BINDING LINKS ONLY THROUGH THE GRAPH'S OWN RESOLUTION OF THE ARGUMENT (CART-2084). Discovery
+    -- REPORTS a registry from call shapes; to LINK, the handler argument must be a function VALUE the extractor's
+    -- binder-aware upgrade already resolved (`a.to`, CART-1498 / CART-1969) — never a NAME looked up here. On our own
+    -- tree a discovered `answer(<fn>, <name>)` read `agent.answer(store, 'graph_info')` as registering a function named
+    -- `store`, and the name lookup linked every caller's `store` parameter to irinterp.lua's local `store`: 283 of 287
+    -- discovery-only edges. Declared bindings keep every fallback below; a discovered one stops here
+    if disc then
+        -- An IDENTIFIER argument resolves only by its BINDER (treesitter._arg_is_fn, CART-1715: a parameter never, an
+        -- inner local only to a function its own file declares at or after it) and only to a function VALUE
+        -- (_arg_may_name, CART-1969); a STRING / ARRAY callable (`callable`: php's 'fn', [$obj, 'm']) names its function
+        -- by the language's own rule. Every candidate is in the CALL's language — php's 'log' had linked a lua `log`
+        local ts = require 'cartograph.providers.treesitter'
+        local cfile = callrec.file(c)
+        local lang = cfile and ts.lang_of(cfile)
+        local function by_name(a)
+            local cands = {}
+            for _, nd in ipairs((a.name and exact[a.name]) or {}) do
+                if ts.lang_of(nd.file or '') == lang and (a.k == 'callable'
+                    or (ts._arg_is_fn(a.bd, cfile, nd) and ts._arg_may_name(cfile, nd))) then
+                    cands[#cands + 1] = nd
+                end
+            end
+            return #cands == 1 and cands[1].id or nil
+        end
+        local function resolve(a)
+            if not a then return nil end
+            if a.to then return a.to end
+            if a.k == 'local' or a.k == 'callable' then return by_name(a) end
+            return nil
+        end
+        if export.fn then return resolve(argv.at(c, export.fn + (callrec.method(c) and 1 or 0))) end
+        for i = 1, argv.n(c) do
+            local h = resolve(argv.at(c, i))
+            if h then return h end
+        end
+        return nil
+    end
     -- ★ A HANDLER DERIVED FROM THE KEY BY PATTERN (plan step 7, 9c): luanti registers its Lua API with a MACRO,
     -- `#define API_FCT(name) registerFunction(L, #name, l_##name, top)` — the key is the stringified identifier and
     -- the handler the token-pasted `l_<name>`. `export.handler = 'l_%s'` names that rule; the handler is the
@@ -661,7 +698,7 @@ function M.link(data, bindings, opts)
                 local key = b.export.name and logical_arg(c, b.export.name, b.export.ident) or nil
                 if key == '' then key = nil end
                 if key or not b.export.name then
-                    local h = find_handler(c, data.root, exact, b.export, tails)
+                    local h = find_handler(c, data.root, exact, b.export, tails, disc)
                     if h then
                         if key then
                             exports[key] = exports[key] or {}
