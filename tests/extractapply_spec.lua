@@ -284,6 +284,7 @@ test('extractapply: the body frame is read off the tree — a python body keeps 
         'local function h(a) local q = a end', -- 5  a one-liner: the old pun said 4, ABOVE the function
         'return f', '' }, '\n'))
     w('m.js', 'function f(a) {\n  const x = a + 1;\n  const z = g(x,\n    x);\n}\n')
+    w('k.lua', 'local function k(a)\n    local x = a + 1\n    local z = g(x,\n        x)\nend\nreturn k\n')
     local data = ts.extract(root); data.root = root
     store.ingest(data)
     local function frame(file, name)
@@ -296,13 +297,19 @@ test('extractapply: the body frame is read off the tree — a python body keeps 
     eq({ fn_start = 5, body_end = 5 }, (frame('m.lua', 'h')), 'a one-liner: its own line')
     eq({ fn_start = 1, body_end = 4 }, (frame('m.js', 'f')), 'js: the line above `}` (unchanged)')
 
-    -- end to end: the multi-line last statement extracts WHOLE, and a selection stopping short of it is refused
+    -- python is REFUSED by name since CART-2096: no extract-helper spelling is declared for it (this plan used to
+    -- "succeed" with a Lua `local function … end` written into a .py file)
     local _, pyf = frame('m.py', 'f')
-    local p, why = ea.plan(store, pyf, { first = 4, last = 5 }, 'helper')
+    local pp, pwhy = ea.plan(store, pyf, { first = 4, last = 5 }, 'helper')
+    eq(nil, pp); ok(tostring(pwhy):find('`python`', 1, true), tostring(pwhy))
+    -- end to end on a language that can be written: a multi-line LAST statement extracts WHOLE, a selection stopping
+    -- short of it is refused (the CART-2094 shape: the body's last line ends the last statement)
+    local _, kf = frame('k.lua', 'k')
+    local p, why = ea.plan(store, kf, { first = 3, last = 4 }, 'helper')
     ok(p, 'the whole last statement plans: ' .. tostring(why))
-    eq({ first = 4, last = 5 }, p.replace)
-    ok(vim.tbl_contains(p.new_fn, '          y)'), 'the continuation moves with it: ' .. vim.inspect(p.new_fn))
-    local short = ea.plan(store, pyf, { first = 4, last = 4 }, 'helper')
+    eq({ first = 3, last = 4 }, p.replace)
+    ok(vim.tbl_contains(p.new_fn, '        x)'), 'the continuation moves with it: ' .. vim.inspect(p.new_fn))
+    local short = ea.plan(store, kf, { first = 3, last = 3 }, 'helper')
     eq(nil, short, 'a selection that ends inside the last statement is refused, not truncated')
     vim.fn.delete(root, 'rf')
 end)

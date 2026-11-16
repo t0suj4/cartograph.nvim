@@ -131,7 +131,7 @@ function M.plan(store, fn_id, sel, name)
         df = require('cartograph.df').get(node), sel = sel,
         fn_start = fr.fn_start, body_end = fr.body_end, file_lines = fr.lines,
         name = name, reaching = fr.reaching, flow_rows = fr.rows,
-        fn_params = fr.params }
+        fn_params = fr.params, lang = require('cartograph.providers.treesitter').lang_of(node.file) }
     if not exp.ok then return nil, exp.reason, exp.class or 'unbuilt' end
     return stage(store, node, exp,
         ('L%d-%d of %s'):format(sel.first, sel.last, node.name or '?'))

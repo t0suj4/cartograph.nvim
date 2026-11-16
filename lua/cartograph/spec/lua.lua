@@ -1680,6 +1680,24 @@ return {
             end
         end
     end,
+    -- how an extracted helper and its call are WRITTEN (CART-2096: extract.plan's text, moved here verbatim — the
+    -- spelling is the language's, and a language that declares none is refused by name)
+    extract_helper = {
+        fn = function (base, name, params, body, returns)
+            local out = { ('%slocal function %s(%s)'):format(base, name, table.concat(params, ', ')) }
+            for _, l in ipairs(body) do out[#out + 1] = l end
+            if #returns > 0 then out[#out + 1] = ('%s    return %s'):format(base, table.concat(returns, ', ')) end
+            out[#out + 1] = base .. 'end'
+            return out
+        end,
+        call = function (indent, name, params, returns, reassigned)
+            if #returns == 0 then return ('%s%s(%s)'):format(indent, name, table.concat(params, ', ')) end
+            if reassigned then
+                return ('%s%s = %s(%s)'):format(indent, table.concat(returns, ', '), name, table.concat(params, ', '))
+            end
+            return ('%slocal %s = %s(%s)'):format(indent, table.concat(returns, ', '), name, table.concat(params, ', '))
+        end,
+    },
     -- what a NEW import of `dest` looks like here, and the alias it
     -- introduces — the write side of the wiring the verbs disclose
     import_line = function (dest, ctx)

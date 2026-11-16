@@ -570,7 +570,8 @@ function M.classify_blocks(store, groups)
                     fn_start = bf.fn_start, body_end = bf.body_end,
                     file_lines = store.content(node),
                     reaching = flowmod.reaching_cfg(fl),
-                    flow_rows = fl.stmts, fn_params = fl.params, name = 'candidate' })
+                    flow_rows = fl.stmts, fn_params = fl.params, name = 'candidate',
+                    lang = require('cartograph.providers.treesitter').lang_of(node.file) })
                 asked = true
                 if pok and plan then
                     if plan.ok then

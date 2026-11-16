@@ -196,6 +196,12 @@ M.SLOTS = {
     -- language with no epilogue to write (python, rust) has nothing to fill
     -- module_scaffold with. Absence means NOT DECLARED, never "no idiom".
     module_table = 'IMPORTS', module_scaffold = 'IMPORTS',
+    -- THE EXTRACT-HELPER SPELLING (CART-2096): how a selection extracted into a helper is WRITTEN in this language —
+    -- `fn(base, name, params, body_lines, returns)` the helper's lines, `call(indent, name, params, returns,
+    -- reassigned)` the line replacing the selection. extract.plan synthesized LUA for every language, so the clones
+    -- extractability verdict and untangle's candidates counted python / js fragments no helper text could be written
+    -- for. Declared by LUA only; absence refuses by name ("spelling is the target's").
+    extract_helper = 'IMPORTS',
     -- a moved LOCAL still called in its old file: exported from the new home, rebound in the old (CART-1146); and a
     -- single-binding import line a rewrite leaves dead, recognised so it can go (CART-1147). Lua only, as above.
     local_bind = 'IMPORTS', member_export = 'IMPORTS', import_alias = 'IMPORTS',

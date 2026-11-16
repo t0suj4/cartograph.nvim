@@ -70,6 +70,18 @@ end
 function M.plan(opts)
     local df, sel, name = opts.df, opts.sel, opts.name
     local lines = opts.file_lines
+    -- ★ THE HELPER IS WRITTEN IN THE TARGET'S LANGUAGE (CART-2096). This wrote `local function … end` for every
+    -- language, so a python / javascript selection planned "ok" with Lua text in it: the clones extractability verdict
+    -- ranked it, untangle offered it, and only apply's parse guard could refuse. The spelling is the language spec's
+    -- `extract_helper`; a language that declares none is refused HERE, by name, before any verdict counts it.
+    local ts = require 'cartograph.providers.treesitter'
+    local lang = opts.lang
+    local form = lang and ts.spec[lang] and ts.spec[lang].extract_helper
+    if not form then
+        return { ok = false, class = 'unbuilt', reason = ('no extract-helper spelling is declared for %s (spec.extract_helper):'
+            .. ' a helper in this language cannot be written yet, so the selection is not extractable here'):format(
+            lang and ('`' .. lang .. '`') or 'this file\'s language (none was given)') }
+    end
     if not df or not df.stmts or #df.stmts == 0 then
         return { ok = false, reason = 'no data-flow for this function' }
     end
@@ -253,19 +265,8 @@ function M.plan(opts)
     -- assemble text
     local base = leading_ws(lines[opts.fn_start])
     local call_indent = leading_ws(lines[sel.first])
-    local new_fn = { ('%slocal function %s(%s)'):format(base, name, table.concat(params, ', ')) }
-    for _, l in ipairs(sel_lines) do new_fn[#new_fn + 1] = l end
-    if #returns > 0 then new_fn[#new_fn + 1] = ('%s    return %s'):format(base, table.concat(returns, ', ')) end
-    new_fn[#new_fn + 1] = base .. 'end'
-
-    local call
-    if #returns == 0 then
-        call = ('%s%s(%s)'):format(call_indent, name, table.concat(params, ', '))
-    elseif reassigned > 0 then
-        call = ('%s%s = %s(%s)'):format(call_indent, table.concat(returns, ', '), name, table.concat(params, ', '))
-    else
-        call = ('%slocal %s = %s(%s)'):format(call_indent, table.concat(returns, ', '), name, table.concat(params, ', '))
-    end
+    local new_fn = form.fn(base, name, params, sel_lines, returns)
+    local call = form.call(call_indent, name, params, returns, reassigned > 0)
 
     return {
         ok = true,

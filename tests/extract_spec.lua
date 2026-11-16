@@ -28,7 +28,7 @@ local F_DF = { inputs = { 'a', 'b' }, stmts = {
 } }
 
 test('extract: live-in becomes params, live-out becomes returns', function ()
-    local p = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
+    local p = extract.plan { lang = 'lua', df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
                              file_lines = F, name = 'sum', fn_params = { 'a', 'b' } }
     ok(p.ok, p.reason)
     eq({ 'x', 'y' }, p.params)   -- x,y defined before the selection -> params
@@ -38,7 +38,7 @@ test('extract: live-in becomes params, live-out becomes returns', function ()
 end)
 
 test('extract: apply splices in the new function and the call', function ()
-    local p = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
+    local p = extract.plan { lang = 'lua', df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
                              file_lines = F, name = 'sum', fn_params = { 'a', 'b' } }
     local out = extract.apply(p, F)
     eq('local function sum(x, y)', out[1])
@@ -50,7 +50,7 @@ test('extract: apply splices in the new function and the call', function ()
 end)
 
 test('extract: refuses a selection containing a control escape', function ()
-    local p = extract.plan { df = F_DF, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 5,
+    local p = extract.plan { lang = 'lua', df = F_DF, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 5,
                              file_lines = F, name = 'x', fn_params = { 'a', 'b' } }
     ok(not p.ok)
     ok(p.reason:match('return/break/goto'), p.reason)
@@ -67,7 +67,7 @@ test('extract: refuses a selection that cuts a loop body', function ()
                     '        acc[i] = i', '        print(i)', '    end', '    return acc', 'end' }
     -- selecting the loop's start line through the middle of its body (3..5)
     -- lands on the loop statement's boundary but ends mid-body -> misaligned
-    local p = extract.plan { df = loopdf, sel = { first = 3, last = 5 }, fn_start = 1, body_end = 7,
+    local p = extract.plan { lang = 'lua', df = loopdf, sel = { first = 3, last = 5 }, fn_start = 1, body_end = 7,
                              file_lines = lines, name = 'x', fn_params = {} }
     ok(not p.ok)
     ok(p.reason:match('starts or ends inside'), p.reason)
@@ -82,7 +82,7 @@ test('extract: a selection nested inside a block explains the top-level limit', 
     } }
     local lines = { 'local function g()', '    local acc = {}', '    for i = 1, 10 do',
                     '        acc[i] = i', '        munge(acc)', '    end', '    return acc', 'end' }
-    local p = extract.plan { df = loopdf, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 7,
+    local p = extract.plan { lang = 'lua', df = loopdf, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 7,
                              file_lines = lines, name = 'x', fn_params = {} }
     ok(not p.ok)
     ok(p.reason:match('nested inside'), p.reason)
@@ -95,7 +95,7 @@ test('extract: a side-effecting statement extracts with params and no returns', 
         { l = 2, def = { 'n' }, use = {}, dep = {} },
         { l = 3, def = {}, use = { 'n' }, dep = { dep(1, 'n') } },
     } }
-    local p = extract.plan { df = df, sel = { first = 3, last = 3 }, fn_start = 1, body_end = 3,
+    local p = extract.plan { lang = 'lua', df = df, sel = { first = 3, last = 3 }, fn_start = 1, body_end = 3,
                              file_lines = lines, name = 'do_record', fn_params = {} }
     ok(p.ok, p.reason)
     eq({ 'n' }, p.params)
@@ -149,14 +149,14 @@ local S_REACH = {
 }
 
 test('extract shadow: without reaching, an ambiguous return REFUSES', function ()
-    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+    local p = extract.plan { lang = 'lua', df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' } }
     ok(not p.ok)
     ok(p.reason:match('inside and'), p.reason)
 end)
 
 test('extract shadow: reaching DROPS the false return (post-use misses the selection)', function ()
-    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+    local p = extract.plan { lang = 'lua', df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
@@ -175,7 +175,7 @@ test('extract shadow: reaching KEEPS a return a post-use actually reaches', func
         { l = 6, def = { 'x' }, use = { 'a' }, dep = {} },
         { l = 7, def = {}, use = { 'x' }, dep = { dep(2, 'x') } },
     } }
-    local p = extract.plan { df = df2, sel = { first = 6, last = 6 },
+    local p = extract.plan { lang = 'lua', df = df2, sel = { first = 6, last = 6 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
@@ -192,7 +192,7 @@ end)
 
 test('extract: an enclosing PARAMETER the selection reads becomes a param', function ()
     -- line 2 is `local x = a + 1`: `a` is f's parameter, not a local with a def
-    local p = extract.plan { df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
+    local p = extract.plan { lang = 'lua', df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
         body_end = 5, file_lines = F, name = 'mk', fn_params = { 'a', 'b' } }
     ok(p.ok, p.reason)
     eq({ 'a' }, p.params)         -- NOT {} — `a` must be passed in
@@ -204,12 +204,12 @@ test('extract: an enclosing PARAMETER the selection reads becomes a param', func
 end)
 
 test('extract: a NOT-ASKED parameter list refuses (nil is not the empty list)', function ()
-    local p = extract.plan { df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
+    local p = extract.plan { lang = 'lua', df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
         body_end = 5, file_lines = F, name = 'mk' }   -- no fn_params at all
     ok(not p.ok)
     ok(p.reason:match('fn_params'), p.reason)
     -- and {} is a real answer, honoured: a genuinely parameterless enclosing fn
-    local q = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1,
+    local q = extract.plan { lang = 'lua', df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1,
         body_end = 5, file_lines = F, name = 'mk', fn_params = {} }
     ok(q.ok, q.reason)
     eq({ 'x', 'y' }, q.params)
@@ -225,7 +225,7 @@ test('extract: a selection using `...` is refused (the helper cannot receive it)
     -- `...` is in NEITHER fn_params (only named params are listed) NOR the
     -- statement's `use`, so nothing but the text guard can catch it — and the
     -- spliced helper would not even parse at module scope.
-    local p = extract.plan { df = df, sel = { first = 2, last = 2 }, fn_start = 1,
+    local p = extract.plan { lang = 'lua', df = df, sel = { first = 2, last = 2 }, fn_start = 1,
         body_end = 3, file_lines = lines, name = 'count', fn_params = { 'fmt' } }
     ok(not p.ok)
     ok(p.reason:match('%.%.%.'), p.reason)
@@ -238,9 +238,43 @@ test('extract shadow: a hedged reach into the selection refuses rather than gues
         { at = 2, var = 'x', from = { 1 } },
         { at = 4, var = 'x', from = { 1 }, hedged = { [1] = true } },
     }
-    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+    local p = extract.plan { lang = 'lua', df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = reach }
     ok(not p.ok)
     ok(p.reason:match('conservative reach'), p.reason)
+end)
+
+-- CART-2096: the helper text is the TARGET's. extract.plan wrote `local function … end` for every language, so a python
+-- / javascript selection planned "ok" with Lua in it — the clones extractability verdict ranked it (django-oscar: 2 of 9
+-- block groups "extractable", 0 now) and untangle offered it. The spelling is spec.extract_helper; none -> refused here.
+test('extract: the helper is written in the file\'s language — a language with no declared spelling is refused by name (CART-2096)', function ()
+    local base = { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5, file_lines = F, fn_params = { "a", "b" }, name = "helper" }
+    for _, lang in ipairs { 'python', 'javascript' } do
+        local p = extract.plan(vim.tbl_extend('force', base, { lang = lang }))
+        eq(false, p.ok, lang); eq('unbuilt', p.class)
+        ok(p.reason:find('`' .. lang .. '`', 1, true), p.reason)
+    end
+    local none = extract.plan(base)
+    eq(false, none.ok, 'no language given: never assumed to be lua')
+    local lua = extract.plan(vim.tbl_extend('force', base, { lang = 'lua' }))
+    eq(true, lua.ok, tostring(lua.reason))
+    ok(lua.new_fn[1]:match('^%s*local function helper%('), 'lua\'s own spelling: ' .. vim.inspect(lua.new_fn))
+end)
+
+test('extract: a selection that REASSIGNS an outer local writes `x = helper(x)`, never a second `local x` (CART-2096: the spelling moved, pinned)', function ()
+    local R = { 'local function f(a)', '    local x = a', '    x = x + 1', '    return x', 'end' }
+    local R_DF = { inputs = { 'a' }, stmts = {
+        { l = 2, def = { 'x' }, use = { 'a' }, dep = {} },
+        { l = 3, def = { 'x' }, use = { 'x' }, dep = { dep(1, 'x') } },
+        { l = 4, def = {}, use = { 'x' }, dep = { dep(2, 'x') } },
+    } }
+    local p = extract.plan { lang = 'lua', df = R_DF, sel = { first = 3, last = 3 }, fn_start = 1, body_end = 4,
+                             file_lines = R, name = 'bump', fn_params = { 'a' },
+                             -- (the use on line 4 is reached by the def on line 3 — the scope-correct attribution a
+                             -- reused name needs; real callers pass flow.reaching_cfg)
+                             flow_rows = R_DF.stmts, reaching = { { at = 3, var = 'x', from = { 2 } } } }
+    ok(p.ok, p.reason)
+    eq({ 'x' }, p.params); eq({ 'x' }, p.returns)
+    eq('    x = bump(x)', p.call[1])
 end)

@@ -605,7 +605,7 @@ function M.extract_plan(store, fn_id, res, c, name)
         -- at module scope where they are out of scope (CART-0125). fl.params only
         -- — node.params is nil for a parameterless fn, so it cannot distinguish
         -- "none" from "unknown"; `fl` is guaranteed non-nil above.
-        flow_rows = rows, fn_params = fl.params,
+        flow_rows = rows, fn_params = fl.params, lang = require('cartograph.providers.treesitter').lang_of(node.file),
         name = name or ('extracted_' .. string.char(65 + (c % 26))) }
 end
 
