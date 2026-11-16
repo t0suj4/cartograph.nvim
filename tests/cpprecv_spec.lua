@@ -93,3 +93,34 @@ test('cpp recv: a FIELD receiver is typed by its class\'s declaration in another
     table.sort(rows)
     eq({ 'm_env:Env:1', 'm_map:Map:1', 'm_val:Env:0' }, rows)
 end)
+
+test('cpp recv: INHERITANCE — base rows; an inherited method and field resolve through the nearest base, two bases refuse (CART-2116)', function ()
+    if not parser_available('cpp') then skip 'no cpp parser' end
+    local data = ts.extract(tree({
+        ['b.h'] = 'class Engine { public: int spinUp(); };\nclass Base { public: int baseOnly(); Engine *m_eng; };\n'
+            .. 'class Left { public: int both(); };\nclass Right { public: int both(); };\n'
+            .. 'class Derived : public Base, public Left, public ns::Right { public: int run(); };\n'
+            .. 'class Other { public: int baseOnly(); int spinUp(); };\n', -- the same names elsewhere: no name match decides
+        ['b.cpp'] = '#include "b.h"\nint Engine::spinUp() { return 1; }\nint Base::baseOnly() { return 2; }\nint Left::both() { return 3; }\n'
+            .. 'int Right::both() { return 4; }\nint Other::baseOnly() { return 5; }\nint Other::spinUp() { return 6; }\n',
+        ['d.cpp'] = table.concat({
+            '#include "b.h"',
+            'int Derived::run() {',
+            '  baseOnly();',      -- 2: inherited, implicit this
+            '  m_eng->spinUp();', -- 3: an inherited FIELD's type
+            '  both();',          -- 4: two bases at one level
+            '  return 0;',
+            '}',
+            'int use(Derived *d) { return d->baseOnly(); }', -- 7: a declared binder, inherited
+            '' }, '\n'),
+    }))
+    local parents = {}
+    for _, e in ipairs(data.extends or {}) do if e.child == 'Derived' then parents[#parents + 1] = e.parent end end
+    table.sort(parents)
+    eq({ 'Base', 'Left', 'Right' }, parents, 'one row per base; `ns::Right` keys Right')
+    local function pv(line) local c = at(data, 'd.cpp', line); return { c.to, c.prov, c.qhow } end
+    eq({ 'b.cpp::Base::baseOnly@2', 'recv', 'self' }, pv(2))
+    eq({ 'b.cpp::Engine::spinUp@1', 'recv', 'field' }, pv(3))
+    eq(nil, at(data, 'd.cpp', 4).to, 'Left::both and Right::both at one level: refused')
+    eq({ 'b.cpp::Base::baseOnly@2', 'recv', 'binder' }, pv(7))
+end)

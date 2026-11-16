@@ -182,6 +182,31 @@ end
 return {
     recv_class = cpp_recv_class, -- the receiver's declared / enclosing class, a side fact for the `recv` pass (CART-2111)
     scan_fields = cpp_scan_fields, -- a class's fields and their declared class: data.fieldtypes (CART-2112)
+    -- ★ INHERITANCE (CART-2116): one data.extends row per BASE of a class / struct (C++ recorded none, so every typed
+    -- pass stopped at the declared class). Multiple bases are several rows: build_super's single-parent map refuses
+    -- such a class, the recv pass walks them level by level
+    super_query = [=[
+        (class_specifier name: (type_identifier) @child
+            (base_class_clause [(type_identifier) (qualified_identifier) (template_type)] @parent))
+        (struct_specifier name: (type_identifier) @child
+            (base_class_clause [(type_identifier) (qualified_identifier) (template_type)] @parent))
+    ]=],
+    -- a base keys by its CLASS NAME: the last segment of `ns::Base`, the template of `Base<T>`; a std:: base, and a
+    -- base named like the child, key nothing
+    super_name = function (parentn, src, child)
+        local t = parentn:type()
+        local nm
+        if t == 'type_identifier' then nm = node_text(parentn, src)
+        elseif t == 'template_type' then
+            local n = parentn:field('name')[1]; nm = n and node_text(n, src)
+        else
+            local txt = node_text(parentn, src)
+            if txt:match('^%s*:?:?std::') then return nil end
+            nm = txt:gsub('<.*$', ''):match('([%a_][%w_]*)%s*$')
+        end
+        if not nm or nm == child then return nil end
+        return nm, node_text(parentn, src)
+    end,
     clink = tsutil.c_linkage, -- extern "C" evidence for the C/C++ join bridge (CART-1079)
     flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
     torn_context = tsutil.c_torn_context, -- tear by damaged CONTEXT, not by position after an error (CART-1084)

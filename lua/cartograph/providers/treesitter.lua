@@ -5178,7 +5178,7 @@ local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
-    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail, x.data.fieldtypes) end },
+    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail, x.data.fieldtypes, x.data.extends) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
@@ -5298,9 +5298,28 @@ end
 --- binder class / enclosing class) resolves to `<class>::<callee>` when exactly one definition of that key, in the
 --- call's language, exists. ADDITIVE: it never touches a resolved call; an overload pair or a missing key leaves the
 --- call as it was (an inherited method is the super pass's)
-function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes)
+function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes, extends)
     local cget, cset = cv.get, cv.set
     local n = 0
+    -- ★ THE BASES (CART-2116): child -> its parent list, from data.extends rows of C / C++ files only; a class named in
+    -- two files with different base lists keys nothing (false). Walked level by level, nearest level answering
+    local parents
+    local function bases(c)
+        if not parents then
+            parents = {}
+            local where = {}
+            for _, e in ipairs(extends or {}) do
+                local lang = e.file and elang_for(e.file)
+                if (lang == 'cpp' or lang == 'c') and e.child and e.parent then
+                    local p = parents[e.child]
+                    if p == nil then parents[e.child] = { e.parent }; where[e.child] = e.file
+                    elseif p and where[e.child] ~= e.file then parents[e.child] = false
+                    elseif p then p[#p + 1] = e.parent end
+                end
+            end
+        end
+        return parents[c] or nil
+    end
     -- (CART-2112) owner \31 field -> { ftype, ptr } from data.fieldtypes; two different declarations of one owner's field
     -- (same-named classes in two files) decide nothing — false
     local fmap
@@ -5319,6 +5338,27 @@ function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes)
             end
         end
         local t = fmap[own .. '\31' .. fld]
+        if t == nil then -- an INHERITED field: the nearest base declaring it, one per level (CART-2116)
+            local level, seen = { own }, { [own] = true }
+            for _ = 1, 8 do
+                local nxt, hit = {}, nil
+                for _, c in ipairs(level) do
+                    for _, p in ipairs(bases(c) or {}) do
+                        if not seen[p] then
+                            seen[p] = true; nxt[#nxt + 1] = p
+                            local ft = fmap[p .. '\31' .. fld]
+                            if ft ~= nil then
+                                if hit ~= nil then return nil end -- two bases declare it: ambiguous
+                                hit = ft
+                            end
+                        end
+                    end
+                end
+                if hit ~= nil then t = hit; break end
+                if #nxt == 0 then break end
+                level = nxt
+            end
+        end
         if not t then return nil end
         -- the operator must fit the declarator, as for a binder: `->` on a pointer, `.` on a value / reference
         if (op == '->') ~= (t[2] == 1) or (op == '.' and t[2] ~= 0) then return nil end
@@ -5332,20 +5372,44 @@ function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes)
         if rc then
             local file = cget(i, 'file')
             local callee = tostring(cget(i, 'callee'))
-            local key = rc .. '::' .. callee
-            local cands = exact[key]
-            -- (a class declared in a NAMESPACE names its methods `ns::Cls::m`, and a binder written inside the namespace
-            -- says `Cls`: the definitions whose name ENDS in ::Cls::m at a segment boundary are the same key)
-            if not cands and tail and tail[callee] then
-                local sfx = '::' .. key
-                for _, nd in ipairs(tail[callee]) do
-                    if nd.name and #nd.name > #sfx and nd.name:sub(-#sfx) == sfx then
-                        cands = cands or {}
-                        cands[#cands + 1] = nd
+            local clang = elang_for(file)
+            -- the definitions of `<c>::<callee>`, the language's: exact, or (a class declared in a NAMESPACE names its
+            -- methods `ns::Cls::m`, and a binder written inside the namespace says `Cls`) a name ENDING in ::Cls::m
+            local function defs_of(c)
+                local k = c .. '::' .. callee
+                local cs = exact[k]
+                if not cs and tail and tail[callee] then
+                    local sfx = '::' .. k
+                    for _, nd in ipairs(tail[callee]) do
+                        if nd.name and #nd.name > #sfx and nd.name:sub(-#sfx) == sfx then
+                            cs = cs or {}
+                            cs[#cs + 1] = nd
+                        end
                     end
                 end
+                return cs and M._lang_list(cs, clang) or {}
             end
-            if cands then cands = M._lang_list(cands, (elang_for(file))) end
+            local cands = defs_of(rc)
+            if #cands == 0 then
+                -- ★ INHERITED (CART-2116): the nearest base level defining it, exactly once (two bases at one level that
+                -- both define it refuse, as C++'s own lookup does)
+                local level, seen = { rc }, { [rc] = true }
+                for _ = 1, 8 do
+                    local nxt, found, have = {}, {}, {}
+                    for _, c in ipairs(level) do
+                        for _, p in ipairs(bases(c) or {}) do
+                            if not seen[p] then
+                                seen[p] = true; nxt[#nxt + 1] = p
+                                for _, nd in ipairs(defs_of(p)) do
+                                    if not have[nd.id] then have[nd.id] = true; found[#found + 1] = nd end
+                                end
+                            end
+                        end
+                    end
+                    if #found > 0 or #nxt == 0 then cands = found; break end
+                    level = nxt
+                end
+            end
             if cands and #cands == 1 then
                 cset(i, 'to', cands[1].id)
                 cset(i, 'refused', nil)

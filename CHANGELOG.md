@@ -2,6 +2,13 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C++ inheritance is recorded (graph; cache v314)
+
+- A C++ class's base classes are `data.extends` rows, one per base. A typed member call (binder, field, implicit this)
+  whose class does not define the method resolves to the nearest base that does. Two bases at one level that both
+  define it are refused. luanti/src: +466 resolved (CART-2116).
+- Lint's dead-function alibi (`overridden-by`) now covers C++ overrides of a base method.
+
 ## 2026-11-16 — C++ member-field receivers are typed too (graph; cache v313)
 
 - `m_env->step()` inside a member function, where `m_env` is a field the class declares (usually in its header), now
