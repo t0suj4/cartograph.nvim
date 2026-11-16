@@ -550,7 +550,10 @@ local function java_super_name(node, src, child)
     local fq = java_imports(src)[head]
     if (fq and java_jdk_import(fq)) or (not fq and JAVA_JDK_TYPES[head]) then return nil end
     local last = written:match('([%w_$]+)$')
-    if not last or last == child then return nil end
+    -- (a nested class extending a SAME-NAMED nested class — `class Builder extends FieldMapper.Builder`, 149 clauses on
+    -- elasticsearch server — IS a row now, CART-2080: parent == child by simple name, `written` the qualified one.
+    -- Every simple-name reader skips it (it would read as a self-loop); the file-keyed ones resolve `written`)
+    if not last then return nil end
     return last, written
 end
 
@@ -1369,6 +1372,9 @@ return {
                 local me, cnode = java_enclosing_class(calln, src)
                 local sup = cnode and cnode:field('superclass')[1]
                 cls = sup and sup:named_child(0) and java_super_name(sup:named_child(0), src, me) or nil
+                -- (a SAME-NAMED parent, `class Request extends X.Request`: keyed `Request::m` the call would land on the
+                -- child's own m — super.writeTo() resolving to itself. No key: the parent is another file's, CART-2080)
+                if cls == me then cls = nil end
             elseif ot == 'identifier' then
                 local objname = node_text(obj, src)
                 cls, hedge, defer, wq = java_var_type(model, objname, calln)

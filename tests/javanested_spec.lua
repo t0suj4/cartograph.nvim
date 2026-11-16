@@ -87,3 +87,27 @@ test('java super: a class is (file, name) — an imported p.a.Bound never reache
     eq('p/n/Base.java::Base::own@1', inner.to, 'Holder.Bound\'s own() is still its parent\'s')
     vim.fn.delete(root, 'rf')
 end)
+
+test('java super: a nested class extending a SAME-NAMED nested class (Builder extends FieldMapper.Builder) inherits through it (CART-2080)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/p', 'p')
+    local function w(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    w('p/FieldMapper.java', 'package p;\npublic class FieldMapper {\n  int base() { return 0; }\n  public static class Builder {\n    public int init() { return 1; }\n    public int write() { return 2; }\n  }\n}\n')
+    w('p/Other.java', 'package p;\npublic class Other {\n  public static class Builder { public int init() { return 2; } public int write() { return 3; } }\n}\n')
+    w('p/MyMapper.java', table.concat({
+        'package p;',
+        'public class MyMapper {',
+        '  public static class Builder extends FieldMapper.Builder {',
+        '    int go() { return init(); }',                    -- 3: inherited through the same-named parent
+        '    public int write() { return super.write(); }',  -- 4: super.write() is NOT this write()
+        '  }',
+        '}', '' }, '\n'))
+    local d = ts.extract(root)
+    local row
+    for _, e in ipairs(d.extends or {}) do if e.file == 'p/MyMapper.java' then row = e end end
+    eq({ 'Builder', 'Builder', 'FieldMapper.Builder' }, { row.child, row.parent, row.written }, 'the clause is a row now')
+    local function at2(line, callee) for _, c in ipairs(d.calls) do if c.file == 'p/MyMapper.java' and c.line == line and c.callee == callee then return c end end end
+    eq('p/FieldMapper.java::Builder::init@4', at2(3, 'init').to)
+    ok(at2(4, 'write').to ~= 'p/MyMapper.java::Builder::write@4', 'super.write() never resolves to the child itself: ' .. tostring(at2(4, 'write').to))
+    vim.fn.delete(root, 'rf')
+end)

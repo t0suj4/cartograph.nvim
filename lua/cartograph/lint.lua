@@ -1474,8 +1474,12 @@ local function contract_alibi(store)
         local d = sub[name]; if not d then d = {}; sub[name] = d end
         d[#d + 1] = { kind = kind, name = child }
     end
-    for _, r in ipairs(data.implements or {}) do add(r.child, 'implements', r.iface) end
-    for _, r in ipairs(data.extends or {}) do add(r.child, 'extends', r.parent) end
+    for _, r in ipairs(data.implements or {}) do
+        if r.child ~= r.iface then add(r.child, 'implements', r.iface) end -- (a same-named nested interface: CART-2080)
+    end
+    for _, r in ipairs(data.extends or {}) do
+        if r.child ~= r.parent then add(r.child, 'extends', r.parent) end -- (a same-named nested parent: CART-2080)
+    end
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
             local c, m = (n.name or ''):match('^(.*)::([^:]+)$')

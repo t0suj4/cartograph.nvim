@@ -2,6 +2,12 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — Java: a nested class extending a same-named nested class inherits through it (graph; cache v324)
+
+- `class Builder extends FieldMapper.Builder` (and `implements Outer.Same`) now records its supertype. Its inherited
+  methods resolve to the outer class's nested class (`FieldMapper.Builder` → `Mapper.Builder::build`).
+  elasticsearch/server: +38 resolved; libs: +7. Nothing else moves (CART-2080).
+
 ## 2026-11-16 — Java: an inherited method is found through the right class's parent (graph; cache v323)
 
 - When a call on a class must walk up to a parent class, the class is now the one its name means from the calling

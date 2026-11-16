@@ -2454,9 +2454,12 @@ local SUPER_STEP_LIMIT = 32
 local function build_super(extends)
     local super = {}
     for _, e in ipairs(extends or {}) do
+        -- (a same-named nested parent, `Builder extends FieldMapper.Builder`, is no simple-name edge: CART-2080)
+        if e.child == e.parent then goto next_row end
         local prev = super[e.child]
         if prev == nil then super[e.child] = e.parent
         elseif prev ~= e.parent then super[e.child] = false end -- name collision
+        ::next_row::
     end
     return super
 end
@@ -2573,7 +2576,9 @@ local function resolve_super(cv, extends, exact, addref, node_index, edges)
             for _, e in ipairs(extends) do
                 if e.file and e.child then
                     local t = superAt[e.file]; if not t then t = {}; superAt[e.file] = t end
-                    if t[e.child] == nil then t[e.child] = e.parent elseif t[e.child] ~= e.parent then t[e.child] = false end
+                    -- (the parent AS WRITTEN when qualified: `FieldMapper.Builder` names another file's Builder, CART-2080)
+                    local pw = (e.written and e.written:find('.', 1, true)) and e.written or e.parent
+                    if t[e.child] == nil then t[e.child] = pw elseif t[e.child] ~= pw then t[e.child] = false end
                     local c = classfiles[e.child]; if not c then c = {}; classfiles[e.child] = c end
                     c[e.file] = true
                 end
@@ -2610,23 +2615,39 @@ local function resolve_super(cv, extends, exact, addref, node_index, edges)
                 local fn = node_index and cfn and node_index[cfn]
                 head = fn and fn.name and fn.name:match('^(.+)[.:][%w_]+$') or nil
             end
-            if head and sep and super[head] ~= nil then
+            local _, cspec = elang_for(cget(i, 'file'))
+            local byfile = head and sep and cspec and cspec.class_by_package and edges
+            local curfile = byfile and class_file(head, cget(i, 'file')) or nil
+            -- (the file-aware path has its OWN rows — a same-named nested parent is in superAt, never in `super`)
+            if head and sep and (super[head] ~= nil or (curfile and superAt[curfile] and superAt[curfile][head])) then
                 local clang = elang_for(cget(i, 'file'))
-                local _, cspec = elang_for(cget(i, 'file'))
-                local byfile = cspec and cspec.class_by_package and edges
-                local curfile = byfile and class_file(head, cget(i, 'file')) or nil
-                local seen, cur, target = { [head] = true }, head, nil
+                local seen, cur, target = { [(curfile or '') .. '\0' .. head] = true }, head, nil
                 for _ = 1, SUPER_STEP_LIMIT do
-                    local par
+                    local par, parfile
                     if curfile then
-                        par = superAt[curfile] and superAt[curfile][cur]
-                        if par == false then break end -- (two rows in one file disagree: decide nothing)
+                        local pw = superAt[curfile] and superAt[curfile][cur]
+                        if pw == false or not pw then break end -- (two rows in one file disagree / top: decide nothing)
+                        -- (a QUALIFIED parent `Outer.Inner`: the file Outer means from here that also declares Inner)
+                        local qhead, qlast = pw:match('^([%w_$]+)%..-([%w_$]+)$')
+                        if qhead then
+                            par = qlast
+                            local hf = class_file(qhead, curfile)
+                            parfile = hf and classfiles[qlast] and classfiles[qlast][hf] and hf or nil
+                            -- (the outer class's file cannot be named: the simple name as before — EXCEPT a same-named
+                            -- parent, which would name the child itself)
+                            if not parfile then
+                                if qlast == cur then break end
+                                parfile = class_file(qlast, curfile)
+                            end
+                        else
+                            par = pw
+                            parfile = class_file(par, curfile)
+                        end
                     else
                         par = super[cur]
                     end
-                    if not par or seen[par] then break end -- top of chain / cycle
-                    seen[par] = true
-                    local parfile = curfile and class_file(par, curfile) or nil
+                    if not par or seen[(parfile or '') .. '\0' .. par] then break end -- top of chain / cycle
+                    seen[(parfile or '') .. '\0' .. par] = true
                     local cands = exact[par .. sep .. method]
                     if cands then
                         local fit, dup = nil, false
@@ -2736,6 +2757,9 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref)
         s[cls] = true
     end
     for _, e in ipairs(implements) do
+        -- (a same-named nested interface, `Bucket implements MultiBucketsAggregation.Bucket`, is no simple-name edge:
+        -- read by name it would make Bucket its own implementer, CART-2080; the file-keyed reach resolves `written`)
+        if e.child == e.iface then goto next_impl end
         local P = part(elang_for(e.file) or false)
         if e.cintf then
             local l = P.ifext[e.child]; if not l then l = {}; P.ifext[e.child] = l end
@@ -2744,6 +2768,7 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref)
             add(P.allimpls, e.iface, e.child)
             if beans[e.child] then add(P.beanimpls, e.iface, e.child) end
         end
+        ::next_impl::
     end
     for lang, P in pairs(parts) do
         local allimpls, beanimpls, ifext, svc = P.allimpls, P.beanimpls, P.ifext, P.svc
@@ -4249,7 +4274,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             local function base(t) return t and (t:gsub('<.*$', ''):match('([%w_$]+)%s*$')) end
             for _, e in ipairs((data and data.extends) or {}) do
                 local c, p = e.child, base(e.parent)
-                if c and p then
+                if c and p and c ~= p then -- (a same-named nested parent is no simple-name edge, CART-2080)
                     if fsup2[c] == nil then fsup2[c] = p elseif fsup2[c] ~= p then fsup2[c] = false end
                     local k = fkids[p]; if not k then k = {}; fkids[p] = k end
                     k[#k + 1] = c
@@ -4257,7 +4282,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             end
             for _, e in ipairs((data and data.implements) or {}) do
                 local c, p = e.child, base(e.iface)
-                if c and p then
+                if c and p and c ~= p then -- (a same-named nested interface: CART-2080)
                     local k = fkids[p]; if not k then k = {}; fkids[p] = k end
                     k[#k + 1] = c
                 end

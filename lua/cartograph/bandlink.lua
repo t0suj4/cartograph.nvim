@@ -102,9 +102,11 @@ end
 function M.super_map(extends)
     local super = {}
     for _, e in ipairs(extends or {}) do
-        local prev = super[e.child]
-        if prev == nil then super[e.child] = e.parent
-        elseif prev ~= e.parent then super[e.child] = false end
+        if e.child ~= e.parent then -- (a same-named nested parent is no simple-name edge, CART-2080)
+            local prev = super[e.child]
+            if prev == nil then super[e.child] = e.parent
+            elseif prev ~= e.parent then super[e.child] = false end
+        end
     end
     return super
 end

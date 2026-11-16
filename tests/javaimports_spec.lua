@@ -208,7 +208,9 @@ test('javaimports: a nested supertype Outer.Inner is a supertype; a package-qual
     eq('implements I / Outer.I', rows.J, 'an interface\'s nested super-interface')
     eq('implements I / Outer.I', rows.Rec, 'a record\'s nested interface')
     eq('implements I / Outer.I', rows.En, 'an enum\'s nested interface')
-    eq(nil, rows.Builder, 'Builder extends Outer.Builder keys nothing: the key is the child\'s own')
+    -- (CART-2080: a same-named nested parent IS a row — child == parent, `written` the qualified name; simple-name readers
+    -- skip it, the file-keyed ones resolve `written`. It keyed nothing under CART-0690)
+    eq('extends Builder / Outer.Builder', rows.Builder, 'Builder extends Outer.Builder: a row whose written name is the outer class\'s')
     eq(nil, rows.Q, 'a package-qualified superclass is not truncated onto a project class')
     eq(nil, rows.QueryCache, 'nor a package-qualified library interface onto the child itself')
     eq(nil, rows.E, 'a JDK head (Map.Entry) is not the project\'s Entry')
