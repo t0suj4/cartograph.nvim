@@ -11022,7 +11022,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if a.k == 'local' and a.name then
                         local cands = exact[a.name]
                         if cands and #cands == 1 and (cands[1].kind == 'function'
-                            or cands[1].kind == 'method') and M._arg_is_fn(a.bd, p.file, cands[1]) then
+                            or cands[1].kind == 'method') and M._arg_is_fn(a.bd, p.file, cands[1])
+                            and M._join_lang_ok(cands[1], (elang_for(p.file)), false) then
                             cands[1].cbarg = true
                         end
                     end
@@ -12007,8 +12008,13 @@ function M._relink(data, touched, opts)
                 local ak, aname = full_cv.aget(i, j, 'k'), full_cv.aget(i, j, 'name')
                 if (ak == 'local' or (ak == 'func' and full_cv.aget(i, j, 'up'))) and aname then
                     local cands = exact[aname]
+                    -- ★ A NAME NEVER CROSSES LANGUAGES here either (CART-2109): an erlang pattern variable `E` passed at
+                    -- a clause the call's fn did not cover (mod_admin_extra.erl `binary_to_list(E)`) marked the one
+                    -- JavaScript arrow `const E = …` in the tree cbarg — denying its same-file calls their base tier in
+                    -- the parallel graph only, since extract's pre-scan judged module level by line and skipped it
                     if cands and #cands == 1 and (cands[1].kind == 'function'
-                        or cands[1].kind == 'method') and M._arg_is_fn(full_cv.aget(i, j, 'bd'), full_cv.get(i, 'file'), cands[1]) then
+                        or cands[1].kind == 'method') and M._arg_is_fn(full_cv.aget(i, j, 'bd'), full_cv.get(i, 'file'), cands[1])
+                        and M._join_lang_ok(cands[1], (elang_for(full_cv.get(i, 'file'))), false) then
                         cands[1].cbarg = true
                     end
                 end
