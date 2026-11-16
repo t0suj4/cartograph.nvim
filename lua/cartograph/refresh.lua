@@ -247,6 +247,35 @@ function M.splice(data, rels, deleted, opts)
     table.sort(un)
     data.unparsed = #un > 0 and un or nil
 
+    -- ★ THE RESOLVER INPUTS FOLLOW THE FILES THEY DESCRIBE (CART-2117): extends / implements / fieldtypes / … are per
+    -- file (cache.RESOLVER_INPUTS: 'rows' carry `file`, 'by_file' are keyed by it). They were never spliced, so an edit
+    -- that added a base or renamed a field relinked against the OLD rows until a cold re-open
+    for field, shape in pairs(require('cartograph.cache').RESOLVER_INPUTS) do
+        if shape == 'by_file' then
+            local t = data[field]
+            if t then
+                for f in pairs(del) do t[f] = nil end
+                for _, f in ipairs(rels or {}) do t[f] = nil end
+            end
+            for f, v in pairs(mini[field] or {}) do
+                t = data[field] or {}; data[field] = t
+                t[f] = v
+            end
+        else
+            local keep = {}
+            for _, r in ipairs(data[field] or {}) do
+                if not (r.file and (relset[r.file] or del[r.file])) then keep[#keep + 1] = r end
+            end
+            for _, r in ipairs(mini[field] or {}) do keep[#keep + 1] = r end
+            if data[field] or #keep > 0 then data[field] = keep end
+        end
+    end
+    -- (the beans map rides the implements rows — java @stereotype classes, keyed by class: the slice's entries win)
+    for c, v in pairs(mini.beans or {}) do
+        data.beans = data.beans or {}
+        data.beans[c] = v
+    end
+
     -- the mention index follows the files it describes (the id pass
     -- below re-records the refreshed files')
     data.names = data.names or {}
