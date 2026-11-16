@@ -51,6 +51,17 @@ local function split(full)
     return full, nil
 end
 
+M.split = split
+
+--- THE EXTERNAL SITE a call record is: (base, member | nil), or nil when the call is not on the external surface
+--- (resolved, refused, or bound to a file never read). The ONE predicate surface() buckets by and a per-site verb
+--- (agent portability_sites, CART-1951) joins on, so the two populations cannot drift: the requirement NAME of a site
+--- is `base.member`, or `base` for a bare call — what portability.requires keys (CART-1951).
+function M.site(c)
+    if callrec.to(c) or c.refused or (c.ext and c.ext.why == 'unread-file') then return nil end
+    return split(callrec.full(c) or callrec.callee(c) or '?')
+end
+
 --- Classify every call into the external surface.
 --- Returns { total, resolved, internal_multi, cross_scope, stdlib_tail,
 ---   external, bases = { [base] = { calls, members = {m -> n}, files = set,
@@ -79,7 +90,7 @@ function M.surface(store)
         else
             -- SILENT (c.to nil, c.refused nil) = external-unknown: the boundary.
             s.external = s.external + 1
-            local base, member = split(callrec.full(c) or callrec.callee(c) or '?')
+            local base, member = M.site(c)
             local e = s.bases[base]
             if not e then
                 e = { calls = 0, members = {}, files = {}, bare = 0,

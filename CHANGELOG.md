@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — agent protocol 5: the `portability_sites` verb (agent surface, additive)
+
+- New verb `portability_sites { from, to, file?, verdict?, limit? }`: the port worklist BY SITE. Every external call
+  site (file, 1-based `line`, 1-based character `col`, `fn`, `callee`, `full`) with the move's verdict for its name:
+  `lost`, `moved` (with `to` and `basis`: a root rename or member move), `kept`, `gained`, `not-adjudicable` (with
+  `reason`, e.g. `receiver-class-present`). `subject.names` / `subject.by_site` count the verdicts per name and per
+  site. The verdict is the NAME's; a changed signature or behaviour is not measured, and a note says so (CART-1951).
+- Same gates as the move verbs: `same-profile`, `profiles-not-comparable`, `unavailable` for a profile that does
+  not ship; `needs_calls`.
+- Detect it: `graph.protocol = 5`, `serverInfo.version` `0.5`.
+
 ## 2026-11-16 — every answer names the commit its graph describes (agent surface, additive)
 
 - `graph.revision` on every envelope: `{ vcs, commit, committed_at, branch, dirty, recorded_at }`, the root's git

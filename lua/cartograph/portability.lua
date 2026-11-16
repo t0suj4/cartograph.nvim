@@ -1948,6 +1948,18 @@ end
 --- score the same set, so nothing can drift between them.
 --- Returns (result, err); result = { from, to, lost, gained, kept, neither }.
 function M.diff(store, from, to)
+    local a, b = M.audits(store, from, to)
+    if not a then return nil, b end
+    local pm = require 'cartograph.spec.profile'
+    local res = M.diff_entries(a, b)
+    res.size_from, res.size_to = M.profile_size(pm.load(from)), M.profile_size(pm.load(to))
+    return res
+end
+
+--- BOTH AUDITS OF A MOVE, behind the fences a move needs — (audit_from, audit_to) or (nil, err). diff reads them as
+--- name lists; a per-site verdict (agent portability_sites, CART-1951) reads them per entry. One gate, so the two
+--- cannot disagree about which pairs are comparable.
+function M.audits(store, from, to)
     local a, erra = M.audit(store, from)
     if not a then return nil, erra end
     local b, errb = M.audit(store, to)
@@ -1971,9 +1983,7 @@ function M.diff(store, from, to)
                 .. ' unchanged'):format(rt)
         end
     end
-    local res = M.diff_entries(a, b)
-    res.size_from, res.size_to = M.profile_size(pm.load(from)), M.profile_size(pm.load(to))
-    return res
+    return a, b
 end
 
 --- The pure comparison of two audit results — the whole semantic of a move, with

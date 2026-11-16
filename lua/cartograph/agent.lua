@@ -319,7 +319,7 @@ end
 -- line's characters misread on any non-ASCII line. The change is a deliberate client break, so it is made VISIBLE:
 -- every answer's `graph` carries `protocol` and `positions`, mcpserve's serverInfo version moved, and CHANGELOG.md /
 -- doc/cartograph.txt say so. A client that reads columns must check `graph.positions.unit == 'char'`.
-M.PROTOCOL = 4 -- 4: the `sites` verb (CART-1933); 3: the `selection` verb, the list pane's current item (CART-2101); 2: CHARACTER columns (CART-2086)
+M.PROTOCOL = 5 -- 5: the `portability_sites` verb (CART-1951); 4: the `sites` verb (CART-1933); 3: the `selection` verb, the list pane's current item (CART-2101); 2: CHARACTER columns (CART-2086)
 M.POSITIONS = { line = 1, col = 1, unit = 'char' }
 
 local function build_graph(store)
@@ -718,7 +718,7 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     -- is that surface scored twice: the roster first (there is no from/to to
     -- guess at), then the READ diff, then the CALL diff it must not be mistaken
     -- for.
-    'portability_targets', 'portability_move', 'portability_move_calls',
+    'portability_targets', 'portability_move', 'portability_move_calls', 'portability_sites',
     -- FEDERATION (CART-1160 step 9): this graph's PORTS, for a client that mounts this host as a band — a READ
     'ports',
     -- THE LIST PANE'S CURRENT ITEM (CART-2101): a READ of what the source shares, absent on a headless host
@@ -2520,6 +2520,123 @@ local function v_portability_move_calls(store, args)
             req.total, res.from, res.to),
         evidence = { requirement_names = req.total, kept = res.kept,
             neither = res.neither } }, notes = notes }
+end
+
+-- ── verb: portability_sites (CART-1951) ──────────────────────────────────────
+-- The BNW 2.1 port bot: `ports` listed 502 external call sites with file and line, and the break sites were among them
+-- with NO VERDICT, so "what to change" took a second pass by hand. This is the join: every external call SITE (the one
+-- population externals.site defines — the call surface portability's requirement set is built from) with the move's
+-- verdict for its NAME under both profiles (portability.audits, behind the same fences as the move verbs):
+--   lost             the old environment holds the name, the new one does not (or the target's data-stage lualib
+--                    removed it) — porting work at this site
+--   moved            lost, AND correspond pairs it with exactly one new form (`to`: a root rename / a member move)
+--   kept             both hold it
+--   gained           only the new one does (already-migrated code)
+--   not-adjudicable  neither profile can say — `reason` is the target audit's (receiver-class-present: a method on an
+--                    object whose class both versions have, which the name diff cannot score yet)
+-- ⚠ THE VERDICT IS THE NAME'S, and every site of a name shares it: the profiles answer per name. ⚠ KEPT MEANS THE NAME
+-- IS KEPT, not that the call still works — a changed signature (the get/set_quick_bar_slot `page` argument) and a changed
+-- behaviour are not measured; a note says so on every answer.
+local SITE_VERDICTS = { 'lost', 'moved', 'kept', 'gained', 'not-adjudicable' }
+local function v_portability_sites(store, args)
+    local port, ext = require 'cartograph.portability', require 'cartograph.externals'
+    local pre, bad = version_pair(args)
+    if not pre then return bad end
+    local only
+    if args.file and args.file ~= '' then
+        local f, why, hits = resolve_file(store, args.file)
+        if not f then return unknown_file(store, args.file, why, hits, 'file') end
+        only = f
+    end
+    local want = (args.verdict and args.verdict ~= '') and args.verdict or nil
+    if want and not vim.tbl_contains(SITE_VERDICTS, want) then
+        return nil, ('portability_sites: verdict must be one of %s'):format(table.concat(SITE_VERDICTS, ' | '))
+    end
+    local a, b = port.audits(store, args.from, args.to)
+    if not a then return not_comparable(b, args.from, args.to) end
+    local ea, eb = {}, {}
+    for _, e in ipairs(a.entries) do ea[e.name] = e end
+    for _, e in ipairs(b.entries) do eb[e.name] = e end
+    -- the verdict of each NAME, once
+    local lost, verdict = {}, {}
+    for name, x in pairs(ea) do
+        local y = eb[name] or {}
+        if x.provided and y.provided then verdict[name] = 'kept'
+        elseif x.provided then verdict[name] = 'lost'; lost[#lost + 1] = { name = name, reads = x.calls }
+        elseif y.provided then verdict[name] = 'gained'
+        elseif y.reason == 'lualib-removed' or y.reason == 'lualib-absent' then verdict[name] = 'lost'
+        else verdict[name] = 'not-adjudicable' end
+    end
+    table.sort(lost, function (p, q) return p.name < q.name end)
+    local newform = {}
+    if #lost > 0 then
+        local cr = port.correspond(args.from, args.to, lost)
+        for _, r in ipairs(cr and cr.rows or {}) do
+            if r.to then newform[r.name] = r; verdict[r.name] = 'moved' end
+        end
+    end
+    local P, atr, callrec = require 'cartograph.pos', require 'cartograph.at', require 'cartograph.callrec'
+    local rows, total, by_site, names = {}, 0, {}, {}
+    for _, v in ipairs(SITE_VERDICTS) do by_site[v], names[v] = 0, 0 end
+    for name, v in pairs(verdict) do names[v] = names[v] + 1 end
+    for _, c in callrec.each(store.data) do
+        local base, member = ext.site(c)
+        if base then
+            local name = member and (base .. '.' .. member) or base
+            local v = verdict[name] or 'not-adjudicable'
+            total = total + 1
+            by_site[v] = by_site[v] + 1
+            local file = callrec.file(c)
+            if (not only or file == only) and (not want or want == v) then
+                local line, col = callrec.line(c), nil
+                if c.at and file then
+                    local l0, c0 = atr.sl(c.at), atr.sc(c.at)
+                    local q = P.to(P.new(l0, c0, 'GRAPH'), 'AGENT', line_text(store, file, l0 + 1))
+                    line, col = l0 + 1, q and q.col or nil
+                elseif type(line) == 'number' then line = line + 1 end
+                local y = eb[name] or ea[name] or {}
+                rows[#rows + 1] = { file = nn(file), line = nn(line), col = nn(col), fn = nn(callrec.fn(c)),
+                    callee = nn(callrec.callee(c)), full = nn(callrec.full(c)), name = name, verdict = v,
+                    reason = (v ~= 'kept' and v ~= 'gained') and nn(y.reason) or NUL,
+                    to = newform[name] and newform[name].to or NUL,
+                    basis = newform[name] and newform[name].basis or NUL }
+            end
+        end
+    end
+    table.sort(rows, function (p, q)
+        if p.file ~= q.file then return tostring(p.file) < tostring(q.file) end
+        if p.line ~= q.line then return (tonumber(p.line) or 0) < (tonumber(q.line) or 0) end
+        return (tonumber(p.col) or 0) < (tonumber(q.col) or 0)
+    end)
+    local subject = { from = a.runtime, to = b.runtime, sites = total, by_site = by_site, names = names }
+    local notes = move_notes(store, { { kind = 'verdict-is-the-names', premise = 'granularity',
+        why = 'the profiles answer per NAME: every site of a name carries that name\'s verdict. `kept` means the NAME is kept, not that the call still works — a changed SIGNATURE (an added or removed parameter) and a changed BEHAVIOUR are not measured here',
+        evidence = { not_measured = { 'signature-changed', 'behaviour-changed' } } } })
+    if names['not-adjudicable'] > 0 then
+        notes[#notes + 1] = { kind = 'not-adjudicable', premise = 'receiver',
+            why = ('%d name(s) at %d site(s) neither profile can score — mostly methods on objects (`player.teleport`), whose class both versions have: `reason` says which mechanism stopped each. They are NOT cleared'):format(names['not-adjudicable'], by_site['not-adjudicable']),
+            evidence = { names = names['not-adjudicable'], sites = by_site['not-adjudicable'] } }
+    end
+    -- the absence is decided on the UNFILTERED, UNCLIPPED population, the narrowing second
+    if total == 0 then
+        return { subject = subject, result = {}, absence = 'absent', absence_why = { premise = 'no-external-site',
+            why = 'no call in this graph leaves it (every call resolved inside, or was refused) — there is no external site to port',
+            evidence = NUL }, notes = notes }
+    end
+    if #rows == 0 then
+        return { subject = subject, result = {}, absence = 'absent', absence_why = { premise = 'no-match',
+            why = ('%d external site(s), none %s'):format(total,
+                table.concat(vim.tbl_filter(function (x) return x end, {
+                    only and ('in ' .. only) or false, want and ('with verdict ' .. want) or false }), ' and ')),
+            evidence = { sites = total, by_site = by_site } }, notes = notes }
+    end
+    local limit = math.max(1, math.floor(tonumber(args.limit) or 200))
+    if #rows > limit then
+        notes[#notes + 1] = { kind = 'clipped', why = ('%d site(s), %d returned — raise `limit`, or narrow by `file` / `verdict`'):format(#rows, limit),
+            evidence = { total = #rows, limit = limit } }
+        for i = #rows, limit + 1, -1 do rows[i] = nil end
+    end
+    return { subject = subject, result = rows, notes = notes }
 end
 
 -- ── PHASE 3: THE WRITE AXIS (CART-0146) ─────────────────────────────────────
@@ -4846,6 +4963,23 @@ M.VERBS = {
             { name = 'limit', type = 'integer', desc = 'max lost names (default 100); a clip is reported as a note' },
         },
         run = v_portability_move_calls,
+    },
+    portability_sites = {
+        answers = 'reach-for',
+        refuses = { 'ambiguous-file', 'profiles-not-comparable', 'same-profile', 'unknown-file' },
+        summary = 'the PORT WORKLIST BY SITE: every external call site (file, 1-based line and character column, fn, the qualified callee) with the move\'s verdict for its name — lost / moved (with the new form) / kept / gained / not-adjudicable (with the reason). The verdict is the NAME\'s; kept means the name is kept, not that its signature or behaviour is unchanged',
+        subject = 'query',
+        tier_basis = 'observation', needs_calls = true,
+        absences = { 'absent', 'unavailable' },
+        args = {
+            { name = 'from', type = 'string', required = true,
+                desc = 'the OLD environment profile (portability_targets lists them)' },
+            { name = 'to', type = 'string', required = true, desc = 'the NEW environment profile' },
+            { name = 'file', type = 'string', desc = 'only the sites in this file (a path suffix)' },
+            { name = 'verdict', type = 'string', desc = 'only the sites with this verdict: lost | moved | kept | gained | not-adjudicable' },
+            { name = 'limit', type = 'integer', desc = 'max rows (default 200); a clip is reported as a note' },
+        },
+        run = v_portability_sites,
     },
 
     -- ── the write axis (CART-0146) ──────────────────────────────────────────

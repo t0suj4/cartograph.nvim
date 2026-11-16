@@ -355,6 +355,7 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         portability_targets = {},
         portability_move = { from = 'lua-factorio-11', to = 'lua-factorio' },
         portability_move_calls = { from = 'lua-factorio-11', to = 'lua-factorio' },
+        portability_sites = { from = 'lua-factorio-11', to = 'lua-factorio' },
         -- planning with no symbol named, and previewing / fetching a handle that
         -- was never minted: refusals reachable without touching a byte
         txn_plan_moveset = { args = { dest = 'lib/new.lua' }, expect = 'refusal' },
