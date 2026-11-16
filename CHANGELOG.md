@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — declared types are stored, and node rows show them (agent surface + graph; cache v317)
+
+- C, C++, Go and Rust record each binding's declared type exactly as written. A module variable's node carries `ty`
+  (`const Foo*`, `*Foo`, `&Bar`). A function's node carries `ptypes`, aligned with `params`, with `''` where none is
+  written. An inferred type (`auto`, `:=`, an untyped `let`) is not recorded (CART-0696).
+- `node_find` / `node_at` rows gain `type` on such a variable and `param_types` (`{ name, type }`) on such a function.
+  Rows for other nodes are unchanged.
+- Resolution is unchanged. Cache +0.2-0.5%.
+
 ## 2026-11-16 — Erlang / Haskell: calls on a multi-clause function's last line have their caller (graph; cache v316)
 
 - In a function with several clauses (Erlang) or equations (Haskell), a call on the last line past the first

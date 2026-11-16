@@ -222,6 +222,18 @@ local function noderow(store, id, extra)
     if not n then return nil end
     local row = { id = id, ref = NUL, name = nn(n.name), kind = nn(n.kind),
         file = nn(n.file), line = nn(line_of(n)), exported = nn(n.exported) }
+    -- ★ THE DECLARED TYPE, AS WRITTEN (CART-0696): a var's `type`, a function's `param_types` ({ name, type } in
+    -- parameter order, type null where none is written). Present only where the language records it (c / cpp / go /
+    -- rust), so every other row is unchanged
+    if n.ty then row.type = n.ty end
+    if n.ptypes and n.params then
+        local pts = {}
+        for i, p in ipairs(n.params) do
+            local t = n.ptypes[i]
+            pts[i] = { name = type(p) == 'string' and p or NUL, type = (t and t ~= '') and t or NUL }
+        end
+        row.param_types = pts
+    end
     -- ★★ WHAT HAS BEEN SAID ABOUT THIS NODE — AND WHAT NOBODY ASKED (CART-0762).
     -- `findings` alone would be a trap: an empty list reads as "clean" whether a
     -- census cleared this node or no census has ever run. `not_run` beside it is

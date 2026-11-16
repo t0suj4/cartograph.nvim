@@ -339,6 +339,15 @@ return {
     -- gate reads declarations from fn_locals alone (CART-1896, providers/treesitter.lua callee_binding)
     df_binds = false,
     qualify_call = go_qualify_call, -- (CART-1599)
+    -- a binder's DECLARED type as written (CART-0696): a parameter's, a `var x T`'s; `:=` and `var x = v` write none
+    decl_type = function (id, src)
+        local p = id and id:parent()
+        if p and (p:type() == 'parameter_declaration' or p:type() == 'var_spec' or p:type() == 'const_spec') then
+            local ty = p:field('type')[1]
+            return ty and node_text(ty, src):gsub('%s+', ' ') or nil
+        end
+        return nil
+    end,
     -- a PACKAGE-QUALIFIED member `pkg.Var` (selector_expression: operand / field) reads the var of that name in the
     -- package the file imports as pkg (CART-1580)
     qualified_member = { selector_expression = { operand = 'operand', member = 'field', operand_type = 'identifier' } },

@@ -213,6 +213,7 @@ return {
     recv_class = cpp_recv_class, -- the receiver's declared / enclosing class, a side fact for the `recv` pass (CART-2111)
     scan_fields = cpp_scan_fields, -- a class's fields and their declared class: data.fieldtypes (CART-2112)
     scan_aliases = cpp_scan_aliases, -- typedef / using aliases of a class: data.typealiases (CART-2114)
+    decl_type = tsutil.c_binder_type, -- a binder's declared type as written: var `ty`, function `ptypes` (CART-0696)
     -- ★ INHERITANCE (CART-2116): one data.extends row per BASE of a class / struct (C++ recorded none, so every typed
     -- pass stopped at the declared class). Multiple bases are several rows: build_super's single-parent map refuses
     -- such a class, the recv pass walks them level by level

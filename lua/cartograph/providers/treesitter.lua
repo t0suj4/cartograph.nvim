@@ -1969,11 +1969,20 @@ local function fn_params(def, spec, src, method)
     local ps = (spec.params_field and def:field(spec.params_field)[1])
         or (spec.params_of and spec.params_of(def))
     local out = method and { 'self' } or {}
+    -- ★ THE DECLARED TYPES, aligned with `out` (CART-0696): spec.decl_type reads each binder's written type; '' = none
+    -- written. The SECOND value — nil unless the spec declares the slot and one parameter is typed
+    local pt, typed = spec.decl_type and {} or nil, false
+    local function typeof(idn)
+        if not pt then return end
+        local ty = spec.decl_type(idn, src)
+        pt[#out] = ty or ''
+        if ty then typed = true end
+    end
     if ps then
         for _, c in inext, ps, -1 do
             -- @langs-ok the per-language PARAM-NAME chain: each arm names the grammar it serves (`variable` scheme, `variable_name` php, `pointer_declarator` c/cpp) and the arms together cover the roster
             if c:type() == 'identifier' or c:type() == 'variable' then
-                out[#out + 1] = node_text(c, src)
+                out[#out + 1] = node_text(c, src); typeof(c)
             -- @langs-ok same param-name chain (php/bash $var)
             elseif c:type() == 'variable_name' then -- php $param
                 out[#out + 1] = node_text(c, src):gsub('^%$', '')
@@ -1981,7 +1990,7 @@ local function fn_params(def, spec, src, method)
                 for _, id in inext, c, -1 do
                     -- @langs-ok same param-name chain
                     if id:type() == 'identifier' then
-                        out[#out + 1] = node_text(id, src)
+                        out[#out + 1] = node_text(id, src); typeof(id)
                         break
                     end
                     -- @langs-ok same param-name chain (php $param)
@@ -1994,7 +2003,7 @@ local function fn_params(def, spec, src, method)
                         local inner = id:field('declarator')[1]
                         -- @langs-ok same param-name chain (c/cpp pointer declarator inner name)
                         if inner and inner:type() == 'identifier' then
-                            out[#out + 1] = node_text(inner, src)
+                            out[#out + 1] = node_text(inner, src); typeof(inner)
                         end
                         break
                     end
@@ -2002,7 +2011,13 @@ local function fn_params(def, spec, src, method)
             end
         end
     end
-    return #out > 0 and out or nil
+    if pt and typed then
+        for i = 1, #out do if pt[i] == nil then pt[i] = '' end end
+    else
+        pt = nil
+    end
+    if #out == 0 then return nil end
+    return out, pt
 end
 
 -- ── extraction ───────────────────────────────────────────────────────────────
@@ -8878,7 +8893,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local sp = pos_of(defn)
                 local method = not aname and spec.is_method(name, defn)
                 local id = uid(('%s::%s@%d'):format(file, name, sp.start.line))
-                local params = fn_params(defn, spec, src, method and lang == 'lua')
+                local params, ptypes = fn_params(defn, spec, src, method and lang == 'lua')
                 -- tri-state visibility: true/false = the provider's
                 -- verdict (lint trusts it over kind heuristics);
                 -- nil = this language has no visibility concept
@@ -9026,7 +9041,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 padd('flow.coarse', _pco)
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
-                    range = sp, order = sp.start.line, params = params,
+                    range = sp, order = sp.start.line, params = params, ptypes = ptypes, -- (ptypes: CART-0696)
                     -- (a VARARGS def: its params are the FIXED prefix and it accepts any count above it, CART-0676)
                     variadic = (spec.variadic_def and spec.variadic_def(defn)) or nil,
                     -- in-function local bindings (js family; local-shadow gate)
@@ -9268,6 +9283,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
                         file = file, range = sp, order = sp.start.line,
                         torn = torn, decl = declonly or nil,
+                        ty = spec.decl_type and spec.decl_type(namen, src) or nil, -- the declared type as written (CART-0696)
                         data = type(d) == 'table' and d or nil,
                         vlocal = spec.var_local and spec.var_local(defn) or nil }
                     if not torn then

@@ -270,6 +270,18 @@ return {
     lexical_scopes = RUST_LEXICAL_SCOPES, -- CART-1598
     fn_locals = rs_fn_locals,
     qualify_call = rs_qualify_call, -- (CART-1599)
+    -- a binder's DECLARED type as written (CART-0696): a parameter's, a `let x: T`'s, a static / const item's; an
+    -- untyped `let` writes none
+    decl_type = function (id, src)
+        local p = id and id:parent()
+        if p and p:type() == 'mut_pattern' then p = p:parent() end
+        local t = p and p:type()
+        if t == 'parameter' or t == 'let_declaration' or t == 'static_item' or t == 'const_item' then
+            local ty = p:field('type')[1]
+            return ty and (node_text(ty, src):gsub('%s+', ' ')) or nil
+        end
+        return nil
+    end,
     -- (rust's `::` is also a MODULE PATH: `Self::m` / `util::f` naming no project CLASS is not external, CART-1599)
     qualified_external = false,
     guards = RUST_GUARDS,

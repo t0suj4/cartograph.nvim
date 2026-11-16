@@ -510,6 +510,40 @@ local function c_decl_type(tynode, d, src)
     return ty, ptr
 end
 M.c_decl_type = c_decl_type
+
+--- ★ THE DECLARED TYPE OF A BINDER, AS WRITTEN (CART-0696): from the binder's identifier up through its declarator to
+--- the declaration / parameter, -> the `type:` text with the declarator's pointers and reference spelled after it
+--- (`Foo*`, `const char*` — the declaration's qualifiers lead), or nil when no type is
+--- WRITTEN (`auto`, decltype) or the declarator is not a plain one (an array, a function pointer). Stored on the graph
+--- (var node `ty`, function `ptypes`); the class KEY the recv pass needs stays c_decl_type's narrower answer
+function M.c_binder_type(id, src)
+    local ptr, ref = 0, false
+    local n = id and id:parent()
+    while n do
+        local t = n:type()
+        if t == 'pointer_declarator' then ptr = ptr + 1
+        elseif t == 'reference_declarator' then ref = true
+        elseif t == 'init_declarator' or t == 'parenthesized_declarator' then -- (transparent)
+        elseif t == 'declaration' or t == 'parameter_declaration' or t == 'optional_parameter_declaration'
+            or t == 'field_declaration' then
+            local ty = n:field('type')[1]
+            if not ty or ty:type() == 'placeholder_type_specifier' then return nil end
+            local txt = M.node_text(ty, src):gsub('%s+', ' ')
+            if txt == 'auto' or txt:match('^decltype') then return nil end
+            -- (the grammar puts `const` / `volatile` BESIDE the type: a declaration's qualifiers lead its text)
+            local q = {}
+            for _, c in M.inamed, n, -1 do
+                if c:type() == 'type_qualifier' then q[#q + 1] = M.node_text(c, src) end
+            end
+            if #q > 0 then txt = table.concat(q, ' ') .. ' ' .. txt end
+            return txt .. string.rep('*', ptr) .. (ref and '&' or '')
+        else
+            return nil
+        end
+        n = n:parent()
+    end
+    return nil
+end
 local function c_declaration(st, src, out, row)
     local sr, _, er = st:range() -- (at / ate / ab / abe: a binder's own initializer is not in its scope, CART-1602)
     local sb, eb = select(3, st:start()), select(3, st:end_())

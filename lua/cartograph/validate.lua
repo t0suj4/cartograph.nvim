@@ -19,6 +19,8 @@ M.NODE_KINDS = { module = true, ['function'] = true, method = true,
 M.EDGE_KINDS = { ref = true, import = true, use = true, reg = true }
 
 M.NODE_FIELDS = {
+    ty = true, -- a var's DECLARED type, as written (spec.decl_type: c / cpp / go / rust; CART-0696)
+    ptypes = true, -- a function's parameters' declared types, aligned with params ('' = none written; CART-0696)
     -- identity + location (required set checked separately)
     id = true, name = true, kind = true, file = true, range = true,
     order = true,
