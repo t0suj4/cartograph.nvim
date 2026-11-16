@@ -108,3 +108,32 @@ test('prov recv: php — $this-> is recv (self), an explicit T::m() is base (wri
     eq({ 'base', 'written' }, { c6.prov, c6.qhow })
     vim.fn.delete(root, 'rf')
 end)
+
+test('prov recv: zig — a pointer parameter\'s type is recv (binder), a PascalCase type receiver is base (written) (CART-0695)', function ()
+    if not parser_available('zig') then skip 'no zig parser' end
+    local root = tree({ ['m.zig'] = table.concat({
+        'const Point = struct {',
+        '    x: i32,',
+        '    pub fn norm(self: *Point) i32 { return self.x; }',
+        '    pub fn make() Point { return Point{ .x = 1 }; }',
+        '};',
+        'pub fn use(p: *Point) i32 {',
+        '    const q = Point.make();', -- line 6
+        '    return p.norm() + q.x;',  -- line 7
+        '}', '' }, '\n') })
+    local data = ts.extract(root)
+    local c6, c7 = at(data, 'm.zig', 6), at(data, 'm.zig', 7)
+    eq({ 'base', 'written' }, { c6.prov, c6.qhow })
+    eq({ 'recv', 'binder' }, { c7.prov, c7.qhow })
+    vim.fn.delete(root, 'rf')
+end)
+
+test('prov recv: ruby — an implicit-self call is recv (self), `Const.m` is base (written) (CART-0695)', function ()
+    if not parser_available('ruby') then skip 'no ruby parser' end
+    local root = tree({ ['a.rb'] = 'class Store\n  def self.make\n    1\n  end\n  def helper\n    2\n  end\n  def run\n    helper\n    Store.make\n  end\nend\n' })
+    local data = ts.extract(root)
+    local c8, c9 = at(data, 'a.rb', 8), at(data, 'a.rb', 9)
+    eq({ 'recv', 'self' }, { c8.prov, c8.qhow })
+    eq({ 'base', 'written' }, { c9.prov, c9.qhow })
+    vim.fn.delete(root, 'rf')
+end)
