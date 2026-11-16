@@ -11526,7 +11526,7 @@ M.build_symtab = build_symtab -- the F2 light index (drop-in for build_index's r
 --- every file the splice touched (the refreshed ones and those whose calls it remapped or re-opened). The cbarg
 --- pre-scan stays whole-graph (it reads module-level calls only: cheap), so a re-extracted node is marked as a full
 --- relink marks it. The refresh-parity discovery is its oracle.
-function M.relink(data, touched, opts)
+function M._relink(data, touched, opts)
     local only = opts and opts.only
     local relset = {}
     for _, n in ipairs(data.nodes) do
@@ -12198,6 +12198,23 @@ function M.relink(data, touched, opts)
     -- own minting, so the same collapse is owed here (CART-0623)
     M.dedupe_reg(data.edges, touched)
     return n
+end
+
+--- ★ RELINK RESOLVES UNDER THE GRAPH'S OWN `.h` LANGUAGE (CART-2113). What `.h` meant is a property of the TREE,
+--- decided at extraction (CART-0410) and carried on the graph; store.ingest re-adopts it, but a relink reached without
+--- an ingest (cache.load then relink, a world overlay, providers/self, the parity tools) resolved under the process
+--- default `c`. The never-cross-language fit then dropped every C++ HEADER candidate as foreign, and a refused
+--- ambiguity collapsed onto the one candidate left in a .cpp: luanti/src relinked warm resolved 1,289 calls cold
+--- extraction refuses — `f.next` on a Strfnd landed on PcgRandom::next. Adopted for the call, restored after it, so
+--- a relink of another band's graph leaves the active graph's answer in place.
+function M.relink(data, touched, opts)
+    local want, prev = data and data.h_lang, H_LANG
+    local swap = want ~= nil and (want == 'cpp' and 'cpp' or 'c') ~= prev
+    if swap then M.set_h_lang(want) end
+    local r = { pcall(M._relink, data, touched, opts) }
+    if swap then M.set_h_lang(prev) end
+    if not r[1] then error(r[2], 0) end
+    return unpack(r, 2, table.maxn(r))
 end
 
 return M
