@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — Java: library supertypes no longer stand in for project classes (graph; cache v325)
+
+- A supertype imported from the JDK (`import java.util.Map.Entry; class E implements Entry`) keeps its row but is
+  marked external, so the project's own `Entry` classes stop gaining `E` as an implementer.
+- A supertype whose import binds to no file in the tree (log4j's `AbstractStringLayout.Builder`, a test framework
+  outside the root) is marked `ext` on its row and skipped by every hierarchy reader. A call keyed by such a class
+  (`super.visitField()` on an ASM `ClassVisitor`) is external instead of joining a project method by name.
+  elasticsearch/server: 471 wrong joins withdrawn, 184 of them a `super.m()` that had resolved to its own override;
+  libs: 17 (CART-2079).
+
 ## 2026-11-16 — Java: a nested class extending a same-named nested class inherits through it (graph; cache v324)
 
 - `class Builder extends FieldMapper.Builder` (and `implements Outer.Same`) now records its supertype. Its inherited

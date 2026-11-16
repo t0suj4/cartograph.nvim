@@ -542,7 +542,13 @@ local function java_super_name(node, src, child)
     if node and node:type() == 'generic_type' then node = node:named_child(0) end
     if not node then return nil end
     local t = node:type()
-    if t == 'type_identifier' then return node_text(node, src) end
+    -- (3rd value, CART-2079: the head's single-type IMPORT, when there is one — whether it lands in the tree is known only
+    -- after import resolution, where the row is marked `ext` if it does not. A JDK import is fenced here: `import
+    -- java.util.Map.Entry; class E implements Entry` named the project's 17 classes called Entry)
+    if t == 'type_identifier' then
+        local nm = node_text(node, src)
+        return nm, nil, java_imports(src)[nm]
+    end
     if t ~= 'scoped_type_identifier' then return nil end
     local written = node_text(node, src):gsub('%b<>', ''):gsub('%s+', '')
     if not written:match('^_*%u') then return nil end
@@ -554,7 +560,7 @@ local function java_super_name(node, src, child)
     -- elasticsearch server — IS a row now, CART-2080: parent == child by simple name, `written` the qualified one.
     -- Every simple-name reader skips it (it would read as a self-loop); the file-keyed ones resolve `written`)
     if not last then return nil end
-    return last, written
+    return last, written, fq
 end
 
 -- a class body's fields: name -> { ty = type node, init = value node, final = bool }, memoized per body for the last file
@@ -1510,6 +1516,9 @@ return {
             name: (identifier) @child
             superclass: (superclass [ (type_identifier) (generic_type) (scoped_type_identifier) ] @parent))
     ]=],
+    -- (an unqualified supertype IMPORTED from the JDK — `import java.util.Map.Entry; class E implements Entry` — keeps
+    -- its row, name captured, but its import binds into no file of the tree, so it is marked `ext` and every supertype
+    -- reader skips it: the project's 17 classes called Entry stop gaining E as an implementer, CART-2079)
     super_name = java_super_name,
     -- interface→impl (F1, [[cartograph-linker]]'s first Java kind): a class's
     -- `implements I, J` and an interface's `extends K` clauses. SET-valued

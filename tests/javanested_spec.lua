@@ -111,3 +111,32 @@ test('java super: a nested class extending a SAME-NAMED nested class (Builder ex
     ok(at2(4, 'write').to ~= 'p/MyMapper.java::Builder::write@4', 'super.write() never resolves to the child itself: ' .. tostring(at2(4, 'write').to))
     vim.fn.delete(root, 'rf')
 end)
+
+test('java supertypes from OUTSIDE the tree: a JDK-imported one and a library one are marked external (CART-2079)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = vim.fn.tempname()
+    for _, dir in ipairs { 'p', 'q' } do vim.fn.mkdir(root .. '/' .. dir, 'p') end
+    local function w(f, t) local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close() end
+    w('p/Entry.java', 'package p;\npublic interface Entry { String getKey(); }\n')
+    w('p/Builder.java', 'package p;\npublic class Builder { public int flush() { return 1; } }\n')
+    w('q/E.java', 'package q;\nimport java.util.Map.Entry;\npublic class E implements Entry<String, String> { public String getKey() { return "e"; } }\n')
+    w('q/MyLayout.java', 'package q;\nimport org.apache.logging.log4j.core.layout.AbstractStringLayout;\npublic class MyLayout extends AbstractStringLayout.Builder { }\n')
+    w('q/Out.java', 'package q;\nimport java.io.ByteArrayOutputStream;\npublic class Out extends ByteArrayOutputStream {\n  public void write(int b) { super.write(b); }\n}\n')
+    -- (a LIBRARY superclass is no project class: super.visitField() was keyed ClassVisitor::visitField, the gate let the
+    -- tail join through, and it resolved to the caller's own override — 184 such on elasticsearch server)
+    w('q/Vis.java', 'package q;\nimport org.objectweb.asm.ClassVisitor;\npublic class Vis extends ClassVisitor {\n  public void visitField() { super.visitField(); }\n}\n')
+    local d = ts.extract(root)
+    local impl, ext = {}, {}
+    for _, e in ipairs(d.implements or {}) do impl[e.child] = e end
+    for _, e in ipairs(d.extends or {}) do ext[e.child] = e end
+    eq(true, impl.E and impl.E.ext, 'java.util.Map.Entry keeps its row, marked external: not the project\'s Entry')
+    eq(true, ext.MyLayout and ext.MyLayout.ext, 'log4j\'s AbstractStringLayout.Builder binds into no file: external')
+    local sup
+    for _, c in ipairs(d.calls) do if c.file == 'q/Out.java' and c.callee == 'write' then sup = c end end
+    eq('java.io.ByteArrayOutputStream::write', sup.full, 'super.write() keeps keying the JDK class')
+    eq(nil, sup.to, 'never Out::write itself')
+    local vf
+    for _, c in ipairs(d.calls) do if c.file == 'q/Vis.java' and c.callee == 'visitField' then vf = c end end
+    eq(nil, vf.to, 'super.visitField() on a library superclass never resolves to the override itself: ' .. tostring(vf.to))
+    vim.fn.delete(root, 'rf')
+end)

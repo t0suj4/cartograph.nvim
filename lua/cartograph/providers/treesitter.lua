@@ -2451,11 +2451,33 @@ end
 -- built graph, not the hot resolve loop, and is BOUNDED by a step limit +
 -- cycle guard so a deep or malformed hierarchy can never walk away.
 local SUPER_STEP_LIMIT = 32
+--- ★ A SUPERTYPE FROM OUTSIDE THE TREE (CART-2079): a row whose head was IMPORTED (`imp`, the single-type import the
+--- spec read) and whose import binds into no file of the tree is a library type — log4j's AbstractStringLayout.Builder,
+--- xcontent's ParseField.CommonFields — however many project classes share its simple name. Marked `ext` here, where
+--- the import edges exist, and skipped by every supertype reader (simple-name and file-keyed alike: the file-keyed
+--- fallback to the same package would land on a homonym). Recomputed on every extract / relink
+function M._mark_ext_supers(data, edges)
+    local bind_of
+    local function mark(rows, pname)
+        for _, e in ipairs(rows or {}) do
+            if e.imp then
+                bind_of = bind_of or M._binding_index(edges or data.edges or {})
+                local head = (e.written and e.written:match('^([%w_$]+)%.')) or e[pname]
+                local b = bind_of[e.file] and bind_of[e.file][head]
+                e.ext = (not b) or nil
+            end
+        end
+    end
+    mark(data.extends, 'parent')
+    mark(data.implements, 'iface')
+end
+
 local function build_super(extends)
     local super = {}
     for _, e in ipairs(extends or {}) do
-        -- (a same-named nested parent, `Builder extends FieldMapper.Builder`, is no simple-name edge: CART-2080)
-        if e.child == e.parent then goto next_row end
+        -- (a same-named nested parent, `Builder extends FieldMapper.Builder`, is no simple-name edge: CART-2080; a library
+        -- supertype is none either, CART-2079)
+        if e.child == e.parent or e.ext then goto next_row end
         local prev = super[e.child]
         if prev == nil then super[e.child] = e.parent
         elseif prev ~= e.parent then super[e.child] = false end -- name collision
@@ -2574,7 +2596,7 @@ local function resolve_super(cv, extends, exact, addref, node_index, edges)
         if not superAt then
             superAt, classfiles = {}, {}
             for _, e in ipairs(extends) do
-                if e.file and e.child then
+                if e.file and e.child and not e.ext then -- (a library supertype: CART-2079)
                     local t = superAt[e.file]; if not t then t = {}; superAt[e.file] = t end
                     -- (the parent AS WRITTEN when qualified: `FieldMapper.Builder` names another file's Builder, CART-2080)
                     local pw = (e.written and e.written:find('.', 1, true)) and e.written or e.parent
@@ -2759,7 +2781,7 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref)
     for _, e in ipairs(implements) do
         -- (a same-named nested interface, `Bucket implements MultiBucketsAggregation.Bucket`, is no simple-name edge:
         -- read by name it would make Bucket its own implementer, CART-2080; the file-keyed reach resolves `written`)
-        if e.child == e.iface then goto next_impl end
+        if e.child == e.iface or e.ext then goto next_impl end
         local P = part(elang_for(e.file) or false)
         if e.cintf then
             local l = P.ifext[e.child]; if not l then l = {}; P.ifext[e.child] = l end
@@ -4274,7 +4296,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             local function base(t) return t and (t:gsub('<.*$', ''):match('([%w_$]+)%s*$')) end
             for _, e in ipairs((data and data.extends) or {}) do
                 local c, p = e.child, base(e.parent)
-                if c and p and c ~= p then -- (a same-named nested parent is no simple-name edge, CART-2080)
+                if c and p and c ~= p and not e.ext then -- (a same-named nested parent / a library one: CART-2080 / 2079)
                     if fsup2[c] == nil then fsup2[c] = p elseif fsup2[c] ~= p then fsup2[c] = false end
                     local k = fkids[p]; if not k then k = {}; fkids[p] = k end
                     k[#k + 1] = c
@@ -4282,7 +4304,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             end
             for _, e in ipairs((data and data.implements) or {}) do
                 local c, p = e.child, base(e.iface)
-                if c and p and c ~= p then -- (a same-named nested interface: CART-2080)
+                if c and p and c ~= p and not e.ext then -- (a same-named nested interface / a library one: CART-2080 / 2079)
                     local k = fkids[p]; if not k then k = {}; fkids[p] = k end
                     k[#k + 1] = c
                 end
@@ -8554,8 +8576,8 @@ local function binding_index(edges, hier)
             -- (a NESTED supertype keeps its dotted head, `Outer.Inner`, CART-0690: Java imports and resolves the OUTER
             -- class, so `where` names the head's files and keeps those that define the last segment)
             local function sup(w, n) return (w and w:match('^[%w_$]+%.[%w_$.]+$')) or simple(n) end
-            for _, e in ipairs(ext or {}) do link(e.file, e.child, sup(e.written, e.parent)) end
-            for _, e in ipairs(impl or {}) do link(e.file, e.child, sup(e.written, e.iface)) end
+            for _, e in ipairs(ext or {}) do if not e.ext then link(e.file, e.child, sup(e.written, e.parent)) end end
+            for _, e in ipairs(impl or {}) do if not e.ext then link(e.file, e.child, sup(e.written, e.iface)) end end
             for k, list in pairs(exact or {}) do
                 local c = type(k) == 'string' and k:match('^([%w_$]+)::')
                 if c then for _, nd in ipairs(list) do place(c, nd.file) end end
@@ -9631,8 +9653,9 @@ local MATCH_OPTS = { match_limit = 65536 }
             local parent = t:match('[^\\]+$') or t
             -- (a language that captures the whole type node keys it itself: nil = the clause names no class this graph
             -- keys, and `written` the clause as written — java's `Outer.Inner`, CART-0690)
+            local imp
             if spec.super_name then
-                parent, t = spec.super_name(parentn, src, child)
+                parent, t, imp = spec.super_name(parentn, src, child)
                 if not parent then return end
                 t = t or parent
             end
@@ -9640,7 +9663,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- (`written`: the parent AS WRITTEN when it differs — `\Base_Handler`, `A\B` — so a language's class rules
             -- can read it through the file's names: php's class veto walks the chain by FQCN, CART-0735)
             data.extends[#data.extends + 1] =
-                { child = child, parent = parent, file = file, written = t ~= parent and t or nil }
+                { child = child, parent = parent, file = file, written = t ~= parent and t or nil, imp = imp }
         end
         -- V2 cut 2: a `setmetatable(_, {__index = C})` ANYWHERE (any first arg,
         -- incl. the anonymous `setmetatable({}, …)` return form) records C + its
@@ -10012,11 +10035,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                         local cintf = decl:type() == 'interface_declaration'
                         data.implements = data.implements or {}
                         for _, ifn in ipairs(ifaces) do
-                            local iface, written = node_text(ifn, src), nil
-                            if spec.super_name then iface, written = spec.super_name(ifn, src, child) end
+                            local iface, written, imp = node_text(ifn, src), nil, nil
+                            if spec.super_name then iface, written, imp = spec.super_name(ifn, src, child) end
                             if iface then
                                 data.implements[#data.implements + 1] = { child = child,
-                                    iface = iface, cintf = cintf, file = file, written = written }
+                                    iface = iface, cintf = cintf, file = file, written = written, imp = imp }
                             end
                         end
                         if not cintf and spec.iface_bean then
@@ -10957,6 +10980,7 @@ local MATCH_OPTS = { match_limit = 65536 }
     -- the monkey-patch fence: mark foreign assignments now that every file's
     -- imports are known, then let a module's own declaration win the key
     drop_overrides(nodes, edges, exact, tail)
+    M._mark_ext_supers(data, edges) -- (library supertypes, before anything reads the hierarchy: CART-2079)
     local bind_of, binding_reaches = binding_index(edges, function () return data.extends, data.implements, exact end)
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
@@ -11215,10 +11239,16 @@ local MATCH_OPTS = { match_limit = 65536 }
                     end
                     for _, e in ipairs(data.extends or {}) do
                         if e.child then project_classes[e.child] = true end
-                        if e.parent then project_classes[e.parent] = true end
+                        if e.parent and not e.ext then project_classes[e.parent] = true end -- (a library parent: CART-2079)
                     end
                     for _, e in ipairs(data.implements or {}) do
-                        for _, v in pairs(e) do if type(v) == 'string' then project_classes[v] = true end end
+                        -- (not the head's IMPORT, and not a library supertype's name: `imp` is a fully qualified
+                        -- java.time... path, and as a "project class" it opened the tail join to DateTime::query, CART-2079)
+                        for k, v in pairs(e) do
+                            if type(v) == 'string' and k ~= 'imp' and not (e.ext and k ~= 'child' and k ~= 'file') then
+                                project_classes[v] = true
+                            end
+                        end
                     end
                 end
                 if not project_classes[qcls] then return nil, nil, nil, EXT.typed end
@@ -12105,6 +12135,7 @@ function M._relink(data, touched, opts)
     -- (file .. '\31' .. def id) -> { [line] = true }: a module-level argument's occurrences of a registration the
     -- global judgment did not confirm (CART-0700)
     local regsite = {}
+    M._mark_ext_supers(data, data.edges) -- (CART-2079)
     local bind_of, binding_reaches = binding_index(data.edges, function () return data.extends, data.implements, exact end)
     local project_classes -- CART-1077: lazily, the class names the project defines, extends or implements
     M._set_clink(data.nodes, data.edges) -- the C/C++ join bridge's extern "C" evidence + included sources (CART-1079/1081)
@@ -12288,10 +12319,16 @@ function M._relink(data, touched, opts)
                     end
                     for _, e in ipairs(data.extends or {}) do
                         if e.child then project_classes[e.child] = true end
-                        if e.parent then project_classes[e.parent] = true end
+                        if e.parent and not e.ext then project_classes[e.parent] = true end -- (a library parent: CART-2079)
                     end
                     for _, e in ipairs(data.implements or {}) do
-                        for _, v in pairs(e) do if type(v) == 'string' then project_classes[v] = true end end
+                        -- (not the head's IMPORT, and not a library supertype's name: `imp` is a fully qualified
+                        -- java.time... path, and as a "project class" it opened the tail join to DateTime::query, CART-2079)
+                        for k, v in pairs(e) do
+                            if type(v) == 'string' and k ~= 'imp' and not (e.ext and k ~= 'child' and k ~= 'file') then
+                                project_classes[v] = true
+                            end
+                        end
                     end
                 end
                 if not project_classes[qcls] then return nil, nil, nil, EXT.typed end
