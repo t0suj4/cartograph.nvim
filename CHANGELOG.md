@@ -7,10 +7,13 @@ Breaking or client-visible changes to cartograph's surfaces. Internal changes ar
 - `graph.revision` on every envelope: `{ vcs, commit, committed_at, branch, dirty, recorded_at }`, the root's git
   checkout when the graph arrived (`branch` null when detached, `dirty` = tracked files already edited). Null outside
   git, and for a loaded dump that carries none (CART-1884).
-- `graph.drift` on every envelope: `{ head, moved, ref, behind }`, read at answer time (memoized 5 s). A detached
-  linked worktree is measured against the branch its main worktree has checked out.
-- New note `graph-behind` on an answer whose graph the repository has moved past; `graph_info` gains a
-  `stale-files` note `{ checked, stale, examples }` (files edited on disk since the graph read them).
+- `graph.drift` on every envelope: `{ head, moved, ref, behind, changed, stale, examples }`, read at answer time
+  (memoized 5 s). `changed` = files under the root git says differ from the recorded commit (commits since and
+  uncommitted edits), `stale` = those that differ from what the graph READ. A detached linked worktree is measured
+  against the branch its main worktree has checked out.
+- New note `graph-behind` when `stale > 0`, or when a detached checkout is behind that branch. A moved HEAD alone makes
+  none: an edit the graph already re-read, then committed, is content the graph has. `graph_info` gains a
+  `stale-files` note `{ checked, stale, examples }` over every file the graph read.
 - No protocol bump: fields and notes are additive, as with `txn_undo`'s `journal` (CART-1917).
 
 ## 2026-11-15 — agent protocol 4: the `sites` verb (agent surface, additive)

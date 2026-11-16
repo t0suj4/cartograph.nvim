@@ -423,7 +423,9 @@ function M.graph(store)
     return doc
 end
 
---- how far the root's repository has moved from the graph's recorded revision -> { head, moved, ref, behind } | nil.
+--- how far the root's repository has moved from the graph's recorded revision
+--- -> { head, moved, ref, behind, changed (files git says differ since), stale (of those, the ones that differ from what
+--- this graph read), examples } | nil.
 --- Memoized for DRIFT_TTL_MS per (root, revision) — a burst of answers asks git once; the key is the root and the
 --- revision record itself, never the generation (the band-safe shape, CART-0823).
 M.DRIFT_TTL_MS = 5000
@@ -434,6 +436,19 @@ function M.drift(store)
     local m, now = store._drift_memo, vim.uv.now()
     if m and m.root == d.root and m.rev == rev and now - m.t < M.DRIFT_TTL_MS then return m.v end
     local v = require('cartograph.provenance').drift(d.root, rev)
+    if v then
+        -- ★ WHICH OF THE FILES GIT SAYS CHANGED DIFFER FROM WHAT THIS GRAPH READ: a stamped file by its stamp (a refresh
+        -- after a save, or a txn_apply, re-stamped it — committing it then moves HEAD over content the graph has); an
+        -- unstamped one the extractor would parse is new since. Only these make an answer disagree with the disk
+        local stamps, lang_of = d.stamps or {}, require('cartograph.providers.treesitter').lang_of
+        local stale, ex = 0, {}
+        for _, f in ipairs(v.changed) do
+            local differs
+            if stamps[f] then differs = store.stale(f) else differs = lang_of(f) ~= nil end
+            if differs then stale = stale + 1; if #ex < 8 then ex[#ex + 1] = f end end
+        end
+        v.changed, v.stale, v.examples = #v.changed, stale, ex
+    end
     store._drift_memo = { root = d.root, rev = rev, t = now, v = v }
     return v
 end
@@ -5617,15 +5632,24 @@ local function answer(store, verb, args)
     -- ★ AN ANSWER ABOUT CODE THE REPOSITORY HAS MOVED PAST SAYS SO (CART-1884): the self host answered from a tree
     -- five weeks behind main for weeks, and an agent comparing a row with the file it had just read saw only a
     -- disagreement. `graph.drift` carries the numbers; the note is the sentence a reader cannot miss
-    local dr = graph.drift
-    if type(dr) == 'table' and (dr.moved or (dr.behind or 0) > 0) then
-        local rev = graph.revision
+    -- Two cases. FILES: some under the root differ from what the graph read (commits since, uncommitted edits) — a
+    -- moved HEAD alone is not one (its content may be what the graph read). A DETACHED checkout BEHIND its main
+    -- worktree's branch (the self host): its own files never change, the code the agent is reading did
+    local dr, rev = graph.drift, graph.revision
+    local lagging = type(dr) == 'table' and rev.branch == nil and (dr.behind or 0) > 0
+    if type(dr) == 'table' and ((dr.stale or 0) > 0 or lagging) then
+        local parts = {}
+        if dr.stale > 0 then
+            parts[#parts + 1] = ('%d file(s) under this root differ from what it read (%s)'):format(dr.stale, table.concat(dr.examples, ', '))
+        end
+        if lagging then
+            parts[#parts + 1] = ('it is a detached checkout %d commit(s) behind %s'):format(dr.behind, dr.ref)
+        end
         notes[#notes + 1] = { kind = 'graph-behind', premise = 'revision',
-            why = ('this graph describes commit %s (%s)%s; %s — rows may name lines, functions and calls that are no longer there. Re-open the root (or re-pin the host) for answers about the current tree')
-                :format(rev.commit:sub(1, 12), tostring(rev.committed_at),
-                    dr.moved and (', and the checkout is now at ' .. dr.head:sub(1, 12)) or '',
-                    (dr.behind or 0) > 0 and ('%s is %d commit(s) ahead of it'):format(dr.ref, dr.behind) or 'the checkout moved since'),
-            evidence = { commit = rev.commit, committed_at = rev.committed_at, head = dr.head, ref = nn(dr.ref), behind = nn(dr.behind) } }
+            why = ('this graph describes commit %s (%s); %s — rows may name lines, functions and calls that are no longer there. Re-open the root (or re-pin the host) for answers about the current tree')
+                :format(rev.commit:sub(1, 12), tostring(rev.committed_at), table.concat(parts, '; ')),
+            evidence = { commit = rev.commit, committed_at = rev.committed_at, head = dr.head, ref = nn(dr.ref),
+                behind = nn(dr.behind), stale = dr.stale, examples = dr.examples } }
     end
 
     return envelope { subject = nn(res.subject), result = result, tier = nn(tier),

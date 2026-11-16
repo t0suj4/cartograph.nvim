@@ -326,18 +326,23 @@ end
 function M.revision(root)
     if type(root) ~= 'string' or root == '' or root:match('^%w+://') or vim.fn.isdirectory(root) ~= 1 then return nil end
     if not in_checkout(root) then return nil end
-    local out = git_at(root, { 'log', '-1', '--format=%H%n%cI%n%D', 'HEAD' })
-    local commit, date, refs = (out or ''):match('^(%x+)\n([^\n]*)\n([^\n]*)')
+    local out = git_at(root, { 'log', '-1', '--format=%H%n%cI', 'HEAD' })
+    local commit, date = (out or ''):match('^(%x+)\n([^\n]*)')
     if not commit then return nil end
+    local branch = vim.trim(git_at(root, { 'symbolic-ref', '-q', '--short', 'HEAD' }) or '') -- (exit 1 = detached)
     local dirty = 0
     for _ in (git_at(root, { 'status', '--porcelain', '--untracked-files=no', '--', '.' }) or ''):gmatch('[^\n]+') do dirty = dirty + 1 end
-    return { vcs = 'git', commit = commit, committed_at = date, branch = refs:match('HEAD %-> ([^,]+)'),
+    return { vcs = 'git', commit = commit, committed_at = date, branch = branch ~= '' and branch or nil,
         dirty = dirty, recorded_at = os.date('!%Y-%m-%dT%H:%M:%SZ') }
 end
 
---- how far the repository has moved from a recorded revision, NOW -> { head, moved, ref?, behind? } | nil.
+--- how far the repository has moved from a recorded revision, NOW -> { head, moved, ref?, behind?, changed } | nil.
 --- `ref` = the branch the revision was on, or (detached) the branch the repository's main worktree has checked out;
---- `behind` = commits on `ref` the recorded commit does not contain.
+--- `behind` = commits on `ref` the recorded commit does not contain; `changed` = the files under root (root-relative)
+--- whose content differs between the recorded commit and the WORKING TREE — commits since and uncommitted edits both.
+--- ⚠ A moved HEAD is not a stale graph: an edit the graph already read (a refresh after a save, a txn_apply) and then
+--- committed moves HEAD over content the graph has. Whether the graph differs from the disk is the caller's question,
+--- answered per file against its stamps; `changed` is where to ask it.
 function M.drift(root, rev)
     if not (type(rev) == 'table' and rev.commit and type(root) == 'string') then return nil end
     local head = vim.trim(git_at(root, { 'rev-parse', 'HEAD' }) or '')
@@ -348,7 +353,11 @@ function M.drift(root, rev)
     end
     local behind
     if ref then behind = tonumber(vim.trim(git_at(root, { 'rev-list', '--count', rev.commit .. '..refs/heads/' .. ref }) or '')) end
-    return { head = head, moved = head ~= rev.commit, ref = ref, behind = behind }
+    local changed = {}
+    for f in (git_at(root, { 'diff', '--name-only', '--relative', '--no-renames', rev.commit, '--' }) or ''):gmatch('[^\n]+') do
+        changed[#changed + 1] = f
+    end
+    return { head = head, moved = head ~= rev.commit, ref = ref, behind = behind, changed = changed }
 end
 
 return M

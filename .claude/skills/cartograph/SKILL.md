@@ -78,8 +78,9 @@ routes each request by its `textDocument.uri`.
 
 **Which code an answer is about.** `graph.revision` names the commit the graph was
 built from (`commit`, `committed_at`, `branch`, `dirty`); `graph.drift` says how far
-the repository has moved since (`moved`, `behind` commits on `ref`). An answer from
-a graph the repository moved past carries a **`graph-behind`** note: a row that
+the repository has moved since (`moved`, `behind` commits on `ref`, `stale` files that
+differ from what the graph read). An answer from a graph whose files moved, or from a
+detached checkout behind its branch, carries a **`graph-behind`** note: a row that
 disagrees with the file you just read is then the graph's age, not a wrong answer —
 re-open the root. `graph_info`'s `stale-files` note counts files edited on disk since.
 

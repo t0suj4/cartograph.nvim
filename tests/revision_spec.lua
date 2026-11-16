@@ -44,7 +44,7 @@ test('revision: every envelope names the commit its graph describes; a checkout 
     eq('main', a.graph.revision.branch)
     eq(0, a.graph.revision.dirty)
     ok(type(a.graph.revision.committed_at) == 'string' and a.graph.revision.committed_at:match('^%d%d%d%d%-'), 'the commit DATE: the age is answerable')
-    eq({ head = sha, moved = false, ref = 'main', behind = 0 }, a.graph.drift)
+    eq({ head = sha, moved = false, ref = 'main', behind = 0, changed = 0, stale = 0, examples = {} }, a.graph.drift)
     eq(nil, note(a, 'graph-behind'), 'nothing moved, nothing said')
     vim.fn.delete(root, 'rf')
 end)
@@ -61,10 +61,47 @@ test('revision: a commit after the graph arrived — the answer carries graph-be
     local a = agent.answer(store, 'node_find', { query = 'M.f' })
     agent.DRIFT_TTL_MS = ttl
     eq(sha, a.graph.revision.commit, 'the revision is the graph\'s, it does not follow the checkout')
-    eq(true, a.graph.drift.moved); eq(1, a.graph.drift.behind); eq('main', a.graph.drift.ref)
+    eq(true, a.graph.drift.moved); eq('main', a.graph.drift.ref)
+    eq(1, a.graph.drift.stale, 'n.lua: a source file the graph never read')
     local n = note(a, 'graph-behind')
     ok(n, 'an answer from a graph the repository moved past says so: ' .. vim.inspect(a.notes))
-    eq(sha, n.evidence.commit); eq(1, n.evidence.behind)
+    eq(sha, n.evidence.commit); eq({ 'n.lua' }, n.evidence.examples)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('revision: an edit the graph already READ, then committed, moves HEAD but makes no note — the graph has that content (CART-1884)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = repo()
+    open(root)
+    vim.uv.sleep(1100) -- (an mtime stamp: the edit must land in a later second)
+    write(root .. '/m.lua', 'local M = {}\nfunction M.f(x)\n  return x + 1\nend\nreturn M\n')
+    require('cartograph.refresh').file('m.lua') -- what a save in the editor (or a txn_apply) does: the graph re-reads it
+    git(root, 'commit', '-qam', 'two')
+    local ttl = agent.DRIFT_TTL_MS
+    agent.DRIFT_TTL_MS = 0
+    local a = agent.answer(store, 'node_find', { query = 'M.f' })
+    agent.DRIFT_TTL_MS = ttl
+    eq(true, a.graph.drift.moved); eq(1, a.graph.drift.changed)
+    eq(0, a.graph.drift.stale, 'the committed content is what the graph read')
+    eq(nil, note(a, 'graph-behind'), 'no false alarm: ' .. vim.inspect(a.notes))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('revision: an UNCOMMITTED edit after the graph arrived moves no commit and still makes the note (CART-1884)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root, sha = repo()
+    open(root)
+    vim.uv.sleep(1100)
+    write(root .. '/m.lua', 'local M = {}\nfunction M.f(x)\n  return x + 1\nend\nreturn M\n')
+    local ttl = agent.DRIFT_TTL_MS
+    agent.DRIFT_TTL_MS = 0
+    local a = agent.answer(store, 'node_find', { query = 'M.f' })
+    agent.DRIFT_TTL_MS = ttl
+    eq(false, a.graph.drift.moved); eq(sha, a.graph.drift.head)
+    eq(1, a.graph.drift.stale)
+    local n = note(a, 'graph-behind')
+    ok(n, 'the graph differs from the disk: ' .. vim.inspect(a.notes))
+    eq({ 'm.lua' }, n.evidence.examples)
     vim.fn.delete(root, 'rf')
 end)
 
@@ -86,7 +123,7 @@ test('revision: a DETACHED linked worktree (the self host) — its HEAD never mo
     eq(nil, a.graph.revision.branch, 'detached: no branch of its own')
     eq(false, a.graph.drift.moved, 'the worktree\'s own HEAD did not move — that alone would stay silent for ever')
     eq('main', a.graph.drift.ref, 'measured against the branch the main worktree has checked out')
-    eq(2, a.graph.drift.behind)
+    eq(2, a.graph.drift.behind); eq(0, a.graph.drift.stale, 'its own files are what the graph read')
     ok(note(a, 'graph-behind'), 'and the answer says so')
     git(root, 'worktree', 'remove', '--force', wt)
     vim.fn.delete(root, 'rf')
