@@ -510,6 +510,42 @@ function M.profile_for(root)
         evidence = r.evidence, inherited = r.inherited }
 end
 
+--- THE PROFILES BELOW A ROOT (CART-0815) — build-system shapes one or two directories DOWN that select a profile,
+--- which UP-only selection never sees. A monorepo parent (brotardcast: ejabberd/rebar.config, converse.js/package.json)
+--- got NO profile and 14,735 OTP stdlib calls read as external, silently. This does not select anything — selection
+--- stays nearest-up and single-valued — it lets an answer NAME what the root does not apply. Bounded: depth <= 2,
+--- hidden / vendored directories skipped, at most `cap` directories probed.
+--- Returns { { dir = rel, name = shape, profile = runtime } }, sorted by dir.
+M.BELOW_SKIP = { node_modules = true, vendor = true, _build = true, deps = true, target = true, dist = true, build = true }
+function M.profiles_below(root, depth, cap)
+    depth, cap = depth or 2, cap or 200
+    local out, probed = {}, 0
+    if type(root) ~= 'string' or shapes_disabled() or vim.fn.isdirectory(root) ~= 1 then return out end
+    local function walk(dir, rel, d)
+        if d > depth or probed >= cap then return end
+        local it = vim.uv.fs_scandir(dir)
+        local subs = {}
+        while it do
+            local n, t = vim.uv.fs_scandir_next(it)
+            if not n then break end
+            if t == 'directory' and not n:match('^%.') and not M.BELOW_SKIP[n] then subs[#subs + 1] = n end
+        end
+        table.sort(subs)
+        for _, n in ipairs(subs) do
+            if probed >= cap then return end
+            local sd, sr = dir .. '/' .. n, rel == '' and n or (rel .. '/' .. n)
+            probed = probed + 1
+            for _, p in ipairs(M.probe(sd)) do
+                local v = p.evidence and p.config and p.config.profile
+                if v then out[#out + 1] = { dir = sr, name = p.name, profile = v } end
+            end
+            walk(sd, sr, d + 1)
+        end
+    end
+    walk(root, '', 1)
+    return out
+end
+
 --- The overlay PACKS a root implies, from shape evidence, searched UP the same
 --- bounded ancestor chain (S2 shape-activated packs, [[cartograph-repo-shapes]]).
 --- UNION across matched shapes (compose_spec is additive). Activation is gated on

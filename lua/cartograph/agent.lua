@@ -370,6 +370,9 @@ local function build_graph(store)
         -- `committed_at`, `branch` (null when detached), `dirty` (tracked files already edited), `recorded_at`.
         -- null outside git, and for a loaded dump that carries none. How far the repo moved since: `drift`, per answer
         revision = d.revision or NUL,
+        -- (CART-0815) the environment PROFILE in force — `name` null when none — how it was selected, and the profiles
+        -- of build-system shapes BELOW the root that it does not apply (a monorepo parent selects none of its children's)
+        profile = M.profile_doc(store),
         -- (the wire contract every answer carries, so a client can refuse a protocol it does not speak, CART-2086)
         protocol = M.PROTOCOL, positions = M.POSITIONS,
         index = thin and 'index-only' or 'full',
@@ -381,6 +384,36 @@ local function build_graph(store)
         frontier = { unparsed_files = unparsed, examples = unparsed_files, calls = calls,
             unclaimed_files = ufiles, unclaimed = ulist },
     }
+end
+
+--- the profile part of the graph doc (CART-0815), memoized per (root, profile) on the store — a root-keyed field, the
+--- band-safe shape (CART-0823). `selected` = the shape and directory that select it (up the ancestor chain), or
+--- `override` when the graph's profile is not the one shapes select; `below` = shapes under the root whose profile the
+--- graph does NOT apply.
+function M.profile_doc(store)
+    local d = store.data or {}
+    if type(d.root) ~= 'string' or d.root == '' or d.root:match('^%w+://') then
+        return { name = nn(d.profile), selected = NUL, below = {} }
+    end
+    local m = store._profile_memo
+    if m and m.root == d.root and m.profile == d.profile then return m.doc end
+    local shapes = require 'cartograph.shapes'
+    local ok, sel = pcall(shapes.profile_for, d.root)
+    sel = ok and sel or nil
+    local selected = NUL
+    if d.profile and sel and sel.profile == d.profile then
+        selected = { shape = sel.name, dir = sel.dir, inherited = sel.inherited or false }
+    elseif d.profile then
+        selected = 'override'
+    end
+    local below = {}
+    local okb, rows = pcall(shapes.profiles_below, d.root)
+    for _, r in ipairs(okb and rows or {}) do
+        if r.profile ~= d.profile then below[#below + 1] = { dir = r.dir, shape = r.name, profile = r.profile } end
+    end
+    local doc = { name = nn(d.profile), selected = selected, below = below }
+    store._profile_memo = { root = d.root, profile = d.profile, doc = doc }
+    return doc
 end
 
 -- ⚠⚠⚠ THE NINTH BAND-UNSAFE CACHE, AND IT WAS IN THIS FILE (CART-0823, the
@@ -798,6 +831,26 @@ local function v_graph_info(store)
         notes = { { kind = 'bands',
             why = ('%d roots are open in this session (* = active, answers default to it); pass `band` to any verb to switch. ⚠ This SELECTS a root, it does not JOIN two — no verb here spans bands: %s')
                 :format(#rows2, table.concat(parts, ' · ')) } }
+    end
+    -- ★ A PROFILE THIS ROOT DOES NOT APPLY (CART-0815): selection walks UP and picks one; a monorepo parent's children
+    -- carry their own build-system shapes, and their environment calls (OTP's stdlib: 14,735 on brotardcast) read as
+    -- external while every count looks clean. Named here, so an empty profile is not mistaken for a language that has none
+    local pd = M.profile_doc(store)
+    if #pd.below > 0 then
+        local parts, profs = {}, {}
+        for i, r in ipairs(pd.below) do
+            if i <= 6 then parts[#parts + 1] = ('%s -> %s'):format(r.dir, r.profile) end
+            profs[r.profile] = true
+        end
+        local pl = {}
+        for p in pairs(profs) do pl[#pl + 1] = p end
+        table.sort(pl)
+        notes = notes or {}
+        notes[#notes + 1] = { kind = 'profiles-not-applied', premise = 'profile-selection',
+            why = ('this root applies %s; %d director%s below it carry their own build-system shape selecting %s (%s) — their calls into those environments resolve as EXTERNAL here. Open each as its own root, or as a band, for answers that use them'):format(
+                pd.name ~= NUL and ('the profile ' .. tostring(pd.name)) or 'NO profile', #pd.below, #pd.below == 1 and 'y' or 'ies',
+                table.concat(pl, ', '), table.concat(parts, ', ')),
+            evidence = { profile = pd.name, below = pd.below } }
     end
     -- ★ HOW CURRENT THE GRAPH IS, PER FILE (CART-1884): `graph.revision` / `graph.drift` speak about COMMITS; an edit
     -- not committed moves no commit. Every file the graph stamped is checked against the disk NOW — graph_info only,

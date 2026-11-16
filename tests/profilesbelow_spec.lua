@@ -1,0 +1,67 @@
+-- CART-0815: profile SELECTION walks UP from the root and picks one; a monorepo PARENT (brotardcast: ejabberd/rebar.config,
+-- converse.js/package.json side by side) selected NONE, and 14,735 OTP stdlib calls read as external while graph_info
+-- said `index: full, 0 unparsed` — a clean-looking answer. Selection is unchanged here (per-language selection is the
+-- open half of the ticket); what changed is that an answer NAMES the profile in force, how it was chosen, and the
+-- build-system shapes below the root whose profiles it does not apply.
+
+local ts    = require 'cartograph.providers.treesitter'
+local store = require 'cartograph.store'
+local agent = require 'cartograph.agent'
+
+local function tree(files)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, text in pairs(files) do
+        vim.fn.mkdir(vim.fn.fnamemodify(root .. '/' .. rel, ':h'), 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    return root
+end
+local function open(root)
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+end
+local function note(a, kind) for _, n in ipairs(a.notes or {}) do if n.kind == kind then return n end end end
+local MONO = {
+    ['srv/rebar.config'] = '{deps, []}.\n', ['srv/src/srv.erl'] = '-module(srv).\n-export([go/0]).\ngo() -> lists:reverse([1]).\n',
+    ['web/package.json'] = '{ "name": "web", "version": "1.0.0" }\n', ['web/src/app.js'] = 'function main() { return JSON.stringify({}); }\n',
+    ['apps/core/rebar.config'] = '{deps, []}.\n', -- two levels down
+}
+
+test('profile: a monorepo PARENT applies no profile, and its answers say so and name the shapes below it (CART-0815)', function ()
+    local root = tree(MONO)
+    open(root)
+    local a = agent.answer(store, 'graph_info', {})
+    eq(vim.NIL, a.graph.profile.name, 'no shape at or above the parent')
+    local below = {}
+    for _, r in ipairs(a.graph.profile.below) do below[#below + 1] = r.dir .. '=' .. r.profile end
+    table.sort(below)
+    ok(vim.tbl_contains(below, 'srv=otp'), vim.inspect(below))
+    ok(vim.tbl_contains(below, 'web=node'), vim.inspect(below))
+    ok(vim.tbl_contains(below, 'apps/core=otp'), 'two levels down too: ' .. vim.inspect(below))
+    local n = note(a, 'profiles-not-applied')
+    ok(n and n.why:match('NO profile') and n.why:match('EXTERNAL'), 'graph_info says the parent applies none: ' .. vim.inspect(a.notes))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('profile: a child root names its own profile and how shapes selected it; nothing below, no note (CART-0815)', function ()
+    local root = tree(MONO)
+    open(root .. '/srv')
+    local a = agent.answer(store, 'graph_info', {})
+    eq('otp', a.graph.profile.name)
+    eq('otp-app', a.graph.profile.selected.shape); eq(false, a.graph.profile.selected.inherited)
+    eq({}, a.graph.profile.below)
+    eq(nil, note(a, 'profiles-not-applied'))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('profile: a shape below with the SAME profile the root applies is not reported; an explicit override says so (CART-0815)', function ()
+    local root = tree({ ['package.json'] = '{ "name": "top" }\n', ['index.js'] = 'module.exports = 1;\n',
+        ['pkgs/ui/package.json'] = '{ "name": "ui" }\n', ['pkgs/ui/i.js'] = 'module.exports = 2;\n' })
+    open(root)
+    local a = agent.answer(store, 'node_find', { query = 'nothing' })
+    eq('node', a.graph.profile.name)
+    eq({}, a.graph.profile.below, 'pkgs/ui selects node too: nothing unapplied')
+    store.data.profile = 'luajit'; store.generation = store.generation + 1 -- (the memo must follow the profile itself)
+    eq('override', agent.answer(store, 'node_find', { query = 'nothing' }).graph.profile.selected)
+    vim.fn.delete(root, 'rf')
+end)

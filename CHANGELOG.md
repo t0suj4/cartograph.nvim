@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — every answer names the environment profile in force (agent surface, additive)
+
+- `graph.profile` on every envelope: `{ name, selected, below }`. `name` is the profile in force (null when none);
+  `selected` is the shape and directory that chose it, or `override`; `below` lists build-system shapes up to two
+  directories DOWN whose profile the root does not apply.
+- `graph_info` adds a `profiles-not-applied` note naming them: a monorepo parent applies none of its children's
+  profiles, and their environment calls read as external while every count looks clean (CART-0815). Selection itself
+  is unchanged.
+
 ## 2026-11-16 — `mentions`: a definition's own file lists its name (agent surface; cache v306)
 
 - The mention index now holds each file's own DEFINITION names: an object-literal key (`getJSON: function …`), a
