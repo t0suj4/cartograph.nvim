@@ -7430,7 +7430,48 @@ function M.merge_idpass(data, out, touched)
     if out.names then
         data.names = data.names or {}
         for f, s in pairs(out.names) do data.names[f] = s end
+        M.index_definitions(data, out.names)
     end
+end
+
+-- ★ A NAME IS WRITTEN WHERE IT IS DEFINED (CART-1008), so it belongs to its defining file's entry in the mention index.
+-- The index records IDENTIFIER occurrences, and a definition whose name is a PROPERTY KEY — an object-literal key
+-- (`getJSON: function …` in jQuery.extend({ … })), a class method / field name — is no identifier node: jquery/src
+-- had 104 of its 392 nameable definitions in NO file's entry, and `mentions` / lint's "name occurs elsewhere" read
+-- "0 files" about a name printed on the defining line. Each file's own definition tails are unioned in, under the
+-- index's own rule (3+ characters, the language's stdlib excluded, an identifier-shaped tail — a bracket string
+-- `M.handlers['x/y']` has none). NOT "a property key is a mention": a key that defines nothing (`{ type = 'x' }`) stays
+-- out. Only files the index already holds — a language that opted out (spec.name_index = false, erlang's empty
+-- mention_types) gains no entry. `files` = a set keyed by file (nil = every file).
+M._DEF_NOINDEX = { module = true, region = true, external = true, file = true }
+function M.index_definitions(data, files)
+    local names = data.names
+    if not names then return 0 end
+    local add = {}
+    for _, n in ipairs(data.nodes or {}) do
+        local f, nm = n.file, n.name
+        if f and nm and names[f] and (not files or files[f]) and not M._DEF_NOINDEX[n.kind] and not n.anon then
+            local tail = nm:match('([^%.:#>]+)$')
+            if tail and #tail >= 3 and tail:match('^[%a_$][%w_$]*[?!=]?$')
+                and not names[f]:find('\31' .. tail .. '\31', 1, true) then
+                local _, sp = lang_for(f)
+                if not (sp and sp.stdlib_names and sp.stdlib_names[tail]) then
+                    local a = add[f]
+                    if not a then a = {}; add[f] = a end
+                    a[tail] = true
+                end
+            end
+        end
+    end
+    local n = 0
+    for f, set in pairs(add) do
+        local all = {}
+        for w in names[f]:gmatch('[^\31]+') do all[#all + 1] = w end
+        for w in pairs(set) do all[#all + 1] = w; n = n + 1 end
+        table.sort(all)
+        names[f] = '\31' .. table.concat(all, '\31') .. '\31'
+    end
+    return n
 end
 
 --- Standalone id pass over `files` with global lookups (parallel phase
@@ -11032,6 +11073,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             local buf = mentions[file]
             if buf then reduce_mentions(file, buf, L) end
         end
+        M.index_definitions(data) -- (a defined name is in its file's entry, CART-1008)
         -- stdlib RESOLUTION face ([[cartograph-stdlib-profile]]): mint external
         -- std nodes for std-aliased calls. Runs here for the INLINE full extract
         -- (global, single data); the parallel PARENT does it in relink instead.

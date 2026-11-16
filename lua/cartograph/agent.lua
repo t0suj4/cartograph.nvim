@@ -2070,9 +2070,19 @@ local function v_mentions(store, args)
             end
         end
     end
+    -- (WHICH rule skipped it. Since CART-1008's index fix a definition's own name IS in its file's entry, so what is
+    -- left is the index's documented rules: the length, the language's stdlib vocabulary — jquery's `get` / `set` —
+    -- or a name with no identifier shape, a bracket-string member)
+    local stdl = false
+    local tsm = require 'cartograph.providers.treesitter'
+    for _, d in ipairs(skipped) do
+        local sp = tsm.spec[tsm.lang_of(d.file) or '']
+        if sp and sp.stdlib_names and sp.stdlib_names[args.name] then stdl = true end
+    end
     local skip_why = #(args.name or '') < 3
         and 'the mention index records identifiers of 3+ characters only (its documented rule)'
-        or 'the mention index records identifier occurrences, and this name is defined as a member / property key (`T.name = function`, `{ name = … }`) or a bracket string, which it does not record'
+        or stdl and 'the mention index excludes the language\'s STDLIB vocabulary (its documented rule), and this name is in it'
+        or 'the name has no identifier shape the index records (a bracket-string member, `M.handlers[\'x/y\']`)'
     if #rows > 0 then
         if nskipped > 0 then
             notes[#notes + 1] = { kind = 'defining-file-not-indexed', premise = 'index-coverage',

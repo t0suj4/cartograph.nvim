@@ -547,29 +547,35 @@ test('mentions: a DEFINED name the index skipped is a frontier naming the defini
     if not (parser_available('lua') and parser_available('javascript')) then skip 'no lua/javascript parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function w(rel, t) local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close() end
-    -- (an OBJECT-LITERAL key is the shape still skipped; `jQuery.getJSON = function` is indexed since the ticket was filed)
-    w('a.js', 'var hooks = { getScript: function (u) { return u; }, setProp: function (v) { return v; } };\n')
+    -- (since the index fix a definition's own name is in its file's entry — an object-literal key included; what the
+    -- frontier still covers is the index's documented rules: the length, the stdlib vocabulary)
+    w('a.js', 'var hooks = { getScript: function (u) { return u; }, setProp: function (v) { return v; }, get: function (e) { return e; } };\n')
     w('c.js', 'var setProp = 1;\nconsole.log(setProp);\n')
     w('m.lua', 'local M = {}\nfunction M.ab() return 1 end\nfunction M.solo() return 2 end\nreturn M\n')
     local data = ts.extract(root); data.root = root
     store.ingest(data)
     vim.fn.delete(root, 'rf')
     local agent = require 'cartograph.agent'
-    -- a member-defined name no other file writes: the index skipped it
+    -- an object-literal key defines the name: its file is in the index now (it read a `name-not-indexed` frontier)
     local g = agent.answer(store, 'mentions', { name = 'getScript' })
-    eq('frontier', g.absence, vim.inspect(g.absence_why))
-    eq('name-not-indexed', g.absence_why.premise)
-    eq('getScript', g.absence_why.evidence.defs[1].name)
-    ok(g.absence_why.why:find('member / property key', 1, true), g.absence_why.why)
+    eq(nil, g.absence ~= vim.NIL and g.absence or nil, vim.inspect(g.absence_why))
+    eq('a.js', g.result[1].file)
+    -- a stdlib-vocabulary name: the index's documented rule, said as such
+    if (ts.spec.javascript.stdlib_names or {}).get then
+        local sg = agent.answer(store, 'mentions', { name = 'get' })
+        eq('frontier', sg.absence); eq('name-not-indexed', sg.absence_why.premise)
+        ok(sg.absence_why.why:find('STDLIB', 1, true), sg.absence_why.why)
+    end
     -- a 2-character name: the documented length rule, said as such
     local s = agent.answer(store, 'mentions', { name = 'ab' })
     eq('frontier', s.absence); ok(s.absence_why.why:find('3+ characters', 1, true), s.absence_why.why)
-    -- indexed elsewhere, skipped in its defining file: the list stands, a note says it is not every writer
+    -- defined by a key in one file, used in another: both are listed, and no note says a writer is missing
     local t = agent.answer(store, 'mentions', { name = 'setProp' })
-    eq(1, #t.result); eq('c.js', t.result[1].file)
-    local note
-    for _, n in ipairs(t.notes or {}) do if n.kind == 'defining-file-not-indexed' then note = n end end
-    ok(note and note.evidence.defs[1].file == 'a.js', 'the skipped defining file is named: ' .. vim.inspect(t.notes))
+    local fs = {}
+    for _, r in ipairs(t.result) do fs[#fs + 1] = r.file end
+    table.sort(fs)
+    eq({ 'a.js', 'c.js' }, fs)
+    for _, n in ipairs(t.notes or {}) do ok(n.kind ~= 'defining-file-not-indexed', 'no writer is missing: ' .. vim.inspect(n)) end
     -- a name defined nowhere and mentioned nowhere is still absent
     eq('absent', agent.answer(store, 'mentions', { name = 'nowhere_at_all' }).absence)
 end)

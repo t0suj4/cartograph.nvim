@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `mentions`: a definition's own file lists its name (agent surface; cache v306)
+
+- The mention index now holds each file's own DEFINITION names: an object-literal key (`getJSON: function …`), a
+  class method, a go method — names with no identifier node, which the index never recorded, so `mentions` answered a
+  `name-not-indexed` frontier (or omitted the defining file) for a name printed on its defining line. jquery/src:
+  definitions in no file's entry 108 -> 44 of 392; hugo 876 -> 337. What remains is the index's documented rule
+  (1-2 characters, the language's stdlib vocabulary), and the frontier now names WHICH rule (CART-1008).
+- Cache VERSION 306: every cached graph re-extracts once.
+
 ## 2026-11-16 — profiles on demand: a version cartograph does not ship (Factorio 2.1)
 
 - `lua-factorio-<v>` is DERIVED wherever `lua-factorio-api-<v>` loads, shipped or in the on-demand directory
