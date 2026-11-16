@@ -10496,6 +10496,14 @@ local MATCH_OPTS = { match_limit = 65536 }
                     field = f.field, ftype = f.ftype, file = file, ptr = f.ptr } -- (ptr: cpp's pointer depth, CART-2112)
             end
         end
+        -- type references (java fields, CART-0697): the type graph a cycle lint reads — never a resolver input
+        if spec.scan_typerefs then
+            for _, r in ipairs(spec.scan_typerefs(tsroot, src)) do
+                data.typerefs = data.typerefs or {}
+                data.typerefs[#data.typerefs + 1] = { typename = r.typename, field = r.field, refs = r.refs,
+                    static = r.static, file = file }
+            end
+        end
         -- type aliases (cpp typedef / using, CART-2114): the recv pass and its veto read a receiver's class through them
         if spec.scan_aliases then
             for _, a in ipairs(spec.scan_aliases(tsroot, src)) do

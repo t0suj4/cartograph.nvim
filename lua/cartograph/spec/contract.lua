@@ -215,7 +215,7 @@ M.SLOTS = {
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's
     -- local-inference rung lands here)
-    chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES', scan_aliases = 'TYPES', decl_type = 'TYPES',
+    chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES', scan_aliases = 'TYPES', scan_typerefs = 'TYPES', decl_type = 'TYPES',
     fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
     -- the subset of fn_types the extractor never MINTS as a node. It QUALIFIES
     -- fn_types, so it lives beside it rather than in ANALYSIS with its consumer:

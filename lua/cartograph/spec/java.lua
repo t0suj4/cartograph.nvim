@@ -775,6 +775,83 @@ local function java_scan_fields(tsroot, src)
     end
     return rows
 end
+
+--- ★ THE TYPES A FIELD REFERS TO (CART-0697): every class name a field's declared type names — its base, its GENERIC
+--- ARGUMENTS (wildcard bounds too) and an ARRAY's element — as rows { typename, field, refs }. The type graph (class ->
+--- the types of its fields) is the precondition of the recursive-structure bug families: `List<Node> children` closes
+--- a cycle that `ftype = java.util.List` cannot show. A separate table, never a resolver input: an array field has no
+--- class to key a call by, and data.fieldtypes' readers key calls
+local function java_type_refs(tn, src, out, seen)
+    if not tn then return end
+    local t = tn:type()
+    local function add(nm) if nm and not seen[nm] then seen[nm] = true; out[#out + 1] = nm end end
+    if t == 'type_identifier' then add(node_text(tn, src))
+    -- (a QUALIFIED name keeps its qualifier — `Outer.Inner`, whitespace dropped: elasticsearch has hundreds of nested
+    -- classes named `Request`, and `PutX.Request` read as the simple name made a field of ANOTHER class's Request a
+    -- self-reference; consumers decide what the qualifier binds)
+    elseif t == 'scoped_type_identifier' then add((node_text(tn, src):gsub('%s+', '')))
+    elseif t == 'generic_type' then
+        for _, c in inext, tn, -1 do
+            if c:type() == 'type_arguments' then
+                for _, a in inext, c, -1 do java_type_refs(a, src, out, seen) end
+            else
+                java_type_refs(c, src, out, seen)
+            end
+        end
+    elseif t == 'array_type' then java_type_refs(tn:field('element')[1], src, out, seen)
+    elseif t == 'wildcard' then
+        for _, c in inext, tn, -1 do java_type_refs(c, src, out, seen) end
+    end
+end
+local function java_scan_typerefs(tsroot, src)
+    local rows = {}
+    -- (`static`: a class-level constant is no part of an INSTANCE's structure — `static final TimeValue ONE_MINUTE`
+    -- made every such class read as self-referential; the type graph's consumers skip it)
+    local function field(owner, tn, namen, static)
+        local refs = {}
+        java_type_refs(tn, src, refs, {})
+        if #refs > 0 then rows[#rows + 1] = { typename = owner, field = node_text(namen, src), refs = refs, static = static or nil } end
+    end
+    local function is_static(fd)
+        for _, c in inext, fd, -1 do
+            if c:type() == 'modifiers' then
+                for i = 0, c:child_count() - 1 do if c:child(i):type() == 'static' then return true end end
+            end
+        end
+        return false
+    end
+    local function decl(n)
+        local nm, body = n:field('name')[1], n:field('body')[1]
+        local owner = nm and node_text(nm, src)
+        local function members(b)
+            for _, c in (b and inext or NOOP), b, -1 do
+                local t = c:type()
+                if t == 'field_declaration' then
+                    if owner then
+                        for _, d in inext, c, -1 do
+                            local dn = d:type() == 'variable_declarator' and d:field('name')[1]
+                            -- (a C-style `Node next[]` puts the dimensions on the declarator: the refs are the same)
+                            if dn then field(owner, c:field('type')[1], dn, is_static(c)) end
+                        end
+                    end
+                elseif t == 'enum_body_declarations' then members(c)
+                elseif JAVA_TYPE_DECLS[t] then decl(c) end
+            end
+        end
+        if owner and n:type() == 'record_declaration' then
+            local ps = n:field('parameters')[1]
+            for _, pp in (ps and inext or NOOP), ps, -1 do
+                local pn = pp:type() == 'formal_parameter' and pp:field('name')[1]
+                if pn then field(owner, pp:field('type')[1], pn) end
+            end
+        end
+        members(body)
+    end
+    for _, c in inext, tsroot, -1 do
+        if JAVA_TYPE_DECLS[c:type()] then decl(c) end
+    end
+    return rows
+end
 local JAVA_LEXICAL_SCOPES = {
     enhanced_for_statement  = { kind = 'param', harvest = jvt_binders },
     catch_clause            = { kind = 'param', harvest = jvt_binders },
@@ -1159,6 +1236,7 @@ return {
         return ret, nil, java_ret_flow(defn, src, tvars)
     end,
     scan_fields = java_scan_fields,
+    scan_typerefs = java_scan_typerefs, -- the class names each field's type refers to: data.typerefs (CART-0697)
     qualify_call = function (calln, name, src, model)
         -- ★ `new T(…)` CALLS T's CONSTRUCTOR (CART-2070): the row carried the bare class name and the constructor node
         -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /

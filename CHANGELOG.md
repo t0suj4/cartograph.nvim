@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — the Java type graph, and a `type-cycles` tactic (graph field; cache v318)
+
+- Java fields record the class names their type refers to, including generic arguments and array elements:
+  `data.typerefs` rows `{ typename, field, refs, static }`.
+- Toolbelt tactic `type-cycles` reports recursive type components, which `equals` / `hashCode` / `toString` read a
+  field that closes a cycle, and which cycles one of those methods traverses all the way round. Counts are a lower
+  bound: a type name two files define is dropped. On elasticsearch/server, 9 types meet that precondition for
+  `equals` / `hashCode` and 1 for `toString`, all tree- or chain-shaped, so none is a back-pointer bug (CART-0697).
+
 ## 2026-11-16 — declared types are stored, and node rows show them (agent surface + graph; cache v317)
 
 - C, C++, Go and Rust record each binding's declared type exactly as written. A module variable's node carries `ty`
