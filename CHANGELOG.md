@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — every answer names the commit its graph describes (agent surface, additive)
+
+- `graph.revision` on every envelope: `{ vcs, commit, committed_at, branch, dirty, recorded_at }`, the root's git
+  checkout when the graph arrived (`branch` null when detached, `dirty` = tracked files already edited). Null outside
+  git, and for a loaded dump that carries none (CART-1884).
+- `graph.drift` on every envelope: `{ head, moved, ref, behind }`, read at answer time (memoized 5 s). A detached
+  linked worktree is measured against the branch its main worktree has checked out.
+- New note `graph-behind` on an answer whose graph the repository has moved past; `graph_info` gains a
+  `stale-files` note `{ checked, stale, examples }` (files edited on disk since the graph read them).
+- No protocol bump: fields and notes are additive, as with `txn_undo`'s `journal` (CART-1917).
+
 ## 2026-11-15 — agent protocol 4: the `sites` verb (agent surface, additive)
 
 - New verb `sites { name, file?, kind?, limit? }`: every SITE where a name is called or referenced, one row per occurrence

@@ -36,6 +36,9 @@ function M.load(path)
             end
         end
     end
+    -- and no REVISION unless the dump carries one: the checkout's commit now says nothing about when the dump was made
+    -- (CART-1884) — unknown, never the current HEAD
+    if data.revision == nil then data.revision = false end
     return M.ingest(data)
 end
 
@@ -211,6 +214,12 @@ end
 function M.ingest(data, opts)
     local prev_root = M.data and M.data.root -- (the working set is per root: see below)
     M.data    = data
+    -- ★ THE REVISION THIS GRAPH DESCRIBES (CART-1884): the commit its root's checkout is at as the graph arrives — a
+    -- cold extract, a warm cache open (the cache keeps no revision: its stamps re-extracted what changed) or a re-open.
+    -- A refresh splices a file into the SAME data and keeps it; false = not a git checkout, so a re-ingest asks once.
+    if data and data.revision == nil and not (opts and opts.refresh) then
+        data.revision = require('cartograph.provenance').revision(data.root) or false
+    end
     -- ★ RE-ADOPT WHAT `.h` MEANT WHEN THIS GRAPH WAS BUILT (CART-0410). A cache load
     -- lands here with no tree walk behind it, and every on-demand re-parse afterwards
     -- (expr/lens/optimize) asks the provider what language a path is. Without this the

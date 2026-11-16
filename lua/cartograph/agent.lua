@@ -366,6 +366,10 @@ local function build_graph(store)
     end
     return {
         root = nn(d.root), provider = nn(d.provider),
+        -- (CART-1884) the COMMIT this graph describes: the root's checkout as the graph arrived — `commit`,
+        -- `committed_at`, `branch` (null when detached), `dirty` (tracked files already edited), `recorded_at`.
+        -- null outside git, and for a loaded dump that carries none. How far the repo moved since: `drift`, per answer
+        revision = d.revision or NUL,
         -- (the wire contract every answer carries, so a client can refuse a protocol it does not speak, CART-2086)
         protocol = M.PROTOCOL, positions = M.POSITIONS,
         index = thin and 'index-only' or 'full',
@@ -413,7 +417,25 @@ function M.graph(store)
     -- a memo can never publish a stale band name — the whole point of naming it.
     -- nil on a single-band host, where the question does not arise.
     doc.band = next(session.bands or {}) and session.active or nil
+    -- ★ AND `drift` (CART-1884): how far the root's repository has moved since `revision` — a fact about NOW, so stamped
+    -- per call like `writable`, never frozen in the generation memo
+    doc.drift = M.drift(store) or NUL
     return doc
+end
+
+--- how far the root's repository has moved from the graph's recorded revision -> { head, moved, ref, behind } | nil.
+--- Memoized for DRIFT_TTL_MS per (root, revision) — a burst of answers asks git once; the key is the root and the
+--- revision record itself, never the generation (the band-safe shape, CART-0823).
+M.DRIFT_TTL_MS = 5000
+function M.drift(store)
+    local d = store.data
+    local rev = d and d.revision
+    if type(rev) ~= 'table' then return nil end
+    local m, now = store._drift_memo, vim.uv.now()
+    if m and m.root == d.root and m.rev == rev and now - m.t < M.DRIFT_TTL_MS then return m.v end
+    local v = require('cartograph.provenance').drift(d.root, rev)
+    store._drift_memo = { root = d.root, rev = rev, t = now, v = v }
+    return v
 end
 
 --- Does this graph have a call graph at all? The CAPABILITY question, not the
@@ -761,6 +783,24 @@ local function v_graph_info(store)
         notes = { { kind = 'bands',
             why = ('%d roots are open in this session (* = active, answers default to it); pass `band` to any verb to switch. ⚠ This SELECTS a root, it does not JOIN two — no verb here spans bands: %s')
                 :format(#rows2, table.concat(parts, ' · ')) } }
+    end
+    -- ★ HOW CURRENT THE GRAPH IS, PER FILE (CART-1884): `graph.revision` / `graph.drift` speak about COMMITS; an edit
+    -- not committed moves no commit. Every file the graph stamped is checked against the disk NOW — graph_info only,
+    -- it is a stat per file
+    local stamps = store.data and store.data.stamps
+    if stamps and next(stamps) then
+        local checked, stale, ex = 0, 0, {}
+        for f in pairs(stamps) do
+            checked = checked + 1
+            if store.stale(f) then stale = stale + 1; ex[#ex + 1] = f end
+        end
+        table.sort(ex)
+        for i = #ex, 9, -1 do ex[i] = nil end
+        notes = notes or {}
+        notes[#notes + 1] = { kind = 'stale-files', premise = 'stamps',
+            why = stale > 0 and ('%d of the %d files this graph read changed on disk since (or are gone): answers about them describe the old text'):format(stale, checked)
+                or ('all %d files this graph read are unchanged on disk'):format(checked),
+            evidence = { checked = checked, stale = stale, examples = ex } }
     end
     -- graph_info's own rows are a description of the instrument, never empty.
     return { result = rows, notes = notes }
@@ -5572,6 +5612,20 @@ local function answer(store, verb, args)
         -- ALREADY TRUE and was merely unstated. Additive — a caller written
         -- before this reads it unchanged.
         warrant = warrant or tiers.WARRANT_DEFAULT
+    end
+
+    -- ★ AN ANSWER ABOUT CODE THE REPOSITORY HAS MOVED PAST SAYS SO (CART-1884): the self host answered from a tree
+    -- five weeks behind main for weeks, and an agent comparing a row with the file it had just read saw only a
+    -- disagreement. `graph.drift` carries the numbers; the note is the sentence a reader cannot miss
+    local dr = graph.drift
+    if type(dr) == 'table' and (dr.moved or (dr.behind or 0) > 0) then
+        local rev = graph.revision
+        notes[#notes + 1] = { kind = 'graph-behind', premise = 'revision',
+            why = ('this graph describes commit %s (%s)%s; %s — rows may name lines, functions and calls that are no longer there. Re-open the root (or re-pin the host) for answers about the current tree')
+                :format(rev.commit:sub(1, 12), tostring(rev.committed_at),
+                    dr.moved and (', and the checkout is now at ' .. dr.head:sub(1, 12)) or '',
+                    (dr.behind or 0) > 0 and ('%s is %d commit(s) ahead of it'):format(dr.ref, dr.behind) or 'the checkout moved since'),
+            evidence = { commit = rev.commit, committed_at = rev.committed_at, head = dr.head, ref = nn(dr.ref), behind = nn(dr.behind) } }
     end
 
     return envelope { subject = nn(res.subject), result = result, tier = nn(tier),

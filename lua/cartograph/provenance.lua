@@ -287,4 +287,68 @@ function M.read_note(repo, sha, ref)
     return ok and row or nil
 end
 
+-- ── THE REVISION A GRAPH DESCRIBES (CART-1884) ──────────────────────────────────────────────────────────────────────
+-- The self MCP host answered from a worktree five weeks behind main and nothing in an answer said so: the envelope
+-- carried `graph.root`, not the commit or its age. A graph now records, at ingest, the commit its root's checkout was
+-- at (date, branch, how many tracked files were already edited); `drift` reads, at answer time, how far the repository
+-- has moved since. ⚠ The self host is a DETACHED linked worktree: its HEAD never moves, so "HEAD moved" alone stays
+-- silent for ever there — drift is also measured against the branch the repository's MAIN worktree has checked out.
+-- ⚠ git's environment is SCRUBBED: a hook exports GIT_DIR / GIT_INDEX_FILE, and a query of the root must read the
+-- root's repository, never the one whose hook is running.
+local function git_env()
+    local env = {}
+    for k, v in pairs(vim.fn.environ()) do if not k:match('^GIT_') then env[k] = v end end
+    return env
+end
+local function git_at(dir, args)
+    local cmd = { 'git', '-C', dir }
+    for _, a in ipairs(args) do cmd[#cmd + 1] = a end
+    local ok, obj = pcall(function () return vim.system(cmd, { text = true, env = git_env(), clear_env = true }):wait(30000) end)
+    if not ok or obj.code ~= 0 then return nil end
+    return obj.stdout
+end
+M.git_at = git_at
+
+-- inside a git checkout at all? A filesystem walk, so a root outside one (every spec's temp root) costs no process
+local function in_checkout(dir)
+    local d = vim.fs.normalize(dir)
+    while d and d ~= '' do
+        if vim.uv.fs_stat(d .. '/.git') then return true end
+        local up = vim.fs.dirname(d)
+        if up == d then return false end
+        d = up
+    end
+    return false
+end
+
+--- the revision of the checkout `root` sits in, NOW -> { vcs, commit, committed_at, branch?, dirty, recorded_at } | nil
+--- (not a local directory, or not in a git checkout). `dirty` = tracked files under root edited and not committed.
+function M.revision(root)
+    if type(root) ~= 'string' or root == '' or root:match('^%w+://') or vim.fn.isdirectory(root) ~= 1 then return nil end
+    if not in_checkout(root) then return nil end
+    local out = git_at(root, { 'log', '-1', '--format=%H%n%cI%n%D', 'HEAD' })
+    local commit, date, refs = (out or ''):match('^(%x+)\n([^\n]*)\n([^\n]*)')
+    if not commit then return nil end
+    local dirty = 0
+    for _ in (git_at(root, { 'status', '--porcelain', '--untracked-files=no', '--', '.' }) or ''):gmatch('[^\n]+') do dirty = dirty + 1 end
+    return { vcs = 'git', commit = commit, committed_at = date, branch = refs:match('HEAD %-> ([^,]+)'),
+        dirty = dirty, recorded_at = os.date('!%Y-%m-%dT%H:%M:%SZ') }
+end
+
+--- how far the repository has moved from a recorded revision, NOW -> { head, moved, ref?, behind? } | nil.
+--- `ref` = the branch the revision was on, or (detached) the branch the repository's main worktree has checked out;
+--- `behind` = commits on `ref` the recorded commit does not contain.
+function M.drift(root, rev)
+    if not (type(rev) == 'table' and rev.commit and type(root) == 'string') then return nil end
+    local head = vim.trim(git_at(root, { 'rev-parse', 'HEAD' }) or '')
+    if head == '' then return nil end
+    local ref = rev.branch
+    if not ref then
+        ref = (git_at(root, { 'worktree', 'list', '--porcelain' }) or ''):match('^worktree [^\n]*\nHEAD %x+\nbranch refs/heads/([^\n]+)')
+    end
+    local behind
+    if ref then behind = tonumber(vim.trim(git_at(root, { 'rev-list', '--count', rev.commit .. '..refs/heads/' .. ref }) or '')) end
+    return { head = head, moved = head ~= rev.commit, ref = ref, behind = behind }
+end
+
 return M
