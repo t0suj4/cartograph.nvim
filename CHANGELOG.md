@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `portability_sites` decides methods on objects by name (agent surface, additive)
+
+- A site whose name no profile adjudicates (`player.teleport`: a method on an object) is decided by its METHOD NAME
+  against every class of both versions' class tables. `lost` / `member-removed` when no target class declares it,
+  `kept` / `member-supplied` when every class that had it still does, `not-adjudicable` / `member-moved` when it left
+  some. New row fields: `confidence` (`profile` | `member-name`), `member`, `classes`. New subject fields: `refined`,
+  `class_tables` (CART-1939). No protocol bump: fields only.
+
 ## 2026-11-16 — agent protocol 5: the `portability_sites` verb (agent surface, additive)
 
 - New verb `portability_sites { from, to, file?, verdict?, limit? }`: the port worklist BY SITE. Every external call

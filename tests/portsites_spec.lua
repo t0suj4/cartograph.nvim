@@ -15,14 +15,17 @@ local function setup()
     local fd = assert(io.open(root .. '/control.lua', 'w'))
     fd:write(table.concat({
         'local M = {}',
-        'function M.tick(player)',
+        'function M.tick(player, ui, inv, q)',
         '  game.print("hi")',                               -- 3: kept
         '  local j = game.table_to_json({})',               -- 4: moved -> helpers.table_to_json (a member move)
         '  local p = game.get_filtered_entity_prototypes({})', -- 5: lost
         '  helpers.write_file("x", "y")',                   -- 6: gained (already-migrated)
-        '  player.teleport({0, 0})',                        -- 7: a method on an object — not adjudicable
+        '  player.teleport({0, 0})',                        -- 7: a method on an object: on every class that had it -> kept
         '  game.print("é"); game.print("again")',           -- 8: two sites of one name, the second after a 2-byte char
         '  shared()',                                       -- 9: REFUSED (ambiguous: a.lua and b.lua): not a site
+        '  ui.get_all_ids()',                               -- 10: a method NO 2.0 class declares -> lost (LuaRendering's)
+        '  inv.destroy()',                                  -- 11: left SOME classes (LuaRendering) -> still not adjudicable
+        '  q.iter_nothing()',                               -- 12: no class of either version: a project field
         'end',
         'return M', '' }, '\n'))
     fd:close()
@@ -50,16 +53,29 @@ test('portability_sites: every external call site carries its name\'s verdict �
     eq('moved', mv.verdict); eq('helpers.table_to_json', mv.to); eq('member-move', mv.basis)
     eq('lost', at(a, 5).verdict); ok(at(a, 5).reason ~= vim.NIL, 'a lost site says why')
     eq('gained', at(a, 6).verdict)
-    local na = at(a, 7)
-    eq('not-adjudicable', na.verdict); ok(type(na.reason) == 'string' and na.reason:match('^receiver'), 'the receiver mechanism: ' .. tostring(na.reason))
-    eq('player.teleport', na.full); eq('M.tick', na.fn:match('M%.tick') and 'M.tick')
+    eq('profile', at(a, 3).confidence, 'a profile verdict says so')
+    -- CART-1939: methods on objects, decided by the METHOD NAME against every class of both versions
+    local tp = at(a, 7)
+    eq({ 'player.teleport', 'kept', 'member-supplied', 'member-name', 'teleport' }, { tp.full, tp.verdict, tp.reason, tp.confidence, tp.member })
+    ok(tp.fn:match('M%.tick'), 'the enclosing fn')
+    local gone = at(a, 10)
+    eq({ 'lost', 'member-removed', 'member-name' }, { gone.verdict, gone.reason, gone.confidence })
+    ok(vim.tbl_contains(gone.classes, 'LuaRendering'), 'the classes that had it: ' .. vim.inspect(gone.classes))
+    local mvd = at(a, 11)
+    eq({ 'not-adjudicable', 'member-moved', 'member-name' }, { mvd.verdict, mvd.reason, mvd.confidence })
+    ok(vim.tbl_contains(mvd.classes, 'LuaRendering'), 'the classes it left: ' .. vim.inspect(mvd.classes))
+    local pf = at(a, 12)
+    eq('not-adjudicable', pf.verdict); ok(pf.reason:match('^receiver'), 'a project field keeps the receiver reason: ' .. tostring(pf.reason))
+    eq(vim.NIL, pf.confidence)
+    eq({ removed = 1, supplied = 1, moved = 1, not_member = 1 }, a.subject.refined)
+    eq('1.1.110', a.subject.class_tables.from_version)
     -- two sites of one name: both rows, the second's column in CHARACTERS (after `é`, 2 bytes)
     local line8 = '  game.print("é"); game.print("again")'
     local second = line8:find('game.print("again")', 1, true)
     ok(at(a, 8, 3) and at(a, 8, second - 1), 'one row per SITE, the second at its character column: ' .. vim.inspect(a.result))
-    eq(7, a.subject.sites)
-    eq({ lost = 1, moved = 1, kept = 1, gained = 1, ['not-adjudicable'] = 1 }, a.subject.names)
-    eq({ lost = 1, moved = 1, kept = 3, gained = 1, ['not-adjudicable'] = 1 }, a.subject.by_site)
+    eq(10, a.subject.sites)
+    eq({ lost = 2, moved = 1, kept = 2, gained = 1, ['not-adjudicable'] = 2 }, a.subject.names)
+    eq({ lost = 2, moved = 1, kept = 4, gained = 1, ['not-adjudicable'] = 2 }, a.subject.by_site)
     local granular
     for _, n in ipairs(a.notes) do if n.kind == 'verdict-is-the-names' then granular = n end end
     ok(granular and vim.tbl_contains(granular.evidence.not_measured, 'signature-changed'), 'kept is the NAME kept: a signature change is not measured, and it says so')
@@ -73,9 +89,11 @@ test('portability_sites: its population IS the external surface, and its names p
     eq(require('cartograph.externals').surface(store).external, a.subject.sites, 'one classifier for both')
     eq(nil, at(a, 9), 'a refused call is not on the external surface (it is the graph\'s own ambiguity, not the environment\'s)')
     local d = assert(port.diff(store, FROM, TO))
-    eq(#d.lost + #d.lualib_lost, a.subject.names.lost + a.subject.names.moved)
-    eq(d.kept, a.subject.names.kept); eq(#d.gained, a.subject.names.gained)
-    eq(d.neither - #d.lualib_lost, a.subject.names['not-adjudicable'])
+    -- (the profile-level verdicts are the diff's; the member-name refinement moves only names the diff calls `neither`)
+    local n, r = a.subject.names, a.subject.refined
+    eq(#d.lost + #d.lualib_lost, n.lost - r.removed + n.moved)
+    eq(d.kept, n.kept - r.supplied); eq(#d.gained, n.gained)
+    eq(d.neither - #d.lualib_lost, n['not-adjudicable'] + r.removed + r.supplied)
     vim.fn.delete(root, 'rf')
 end)
 
@@ -83,14 +101,14 @@ test('portability_sites: narrowed by file and verdict, clipped with a note, abse
     if not parser_available('lua') then skip 'no lua parser' end
     local root = setup()
     local k = ask({ verdict = 'kept' })
-    eq(3, #k.result); eq(7, k.subject.sites, 'the subject counts the whole population, not the narrowed rows')
+    eq(4, #k.result); eq(10, k.subject.sites, 'the subject counts the whole population, not the narrowed rows')
     local c = ask({ limit = 2 })
     eq(2, #c.result)
     local clip
     for _, n in ipairs(c.notes) do if n.kind == 'clipped' then clip = n end end
-    ok(clip and clip.evidence.total == 7, 'the clip says how many there were')
+    ok(clip and clip.evidence.total == 10, 'the clip says how many there were')
     local lost = ask({ file = 'control.lua', verdict = 'lost' })
-    eq(1, #lost.result); eq(5, lost.result[1].line)
+    eq(2, #lost.result); eq(5, lost.result[1].line); eq(10, lost.result[2].line)
     -- a tree whose every call lands inside: no external site at all
     local fd = assert(io.open(root .. '/x.lua', 'w')); fd:write('local function f() end\nf()\n'); fd:close()
     vim.fn.delete(root .. '/control.lua')
@@ -129,6 +147,15 @@ test('portability_sites: a name NEITHER profile holds that the target\'s data-st
     port.audits = real
     assert(okc, a)
     eq('lost', at(a, 5).verdict); eq('lualib-removed', at(a, 5).reason)
-    eq('not-adjudicable', at(a, 7).verdict)
+    eq({ 'kept', 'member-name' }, { at(a, 7).verdict, at(a, 7).confidence }, 'a receiver-ambiguous name is still refined by its member name (CART-1939)')
     vim.fn.delete(root, 'rf')
+end)
+
+test('class_spaces: each profile\'s class table on its own minor; one version against itself is refused, never a zero diff (CART-1939)', function ()
+    local fs, ts2, meta = port.class_spaces(FROM, TO)
+    if not fs then skip('no class tables: ' .. tostring(ts2)) end
+    eq('1.1.110', meta.from_version); ok(meta.to_version:match('^2%.0%.'), meta.to_version)
+    ok(fs.set_quick_bar_slot and ts2.set_quick_bar_slot, 'a member space per version')
+    local none, why = port.class_spaces(TO, TO)
+    eq(nil, none); ok(tostring(why):match('itself'), tostring(why))
 end)

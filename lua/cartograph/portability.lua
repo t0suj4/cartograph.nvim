@@ -1225,6 +1225,24 @@ end
 --- anything else contributes only its TRAILING member — the one actually invoked.
 --- `segments` rides in the detail so a reader can see which names were asked
 --- about rather than trusting that the split did what it looks like.
+--- BOTH VERSIONS' CLASS SPACES for a move between two NAME profiles (CART-1939) -> from_space, to_space, meta | nil, why.
+--- Each profile's class table is the one on its own MINOR (artifact_for), never "whichever ships"; two tables of one
+--- version decide nothing and are refused — a difference of an artifact with itself is arithmetic, not evidence.
+function M.class_spaces(from, to)
+    local pm, cm = require 'cartograph.spec.profile', require 'cartograph.classmatch'
+    local pa, pb = pm.load(from), pm.load(to)
+    if not (pa and pb) then return nil, ('%s does not load'):format(pa and to or from) end
+    local na, wa, cta = M.artifact_for(pa.version)
+    if not cta then return nil, ('%s (%s): %s'):format(from, tostring(pa.version), tostring(wa)) end
+    local nb, wb, ctb = M.artifact_for(pb.version)
+    if not ctb then return nil, ('%s (%s): %s'):format(to, tostring(pb.version), tostring(wb)) end
+    local va, vb = (cta.meta or {}).version, (ctb.meta or {}).version
+    if tostring(va) == tostring(vb) then
+        return nil, ('both class tables are %s — a version diffed against itself decides nothing'):format(tostring(va))
+    end
+    return cm.space(cta), cm.space(ctb), { from = na, to = nb, from_version = va, to_version = vb }
+end
+
 function M.class_space_name(from_space, to_space, name)
     if not from_space or not to_space or type(name) ~= 'string' then return nil end
     local base, rest = name:match('^([%w_]+)[.:](.+)$')

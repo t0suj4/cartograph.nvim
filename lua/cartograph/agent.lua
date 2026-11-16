@@ -2575,6 +2575,32 @@ local function v_portability_sites(store, args)
             if r.to then newform[r.name] = r; verdict[r.name] = 'moved' end
         end
     end
+    -- ★ A METHOD ON AN OBJECT, BY ITS NAME (CART-1939). The profiles adjudicate `<global>.<member>`; `player.teleport`
+    -- is a member of whatever `player` is, so the name diff says not-adjudicable. Without typing the receiver, the
+    -- METHOD NAME is checked against EVERY class of both versions (class_space_name): no class in the target declares
+    -- it -> lost (sound: no receiver could reach it); every class that declared it still does -> kept (sound: any
+    -- receiver that worked still works); it left SOME classes -> member-moved, still not adjudicable (which class the
+    -- receiver is decides it). Weaker evidence than a profile verdict, and every such row says so: confidence
+    -- `member-name`, not `profile`.
+    local REFINABLE = { ['receiver-typed'] = true, ['receiver-ambiguous'] = true, ['receiver-class-present'] = true,
+        ['receiver-class-chain'] = true, ['receiver-nearmiss'] = true, ['receiver-nomatch'] = true }
+    local bymember, refined = {}, { removed = 0, supplied = 0, moved = 0, not_member = 0 }
+    local fs, tsp, cmeta = port.class_spaces(args.from, args.to)
+    if fs then
+        for name, v in pairs(verdict) do
+            local why = (eb[name] or ea[name] or {}).reason
+            if v == 'not-adjudicable' and REFINABLE[why] then
+                local cv, cd = port.class_space_name(fs, tsp, name)
+                if cv then
+                    bymember[name] = { verdict = cv, member = cd.member, classes = cd.lost_classes or cd.from_classes }
+                    if cv == 'member-removed' then verdict[name] = 'lost'; refined.removed = refined.removed + 1
+                    elseif cv == 'member-supplied' then verdict[name] = 'kept'; refined.supplied = refined.supplied + 1
+                    elseif cv == 'member-moved' then refined.moved = refined.moved + 1
+                    else refined.not_member = refined.not_member + 1 end
+                end
+            end
+        end
+    end
     local P, atr, callrec = require 'cartograph.pos', require 'cartograph.at', require 'cartograph.callrec'
     local rows, total, by_site, names = {}, 0, {}, {}
     for _, v in ipairs(SITE_VERDICTS) do by_site[v], names[v] = 0, 0 end
@@ -2595,9 +2621,15 @@ local function v_portability_sites(store, args)
                     line, col = l0 + 1, q and q.col or nil
                 elseif type(line) == 'number' then line = line + 1 end
                 local y = eb[name] or ea[name] or {}
+                local mv = bymember[name]
+                local reason = (v ~= 'kept' and v ~= 'gained') and nn(y.reason) or NUL
+                if mv and mv.verdict ~= 'not-a-runtime-member' then reason = mv.verdict end
                 rows[#rows + 1] = { file = nn(file), line = nn(line), col = nn(col), fn = nn(callrec.fn(c)),
                     callee = nn(callrec.callee(c)), full = nn(callrec.full(c)), name = name, verdict = v,
-                    reason = (v ~= 'kept' and v ~= 'gained') and nn(y.reason) or NUL,
+                    reason = (v == 'kept' and not mv) and NUL or reason,
+                    confidence = (mv and mv.verdict ~= 'not-a-runtime-member') and 'member-name'
+                        or (v ~= 'not-adjudicable' and 'profile' or NUL),
+                    member = mv and mv.member or NUL, classes = mv and mv.classes or NUL,
                     to = newform[name] and newform[name].to or NUL,
                     basis = newform[name] and newform[name].basis or NUL }
             end
@@ -2608,13 +2640,26 @@ local function v_portability_sites(store, args)
         if p.line ~= q.line then return (tonumber(p.line) or 0) < (tonumber(q.line) or 0) end
         return (tonumber(p.col) or 0) < (tonumber(q.col) or 0)
     end)
-    local subject = { from = a.runtime, to = b.runtime, sites = total, by_site = by_site, names = names }
+    local subject = { from = a.runtime, to = b.runtime, sites = total, by_site = by_site, names = names,
+        -- (CART-1939) names a profile could not adjudicate, decided by the METHOD NAME against both class spaces
+        refined = refined, class_tables = cmeta or NUL }
     local notes = move_notes(store, { { kind = 'verdict-is-the-names', premise = 'granularity',
         why = 'the profiles answer per NAME: every site of a name carries that name\'s verdict. `kept` means the NAME is kept, not that the call still works — a changed SIGNATURE (an added or removed parameter) and a changed BEHAVIOUR are not measured here',
         evidence = { not_measured = { 'signature-changed', 'behaviour-changed' } } } })
+    if not fs then
+        notes[#notes + 1] = { kind = 'no-member-check', premise = 'class-space',
+            why = ('a method on an object was NOT checked by name against the two versions\' classes: %s'):format(tostring(tsp)),
+            evidence = NUL }
+    elseif refined.removed + refined.supplied + refined.moved > 0 then
+        notes[#notes + 1] = { kind = 'member-name', premise = 'class-space',
+            why = ('%d method name(s) on objects decided by NAME against every class of %s and %s (confidence `member-name`): %d removed from every class (lost), %d still on every class that had it (kept), %d moved off some classes (not adjudicable: the receiver\'s class decides). Kept still says nothing of the signature'):format(
+                refined.removed + refined.supplied + refined.moved, tostring(cmeta.from_version), tostring(cmeta.to_version),
+                refined.removed, refined.supplied, refined.moved),
+            evidence = refined }
+    end
     if names['not-adjudicable'] > 0 then
         notes[#notes + 1] = { kind = 'not-adjudicable', premise = 'receiver',
-            why = ('%d name(s) at %d site(s) neither profile can score — mostly methods on objects (`player.teleport`), whose class both versions have: `reason` says which mechanism stopped each. They are NOT cleared'):format(names['not-adjudicable'], by_site['not-adjudicable']),
+            why = ('%d name(s) at %d site(s) nothing here could score — a method that left only SOME classes (`member-moved`: the receiver\'s class decides), a name no class of either version declares (a project field), or a bare name: `reason` says which. They are NOT cleared'):format(names['not-adjudicable'], by_site['not-adjudicable']),
             evidence = { names = names['not-adjudicable'], sites = by_site['not-adjudicable'] } }
     end
     -- the absence is decided on the UNFILTERED, UNCLIPPED population, the narrowing second
@@ -4967,7 +5012,7 @@ M.VERBS = {
     portability_sites = {
         answers = 'reach-for',
         refuses = { 'ambiguous-file', 'profiles-not-comparable', 'same-profile', 'unknown-file' },
-        summary = 'the PORT WORKLIST BY SITE: every external call site (file, 1-based line and character column, fn, the qualified callee) with the move\'s verdict for its name — lost / moved (with the new form) / kept / gained / not-adjudicable (with the reason). The verdict is the NAME\'s; kept means the name is kept, not that its signature or behaviour is unchanged',
+        summary = 'the PORT WORKLIST BY SITE: every external call site (file, 1-based line and character column, fn, the qualified callee) with the move\'s verdict for its name — lost / moved (with the new form) / kept / gained / not-adjudicable (with the reason). The verdict is the NAME\'s; kept means the name is kept, not that its signature or behaviour is unchanged. A method on an object no profile adjudicates is decided by its method NAME against every class of both versions (confidence member-name)',
         subject = 'query',
         tier_basis = 'observation', needs_calls = true,
         absences = { 'absent', 'unavailable' },
