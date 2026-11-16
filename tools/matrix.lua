@@ -522,7 +522,12 @@ local function run_row(name)
         local findings = require('cartograph.lint').run(shim,
             { only = { ['silent-drop'] = true } })
         local sp = { n = require('cartograph.lint').silent_drop_population(shim), unit = 'unresolved calls' }
-        if #findings == 0 then
+        -- ★ NOTHING TO EXAMINE IS A DECLINE, NOT AN OK (CART-1927): the first sweep found this column answering OK over
+        -- 0 candidates on five corpora (the token providers, and synjs where every call resolves) — a green that said
+        -- nothing. The oracle declines, by name, and the liveness collector lists the reason
+        if sp.n == 0 and #findings == 0 then
+            cell('silent', '--', { 'nothing to examine: 0 unresolved calls in a function' })
+        elseif #findings == 0 then
             cell('silent', 'OK', nil, sp)
         else
             local d = { ('%d silent-local gaps'):format(#findings) }
@@ -637,7 +642,12 @@ local function run_row(name)
         else
             local shape = snapshot.dfshape(data)
             local line = snapshot.dfshape_diff(meta.dfshape, shape)
-            cell('dfshape', line and '~' or 'OK', line and { line } or nil, { n = shape.fns, unit = 'fns' })
+            if shape.fns == 0 and not line then
+                -- (an unchanged distribution of NOTHING is no reading: declined by name, CART-1927)
+                cell('dfshape', '--', { 'no df-bearing functions: the distribution is empty on both sides' })
+            else
+                cell('dfshape', line and '~' or 'OK', line and { line } or nil, { n = shape.fns, unit = 'fns' })
+            end
         end
     end
 
