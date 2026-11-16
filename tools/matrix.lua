@@ -201,9 +201,12 @@ local function run_row(name)
     -- ninth baseline-comparing column that forgets to honour `--file`, because it cannot
     -- report without passing through this function. The DETAIL is kept: a `~` row still
     -- prints its census, which is the entire point of scoping.
-    local function cell(col, s, d)
+    -- ★ AND EVERY VERDICT STATES ITS POPULATION (CART-1927): `pop` = { n = how much the oracle LOOKED AT, unit }. A
+    -- verdict over nothing is SILENT, and a green cell reads exactly like a passing one — the collector after the grid
+    -- renders ORACLE x CORPUS from these, and a verdict that states none is itself a finding
+    local function cell(col, s, d, pop)
         if opts.file and SCOPE_UNGATED[col] and (s == 'OK' or s == 'FAIL') then s = '~' end
-        cells[col] = { s = s, d = d }
+        cells[col] = { s = s, d = d, p = pop }
         if col ~= 'mem' then hwm[#hwm + 1] = { col, bench.peak_now() } end
     end
     if opts.file then
@@ -234,6 +237,9 @@ local function run_row(name)
     end
     local data, stats = bench.extract(name, xopts)
     local c = require('cartograph.census').take(data)
+    -- (the graph's own size: the population of every column that compares the whole graph, and the corpus scale the
+    -- collector reads a population AGAINST — a population that does not grow with this has not been exercised)
+    local ITEMS = { n = c.nodes.total + c.edges.total + c.calls.total, unit = 'items' }
 
     -- GRACEFUL DEGRADE (perf-cut P1 follow-on): a corpus whose extract alone
     -- budgets ≳ 40% of this machine's RAM cannot safely DOUBLE-HOLD — the dfpar
@@ -253,7 +259,7 @@ local function run_row(name)
     if wanted('counts') then
         local expected = corpus.expected
         if not expected then
-            cell('counts', '--')
+            cell('counts', '--', { 'no expected refs / nodes pin for this corpus' })
         else
             local refs = c.edges.by_kind.ref or 0
             local okref = not expected.refs or refs == expected.refs
@@ -262,7 +268,7 @@ local function run_row(name)
                 (okref and oknode) and nil or {
                     ('refs %d expected %s · nodes %d expected %s'):format(
                         refs, tostring(expected.refs), c.nodes.total,
-                        tostring(expected.nodes)) })
+                        tostring(expected.nodes)) }, { n = c.nodes.total, unit = 'nodes' })
         end
     end
 
@@ -270,7 +276,7 @@ local function run_row(name)
         local validate = require 'cartograph.validate'
         local vr = validate.check(data)
         cell('valid', vr.ok and 'OK' or 'FAIL',
-            vr.ok and nil or { validate.report(vr) })
+            vr.ok and nil or { validate.report(vr) }, ITEMS)
     end
 
 
@@ -284,15 +290,15 @@ local function run_row(name)
         local rc = dofile(here .. '/rowcensus.lua')
         local r = rc.check(data)
         if r.fns == 0 then
-            cell('rows', '--') -- no flow-bearing functions (token provider)
+            cell('rows', '--', { 'no flow-bearing functions (a token provider)' })
         else
             local d = { ('fns=%d · %s'):format(r.fns, rc.census(r.cats)) }
             if rc.EXPECTED[name] then
                 local diffs = rc.diff(r.cats, rc.EXPECTED[name])
                 for _, l in ipairs(diffs) do d[#d + 1] = l end
-                cell('rows', #diffs == 0 and 'OK' or 'FAIL', d)
+                cell('rows', #diffs == 0 and 'OK' or 'FAIL', d, { n = r.fns, unit = 'fns' })
             else
-                cell('rows', '~', d) -- ran, census not yet calibrated
+                cell('rows', '~', d, { n = r.fns, unit = 'fns' }) -- ran, census not yet calibrated
             end
         end
     end
@@ -359,9 +365,9 @@ local function run_row(name)
                 -- regression. The colour stays FAIL either way: a moved pin is re-pinned, never left to drift
                 if #diffs > 0 then d[#d + 1] = '    ' .. PV.line(PV.classify(r.cats, ec.EXPECTED[name], true)) end
                 for _, l in ipairs(diffs) do d[#d + 1] = l end
-                cell('expr', #diffs == 0 and 'OK' or 'FAIL', d)
+                cell('expr', #diffs == 0 and 'OK' or 'FAIL', d, { n = r.fns + r.methods, unit = 'subjects' })
             else
-                cell('expr', '~', d) -- ran, census not yet calibrated
+                cell('expr', '~', d, { n = r.fns + r.methods, unit = 'subjects' }) -- ran, census not yet calibrated
             end
         end
     end
@@ -384,22 +390,23 @@ local function run_row(name)
             { legacy_df = true, cold = true, files = xopts.files })
         local r = dfp.check(ldata)
         if r.nfn == 0 then
-            cell('dfpar', '--') -- no df-bearing functions (token provider)
+            cell('dfpar', '--', { 'no df-bearing functions (a token provider)' })
         else
             -- `unpaired` is printed BESIDE the compared count on purpose (CART-0381):
             -- "0 divergences" must never be readable as "we compared nothing".
             local d = { ('fns=%d stmts=%d%s ferr=%d · %s'):format(
                 r.nfn, r.nstmt, (r.nskip or 0) > 0 and (' unpaired=' .. r.nskip) or '',
                 r.ferr, dfp.census(r.cats)) }
+            local dp = { n = r.nstmt, unit = 'stmts' }
             if r.ferr > 0 then
-                cell('dfpar', 'FAIL', d)
+                cell('dfpar', 'FAIL', d, dp)
             elseif dfp.EXPECTED[name] then
                 local diffs = dfp.diff(r.cats, dfp.EXPECTED[name])
                 if #diffs > 0 then d[#d + 1] = '    ' .. PV.line(PV.classify(r.cats, dfp.EXPECTED[name])) end -- (CART-0446)
                 for _, l in ipairs(diffs) do d[#d + 1] = l end
-                cell('dfpar', #diffs == 0 and 'OK' or 'FAIL', d)
+                cell('dfpar', #diffs == 0 and 'OK' or 'FAIL', d, dp)
             else
-                cell('dfpar', '~', d) -- ran clean, census not yet calibrated
+                cell('dfpar', '~', d, dp) -- ran clean, census not yet calibrated
             end
         end
     end
@@ -413,7 +420,7 @@ local function run_row(name)
         cell('cache', '--', DH_NOTE)
     elseif wanted('cache') then
         if not data.stamps then
-            cell('cache', '--') -- unstamped source: cache never persists it
+            cell('cache', '--', { 'unstamped source: the cache never persists it' })
         else
             local cache = require 'cartograph.cache'
             local realpath = cache.path
@@ -455,7 +462,7 @@ local function run_row(name)
                         .. require('cartograph.validate').report(vw)
                 end
                 local good = gd.empty(d) and vw.ok
-                cell('cache', good and 'OK' or 'FAIL', good and nil or det)
+                cell('cache', good and 'OK' or 'FAIL', good and nil or det, ITEMS)
             end
         end
     end
@@ -467,7 +474,12 @@ local function run_row(name)
             if n.flow and n.flow.stmts then bearing[#bearing + 1] = n end
         end
         if #bearing == 0 then
-            cell('fold', '--')
+            -- ★ SAY WHY (CART-1927 -> CART-2105): since flow is folded at PRODUCTION (P3) no extracted graph holds raw
+            -- rows, so this oracle has had nothing to round-trip on any corpus — a decline, named, never a bare dash
+            local folded = data._flowcol ~= nil
+            cell('fold', '--', { folded
+                and 'flow arrives FOLDED (the production fold, P3): no raw rows to round-trip — this oracle checks nothing until re-armed (CART-2105)'
+                or 'no flow-bearing functions' })
         else
             -- deterministic sample (cap ~2000 fns): copying EVERY raw row
             -- pre-fold would transiently double flow's memory on the scale
@@ -491,10 +503,10 @@ local function run_row(name)
                 local d = { ('%d/%d sampled fns changed through the fold')
                     :format(#bad, #picked) }
                 for i = 1, math.min(#bad, 5) do d[#d + 1] = bad[i] end
-                cell('fold', 'FAIL', d)
+                cell('fold', 'FAIL', d, { n = #picked, unit = 'fns sampled' })
             else
                 cell('fold', 'OK',
-                    { ('%d fns sampled (of %d)'):format(#picked, #bearing) })
+                    { ('%d fns sampled (of %d)'):format(#picked, #bearing) }, { n = #picked, unit = 'fns sampled' })
             end
         end
     end
@@ -509,15 +521,16 @@ local function run_row(name)
             abs = function (f) return f end }
         local findings = require('cartograph.lint').run(shim,
             { only = { ['silent-drop'] = true } })
+        local sp = { n = require('cartograph.lint').silent_drop_population(shim), unit = 'unresolved calls' }
         if #findings == 0 then
-            cell('silent', 'OK')
+            cell('silent', 'OK', nil, sp)
         else
             local d = { ('%d silent-local gaps'):format(#findings) }
             for i = 1, math.min(#findings, 5) do
                 d[#d + 1] = ('%s:%d %s'):format(findings[i].file,
                     findings[i].line, findings[i].message)
             end
-            cell('silent', 'FAIL', d)
+            cell('silent', 'FAIL', d, sp)
         end
     end
 
@@ -529,7 +542,7 @@ local function run_row(name)
     -- because…"), not count acceptance.
     if wanted('key') then
         if not corpus.synthetic then
-            cell('key', '--')
+            cell('key', '--', { 'not a synthetic corpus: no answer key' })
         else
             local gen = dofile(here .. '/gen.lua')
             local ans = gen.answers(corpus.synthetic.lang,
@@ -608,7 +621,7 @@ local function run_row(name)
             end
             cell('key', #bad == 0 and 'OK' or 'FAIL',
                 #bad > 0 and bad
-                or { ('%d keyed sites verified'):format(#ans) })
+                or { ('%d keyed sites verified'):format(#ans) }, { n = #ans, unit = 'keyed sites' })
         end
     end
 
@@ -622,8 +635,9 @@ local function run_row(name)
         if not (base and meta and meta.dfshape) then
             cell('dfshape', 'NOBASE', { base and 'baseline predates the dfshape field: --save records it' or tostring(meta) })
         else
-            local line = snapshot.dfshape_diff(meta.dfshape, snapshot.dfshape(data))
-            cell('dfshape', line and '~' or 'OK', line and { line } or nil)
+            local shape = snapshot.dfshape(data)
+            local line = snapshot.dfshape_diff(meta.dfshape, shape)
+            cell('dfshape', line and '~' or 'OK', line and { line } or nil, { n = shape.fns, unit = 'fns' })
         end
     end
 
@@ -678,7 +692,44 @@ local function run_row(name)
                                 or stale or 'extractor drift')))
                     if tooldirty then table.insert(det, 2, tooldirty) end
                 end
-                cell('struct', gd.empty(d) and 'OK' or (advisory and '~' or 'FAIL'), det)
+                cell('struct', gd.empty(d) and 'OK' or (advisory and '~' or 'FAIL'), det, ITEMS)
+            end
+        end
+    end
+
+    -- ★ CROSS-LANGUAGE LINKS (CART-0789). bench.extract stops at the raw extract, so the one place a `ref` edge is
+    -- minted by string-key matching rather than resolution had NO gated expectation anywhere: CART-0788 swung
+    -- desynced's links 40-292 between identical processes and every gate stayed green, because none looked. This runs
+    -- xlang.link exactly as the open path does (effective bindings: declared + discovered) and counts the ref edges it
+    -- ★ BEFORE `par` (CART-1927): par frees the shared `data` while its child runs, and xlang after it linked a nil graph
+    -- — every row running both FAILED xlang with "greenspun.lua:99: attempt to index local 'data'". It compares nothing
+    -- the slim above holds, so ordering it first moves no other verdict.
+    -- owns: `xlang` (a declared binding's key match) and `xdisc` (a discovered binding's hedge, CART-0725), pinned per
+    -- corpus as `expected_xlang`. ★ IT RUNS LAST because link MUTATES the shared graph, and every column above compares
+    -- the raw extract against a baseline; `mem` after it judges extraction's budget, and a later phase over it is refused.
+    if wanted('xlang') then
+        local xl = require 'cartograph.xlang'
+        local xb
+        local okx, st = pcall(function () xb = xl.effective_bindings(data); return xl.link(data, xb) end)
+        local xp = { n = type(xb) == 'table' and #xb or 0, unit = 'bindings' }
+        if not okx then
+            cell('xlang', 'FAIL', { 'xlang.link raised: ' .. tostring(st):sub(1, 300) })
+        else
+            local nx, nd = 0, 0
+            for _, e in ipairs(data.edges or {}) do
+                if e.kind == 'ref' then
+                    if e.xlang then nx = nx + 1 end
+                    if e.xdisc then nd = nd + 1 end
+                end
+            end
+            local d = { ('xlang refs %d · discovered %d · linked sites %d'):format(nx, nd, (st and st.links) or 0) }
+            local exp = corpus.expected_xlang
+            if not exp then
+                cell('xlang', (nx + nd) > 0 and '~' or '--', d, xp) -- ran, not yet pinned / nothing to link
+            else
+                local ok = (exp.xlang or 0) == nx and (exp.xdisc or 0) == nd
+                cell('xlang', ok and 'OK' or 'FAIL', ok and nil or {
+                    ('xlang refs %d expected %d · discovered %d expected %d'):format(nx, exp.xlang or 0, nd, exp.xdisc or 0) }, xp)
             end
         end
     end
@@ -688,7 +739,7 @@ local function run_row(name)
     -- inline data (the slim is all the diff needs) while the child runs
     if wanted('par') then
         if (corpus.provider or 'treesitter') ~= 'treesitter' then
-            cell('par', '--') -- no parallel pipeline for the token provider
+            cell('par', '--', { 'no parallel pipeline for the token provider' })
         else
             data = nil
             collectgarbage(); collectgarbage()
@@ -710,39 +761,7 @@ local function run_row(name)
             else
                 local det, d = gd.detail(slim, pslim,
                     { a = 'sequential', b = 'parallel', limit = 5 })
-                cell('par', gd.empty(d) and 'OK' or 'FAIL', det)
-            end
-        end
-    end
-
-    -- ★ CROSS-LANGUAGE LINKS (CART-0789). bench.extract stops at the raw extract, so the one place a `ref` edge is
-    -- minted by string-key matching rather than resolution had NO gated expectation anywhere: CART-0788 swung
-    -- desynced's links 40-292 between identical processes and every gate stayed green, because none looked. This runs
-    -- xlang.link exactly as the open path does (effective bindings: declared + discovered) and counts the ref edges it
-    -- owns: `xlang` (a declared binding's key match) and `xdisc` (a discovered binding's hedge, CART-0725), pinned per
-    -- corpus as `expected_xlang`. ★ IT RUNS LAST because link MUTATES the shared graph, and every column above compares
-    -- the raw extract against a baseline; `mem` after it judges extraction's budget, and a later phase over it is refused.
-    if wanted('xlang') then
-        local xl = require 'cartograph.xlang'
-        local okx, st = pcall(function () return xl.link(data, xl.effective_bindings(data)) end)
-        if not okx then
-            cell('xlang', 'FAIL', { 'xlang.link raised: ' .. tostring(st):sub(1, 300) })
-        else
-            local nx, nd = 0, 0
-            for _, e in ipairs(data.edges or {}) do
-                if e.kind == 'ref' then
-                    if e.xlang then nx = nx + 1 end
-                    if e.xdisc then nd = nd + 1 end
-                end
-            end
-            local d = { ('xlang refs %d · discovered %d · linked sites %d'):format(nx, nd, (st and st.links) or 0) }
-            local exp = corpus.expected_xlang
-            if not exp then
-                cell('xlang', (nx + nd) > 0 and '~' or '--', d) -- ran, not yet pinned / nothing to link
-            else
-                local ok = (exp.xlang or 0) == nx and (exp.xdisc or 0) == nd
-                cell('xlang', ok and 'OK' or 'FAIL', ok and nil or {
-                    ('xlang refs %d expected %d · discovered %d expected %d'):format(nx, exp.xlang or 0, nd, exp.xdisc or 0) })
+                cell('par', gd.empty(d) and 'OK' or 'FAIL', det, ITEMS)
             end
         end
     end
@@ -758,11 +777,11 @@ local function run_row(name)
         if corpus.budget_mb and stats.peak then
             cell('mem', bench.mem_verdict(corpus.budget_mb, stats.peak, hwm))
         else
-            cell('mem', '--')
+            cell('mem', '--', { 'no budget_mb declared, or no peak measured' })
         end
     end
 
-    return { corpus = name, cells = cells, wall = stats.wall, parse = parse,
+    return { corpus = name, cells = cells, wall = stats.wall, parse = parse, items = ITEMS.n,
         -- extraction-floor facts for generated-corpus callers (tools/gen.lua):
         -- a syntax-error wipeout would leave every invariant vacuously green
         fns = (c.nodes.by_kind['function'] or 0)
@@ -1043,6 +1062,7 @@ end, 25)
 local anyfail, anysoft = false, false
 local details = {}
 local parselines = {} -- the folded census log (see below the grid)
+local liverows = {} -- every completed row, for the oracle-liveness collector (CART-1927)
 for _, name in ipairs(names) do
     io.stdout:write(('%-' .. W .. 's '):format(name)); io.stdout:flush()
     local proc = procs[name]
@@ -1141,6 +1161,7 @@ for _, name in ipairs(names) do
             end
         end
         io.stdout:write(table.concat(line, ' ') .. '\n')
+        liverows[#liverows + 1] = res
         if res.parse then parselines[#parselines + 1] = { name, res.parse } end
         if #rowdet > 0 then
             if res.info then rowdet[#rowdet + 1] = res.info end
@@ -1153,6 +1174,14 @@ for _, d in ipairs(details) do
     say('')
     say(d[1] .. ':')
     for _, l in ipairs(d[2]) do say('  ' .. l) end
+end
+
+-- ── ORACLE LIVENESS (CART-1927): one line per oracle, from the population every cell states — tools/liveness.lua ─────
+if #liverows > 0 then
+    local lines, soft = dofile(here .. '/liveness.lua').render(liverows, colnames)
+    say('')
+    for _, l in ipairs(lines) do say(l) end
+    if soft then anysoft = true end
 end
 
 -- ── the parse-cache reuse log (CART-0429) ───────────────────────────────────────────────

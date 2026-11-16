@@ -942,6 +942,19 @@ end
 -- (resolve_local_callable) now resolves-or-refuses these regardless of name
 -- length, so a residual finding of ANY length is a real regression — the old
 -- `#callee >= 3` guard would have hidden a short one (a `nm`/`go` re-broken).
+-- the calls silent-drop EXAMINES: resolved to nothing, refused nothing, a plain callee in a function (CART-1927 — one
+-- predicate for the rule and for the population the matrix reports it looked at)
+local function silent_candidate(c)
+    return not callrec.to(c) and not c.refused and not c.dynamic and not callrec.full(c)
+        and callrec.fn(c) and callrec.callee(c)
+end
+--- how many calls silent-drop examined: its POPULATION (CART-1927) — a clean 0 findings over 0 candidates is silence
+function M.silent_drop_population(store)
+    local n = 0
+    for _, c in ipairs((store.data and store.data.calls) or {}) do if silent_candidate(c) then n = n + 1 end end
+    return n
+end
+
 local function silent_drop_findings(store)
     local calls = store.data.calls
     if not calls or #calls == 0 then return {} end
@@ -963,9 +976,7 @@ local function silent_drop_findings(store)
         return s
     end
     for _, c in ipairs(calls) do
-        if not callrec.to(c) and not c.refused and not c.dynamic and not callrec.full(c)
-            and callrec.fn(c) and callrec.callee(c)
-            and fn_locals(callrec.fn(c))[callrec.callee(c)] then
+        if silent_candidate(c) and fn_locals(callrec.fn(c))[callrec.callee(c)] then
             local k = callrec.fn(c) .. '\31' .. callrec.callee(c) -- one finding per (fn, local)
             if not seen[k] then
                 seen[k] = true
