@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C++ member calls are typed by their receiver's declared class (graph; cache v310)
+
+- A C++ call `x->m()` / `x.m()` whose receiver is a parameter or local declared as a class, a `this->m()`, or a bare
+  `m()` inside a member function now resolves to that class's `m` when exactly one definition of it exists, `prov =
+  'recv'`. Only calls unresolved before are affected; nothing resolved is retargeted. luanti/src: 15,196 -> 16,878
+  resolved. 7kaa: 13,970 -> 16,228 (CART-2111).
+- Typed only when the operator fits the declaration (`->` on a pointer, `.` on a value or reference): `->` on a class
+  value is its `operator->`. A template parameter, `auto`, `std::` types, templates and overloads key nothing.
+- A call record carries `rcls`, the receiver's class.
+
 ## 2026-11-16 — `prov = 'recv'`: a resolution the receiver's TYPE keyed is no longer `base` (graph field; cache v309)
 
 - A call resolved by an exact match on a key the language spec qualified from the receiver's inferred type is

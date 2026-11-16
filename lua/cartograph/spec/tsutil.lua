@@ -482,12 +482,44 @@ local function c_param_name(d) -- a param may itself be a function pointer: `int
     end
     return c_decl_name(d)
 end
+-- ★ THE DECLARED CLASS OF A BINDER (CART-2111): `ty` = the class name a declaration's type names, `ptr` = its pointer
+-- depth (0 for a value or a reference). Only a NAMED type that could be a project class: a type_identifier, the last
+-- segment of a non-std qualified name, an elaborated `struct T`; nothing for a primitive, `auto` / decltype, a
+-- template instance or std::. A typedef alias keys as its own name — and matches no class unless one is so named
+local function c_decl_type(tynode, d, src)
+    if not tynode then return nil end
+    local t, ty = tynode:type(), nil
+    if t == 'type_identifier' then ty = M.node_text(tynode, src)
+    elseif t == 'qualified_identifier' then
+        local txt = M.node_text(tynode, src)
+        if txt:match('^%s*::') or txt:match('^std::') or txt:find('<', 1, true) then return nil end
+        ty = txt:match('([%a_][%w_]*)%s*$')
+    elseif t == 'struct_specifier' or t == 'class_specifier' or t == 'union_specifier' then
+        local nm = tynode:field('name')[1]
+        if nm and #tynode:field('body') == 0 and nm:type() == 'type_identifier' then ty = M.node_text(nm, src) end
+    end
+    if not ty then return nil end
+    local ptr = 0
+    while d do
+        local dt = d:type()
+        if dt == 'pointer_declarator' then ptr = ptr + 1
+        elseif dt == 'array_declarator' or dt == 'function_declarator' then return nil
+        elseif dt ~= 'init_declarator' and dt ~= 'reference_declarator' and dt ~= 'parenthesized_declarator' then break end
+        d = d:field('declarator')[1] or d:named_child(0)
+    end
+    return ty, ptr
+end
+M.c_decl_type = c_decl_type
 local function c_declaration(st, src, out, row)
     local sr, _, er = st:range() -- (at / ate / ab / abe: a binder's own initializer is not in its scope, CART-1602)
     local sb, eb = select(3, st:start()), select(3, st:end_())
+    local tyn = st:field('type')[1]
     for _, d in ipairs(st:field('declarator')) do
         local id = c_decl_name(d)
-        if id then out[M.node_text(id, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb } end
+        if id then
+            local ty, ptr = c_decl_type(tyn, d, src)
+            out[M.node_text(id, src)] = { row = row, at = sr, ate = er, ab = sb, abe = eb, ty = ty, ptr = ptr }
+        end
     end
 end
 local function c_fn_declarator(node)
@@ -501,8 +533,12 @@ local function c_param_list(pl, src, out)
     for _, p in M.inext, pl, -1 do
         local t = p:type()
         if t == 'parameter_declaration' or t == 'optional_parameter_declaration' then
-            local id = c_param_name(p:field('declarator')[1])
-            if id then out[M.node_text(id, src)] = {} end
+            local d = p:field('declarator')[1]
+            local id = c_param_name(d)
+            if id then
+                local ty, ptr = c_decl_type(p:field('type')[1], d, src)
+                out[M.node_text(id, src)] = { ty = ty, ptr = ptr }
+            end
         end
     end
 end
@@ -520,8 +556,12 @@ local function c_ctrl(node, src, out) -- for (int i…) / for (auto &e : xs) / i
     local init = node:field('initializer')[1]
     if init and init:type() == 'declaration' then c_declaration(init, src, out) end
     if node:type() == 'for_range_loop' then
-        local id = c_decl_name(node:field('declarator')[1])
-        if id then out[M.node_text(id, src)] = {} end
+        local d = node:field('declarator')[1]
+        local id = c_decl_name(d)
+        if id then
+            local ty, ptr = c_decl_type(node:field('type')[1], d, src)
+            out[M.node_text(id, src)] = { ty = ty, ptr = ptr }
+        end
     end
     local cc = node:field('condition')[1]
     if cc and cc:type() == 'condition_clause' then

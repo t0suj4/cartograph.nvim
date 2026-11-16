@@ -55,7 +55,84 @@ local function constrained_sig(def)
     return nil
 end
 
+--- ★ THE RECEIVER'S CLASS (CART-2111): `x->m()` / `x.m()` with x a param or local whose declaration names a class
+--- (the scope model's binder `ty`, tsutil.c_decl_type), `this->m()` and a bare `m()` inside a member function (its
+--- enclosing class). -> class, how ('binder' | 'self') | nil. A SIDE FACT, not a key: the `recv` resolve pass reads it
+--- for calls still unresolved, so nothing resolved today is traded, and no qualify_call switches on the class gate
+--- for the qualified calls the source writes. SOUND ONLY WHEN THE OPERATOR FITS THE DECLARATOR: `->` on a pointer,
+--- `.` on a value or reference — `->` on a class value is its operator-> (a smart pointer, an iterator). A type named
+--- by an enclosing template's parameter keys nothing.
+local function cpp_enclosing_class(n, src)
+    while n do
+        local t = n:type()
+        if t == 'function_definition' then
+            local d = n:field('declarator')[1]
+            while d and d:type() ~= 'function_declarator' do d = d:field('declarator')[1] end
+            local nm = d and d:field('declarator')[1]
+            if nm and nm:type() == 'qualified_identifier' then
+                -- (`ns::Cls::m` nests: the class is the INNERMOST scope)
+                while nm:field('name')[1] and nm:field('name')[1]:type() == 'qualified_identifier' do nm = nm:field('name')[1] end
+                local sc = nm:field('scope')[1]
+                if not (sc and (sc:type() == 'namespace_identifier' or sc:type() == 'type_identifier')) then return nil end
+                return node_text(sc, src)
+            end
+            local p = n:parent()
+            while p and p:type() ~= 'class_specifier' and p:type() ~= 'struct_specifier' do
+                if p:type() == 'function_definition' or p:type() == 'translation_unit' then return nil end
+                p = p:parent()
+            end
+            local cn = p and p:field('name')[1]
+            return cn and cn:type() == 'type_identifier' and node_text(cn, src) or nil
+        end
+        n = n:parent()
+    end
+end
+local function cpp_template_param(n, name, src)
+    while n do
+        if n:type() == 'template_declaration' then
+            local pl = n:field('parameters')[1]
+            for _, p in tsutil.inamed, pl or n, -1 do
+                if pl and (p:type() == 'type_parameter_declaration' or p:type() == 'variadic_type_parameter_declaration') then
+                    for _, c in tsutil.inamed, p, -1 do
+                        if c:type() == 'type_identifier' and node_text(c, src) == name then return true end
+                    end
+                end
+            end
+        end
+        n = n:parent()
+    end
+    return false
+end
+local function cpp_recv_class(calln, src, model)
+    if calln:type() ~= 'call_expression' or not model then return nil end
+    local f = calln:field('function')[1]
+    if not f then return nil end
+    if f:type() == 'identifier' then
+        local _, k = model.resolve(node_text(f, src), calln)
+        if k > 0 then return nil end -- (a local / param of that name: a function pointer, not a member)
+        local cls = cpp_enclosing_class(calln, src)
+        return cls, cls and 'self' or nil
+    end
+    if f:type() ~= 'field_expression' then return nil end
+    local arg, op = f:field('argument')[1], f:field('operator')[1]
+    if not (arg and op) then return nil end
+    local opt = node_text(op, src)
+    if arg:type() == 'this' then
+        if opt ~= '->' then return nil end
+        local cls = cpp_enclosing_class(calln, src)
+        return cls, cls and 'self' or nil
+    end
+    if arg:type() ~= 'identifier' then return nil end
+    local chain, k = model.resolve(node_text(arg, src), calln)
+    local b = k > 0 and chain[1] or nil
+    if not (b and b.ty) then return nil end
+    if (opt == '->') ~= (b.ptr == 1) or (opt == '.' and b.ptr ~= 0) then return nil end
+    if cpp_template_param(calln, b.ty, src) then return nil end
+    return b.ty, 'binder'
+end
+
 return {
+    recv_class = cpp_recv_class, -- the receiver's declared / enclosing class, a side fact for the `recv` pass (CART-2111)
     clink = tsutil.c_linkage, -- extern "C" evidence for the C/C++ join bridge (CART-1079)
     flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
     torn_context = tsutil.c_torn_context, -- tear by damaged CONTEXT, not by position after an error (CART-1084)

@@ -229,6 +229,7 @@ M.SLOTS = {
                                    -- (LuaLS `---@x`, jsdoc `@x {T}`); the tag
                                    -- vocabulary itself is shared (CART-0240)
     recv_local = 'TYPES', recv_root = 'TYPES', recv_path = 'TYPES',
+    recv_class = 'TYPES', -- (CART-2111) the receiver's declared / enclosing class, read by the `recv` pass
     litdata_types = 'TYPES',
     -- compound suffixes that reuse this language's extension but are a DIFFERENT
     -- language (`.blade.php`); claiming them fabricates structure (CART-0347)

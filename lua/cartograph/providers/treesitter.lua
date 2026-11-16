@@ -5177,6 +5177,8 @@ end
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
+    -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
+    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
@@ -5277,13 +5279,62 @@ M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 --- the receiver, not written at the call. `written` (a class the source names) and any other value are not
 M.RECV_HOW = { binder = true, self = true, super = true, ctor = true }
 --- 'recv' when the call's typed key itself matched its target exactly, else 'base'
-function M._base_prov(how, full, to, exact)
-    if how and M.RECV_HOW[how] and full and exact then
-        for _, n in ipairs(exact[full] or {}) do
+function M._base_prov(how, full, to, exact, rkey, node_index)
+    -- (rkey: the receiver-class key a spec recorded as a side fact — cpp's rcls::callee, CART-2111 — counts the same,
+    -- and so does a target named `ns::<rkey>`: the class declared in a namespace, as the recv pass reads it)
+    local key = rkey or full
+    if how and M.RECV_HOW[how] and key and exact then
+        for _, n in ipairs(exact[key] or {}) do
             if n.id == to then return 'recv' end
         end
+        local nd = rkey and node_index and node_index[to]
+        local sfx = rkey and ('::' .. rkey)
+        if nd and nd.name and #nd.name > #sfx and nd.name:sub(-#sfx) == sfx then return 'recv' end
     end
     return 'base'
+end
+
+--- THE `recv` PASS (CART-2111): a call still UNRESOLVED whose receiver's class a spec recorded (c.rcls — cpp's declared
+--- binder class / enclosing class) resolves to `<class>::<callee>` when exactly one definition of that key, in the
+--- call's language, exists. ADDITIVE: it never touches a resolved call; an overload pair or a missing key leaves the
+--- call as it was (an inherited method is the super pass's)
+function M._resolve_recv_class(cv, exact, addref, tail)
+    local cget, cset = cv.get, cv.set
+    local n = 0
+    for i = 1, cv.n do
+        local rc = not cget(i, 'to') and cget(i, 'rcls')
+        if rc then
+            local file = cget(i, 'file')
+            local callee = tostring(cget(i, 'callee'))
+            local key = rc .. '::' .. callee
+            local cands = exact[key]
+            -- (a class declared in a NAMESPACE names its methods `ns::Cls::m`, and a binder written inside the namespace
+            -- says `Cls`: the definitions whose name ENDS in ::Cls::m at a segment boundary are the same key)
+            if not cands and tail and tail[callee] then
+                local sfx = '::' .. key
+                for _, nd in ipairs(tail[callee]) do
+                    if nd.name and #nd.name > #sfx and nd.name:sub(-#sfx) == sfx then
+                        cands = cands or {}
+                        cands[#cands + 1] = nd
+                    end
+                end
+            end
+            if cands then cands = M._lang_list(cands, (elang_for(file))) end
+            if cands and #cands == 1 then
+                cset(i, 'to', cands[1].id)
+                cset(i, 'refused', nil)
+                cset(i, 'ext', nil)
+                local cfn = cget(i, 'fn')
+                if cfn then
+                    local cline = cget(i, 'line')
+                    addref(cfn, cands[1].id, cget(i, 'at') or { start = { line = cline, char = 0 },
+                        ['end'] = { line = cline, char = 0 } }, false)
+                end
+                n = n + 1
+            end
+        end
+    end
+    return n
 end
 
 -- run the pipeline over a ctx; returns the total count resolved. THE one place
@@ -5315,7 +5366,9 @@ local function run_resolve_passes(ctx)
     for i = 1, cv.n do
         local to = cget(i, 'to')
         if to and not cget(i, 'prov') then
-            cset(i, 'prov', M._base_prov(cget(i, 'qhow'), cget(i, 'full'), to, exact))
+            local rc = cget(i, 'rcls')
+            cset(i, 'prov', M._base_prov(cget(i, 'qhow'), cget(i, 'full'), to, exact,
+                rc and (rc .. '::' .. tostring(cget(i, 'callee'))) or nil, ctx.node_index))
         end
     end
     local n = 0
@@ -9647,6 +9700,12 @@ local MATCH_OPTS = { match_limit = 65536 }
                         full, qhedge, qdefer, qqual, qcls = q or full, h, d, qn, qc
                         qhow = q and hw or nil
                     end
+                    -- the receiver's CLASS as a side fact (cpp, CART-2111): read by the `recv` pass, never a key here
+                    local rcls
+                    if spec.recv_class then
+                        local rc, rh = spec.recv_class(calln, src, jvt_sm)
+                        if rc then rcls, qhow = rc, qhow or rh end
+                    end
                     -- ★ A STRING RECEIVER MAKES IT THE STDLIB'S (CART-1062): `('%s'):format(x)` keys `string.format`,
                     -- which the spec's stdlib prefixes answer as external — instead of the name-match landing it on
                     -- the one project def called `format` (4,330 of them did, on terraform's FUNCS.format)
@@ -10048,6 +10107,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         -- receiver field (resolve_interface narrows on it)
                         qcls = qcls, -- the class AS WRITTEN that the key names (php, CART-0735: the class veto)
                         qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
+                        rcls = rcls, -- the receiver's class (cpp spec.recv_class): the `recv` pass's key (CART-2111)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         -- identifier receiver (`x.foo`): the local name, for
