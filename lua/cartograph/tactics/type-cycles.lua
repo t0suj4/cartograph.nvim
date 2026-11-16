@@ -164,9 +164,74 @@ local function measure(store, p)
     for _, members in ipairs(complist) do nrec = nrec + #members end
     local ncomplete = 0
     for _, l in pairs(complete) do ncomplete = ncomplete + #l end
+    -- ★ THE DECLARED BACK-POINTER (CART-2120): a JPA bidirectional relationship names its two ends — A.f
+    -- `@OneToMany(mappedBy = "g")` and B.g, a relation field of B whose type refers back to A. A structural method that
+    -- reads BOTH ends (A.m reads f AND B.m reads g, for the same m) recurses forever on any populated instance: a
+    -- witness, not a precondition. "Reads" = a use edge from the method, or — no hand-written m in the class — a Lombok
+    -- annotation that GENERATES m and a field not excluded from it (@EqualsAndHashCode.Exclude / @ToString.Exclude)
+    local rowby, lombok = {}, {}
+    for _, r in ipairs(rows) do
+        local me = r.typename .. '@' .. r.file
+        if r.field == '' then lombok[me] = r.lombok
+        else rowby[me] = rowby[me] or {}; rowby[me][r.field] = r end
+    end
+    local hand = {}
+    for _, sm in ipairs(smethods) do hand[sm.cls .. '@' .. sm.file .. '\31' .. sm.m] = sm.id end
+    local function reads_field(me, fld, m)
+        local id = hand[me .. '\31' .. m]
+        if id then
+            for _, v in ipairs(reads[id] or {}) do
+                if v.name == fld and me:sub(-#v.file - 1) == '@' .. v.file then return 'code' end
+            end
+            return nil
+        end
+        local gen = lombok[me]
+        local r = rowby[me] and rowby[me][fld]
+        if gen and gen[m] and r and not r.static then
+            if m == 'toString' and r.xts then return nil end
+            if (m == 'equals' or m == 'hashCode') and r.xeq then return nil end
+            return 'lombok'
+        end
+        return nil
+    end
+    local function bind(simple, file) -- a class name as the type graph binds it
+        if not cfiles[simple] then return nil end
+        if cfiles[simple][file] then return simple .. '@' .. file end
+        local f = only_file(simple)
+        return f and (simple .. '@' .. f) or nil
+    end
+    local pairs_, findings = {}, {}
+    for a, fields in pairs(rowby) do
+        local aname = a:match('^(.-)@')
+        for f, r in pairs(fields) do
+            if r.jpa and r.mappedby and not r.static then
+                for _, ref in ipairs(r.refs or {}) do
+                    local b = bind(ref:match('([%w_$]+)$'), r.file)
+                    local g = b and rowby[b] and rowby[b][r.mappedby]
+                    local back = false
+                    for _, x in ipairs((g and g.refs) or {}) do if x:match('([%w_$]+)$') == aname then back = true end end
+                    if g and g.jpa and back then
+                        local by = {}
+                        for m in pairs(STRUCT) do
+                            local ra, rb = reads_field(a, f, m), reads_field(b, r.mappedby, m)
+                            if ra and rb then by[#by + 1] = m .. '(' .. ra .. '/' .. rb .. ')' end
+                        end
+                        table.sort(by)
+                        local row = { a = a, f = f, b = b, g = r.mappedby, traversed_by = by }
+                        pairs_[#pairs_ + 1] = row
+                        if #by > 0 then findings[#findings + 1] = row end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(pairs_, function (x, y) return x.a .. x.f < y.a .. y.f end)
+    table.sort(findings, function (x, y) return x.a .. x.f < y.a .. y.f end)
     return { typeref_rows = #rows, static_fields = statics, refs_kept = kept, refs_ambiguous = dropped,
         recursive_types = nrec, components = #complist, largest = largest, component_list = clip(complist),
-        traversing = clip(touching), n_traversing = #touching, complete = complete, n_complete = ncomplete }
+        traversing = clip(touching), n_traversing = #touching, complete = complete, n_complete = ncomplete,
+        bidirectional = clip(pairs_), n_bidirectional = #pairs_, bidirectional_traversed = clip(findings),
+        n_bidirectional_traversed = #findings }
 end
 
 local E = {
@@ -179,8 +244,8 @@ local E = {
     measure = measure,
     claim = function (v)
         if v.typeref_rows == 0 then return false, 'no type references: this tree has no java fields (data.typerefs is empty)' end
-        return true, ('%d recursive types in %d components (largest %d); %d struct-method reads of a cycle-closing field; %d types on a completely traversed cycle'):format(
-            v.recursive_types, v.components, v.largest, v.n_traversing, v.n_complete)
+        return true, ('%d recursive types in %d components (largest %d); %d struct-method reads of a cycle-closing field; %d types on a completely traversed cycle; %d JPA bidirectional relationships, %d traversed from both ends'):format(
+            v.recursive_types, v.components, v.largest, v.n_traversing, v.n_complete, v.n_bidirectional, v.n_bidirectional_traversed)
     end,
 }
 
@@ -221,6 +286,54 @@ E.examples = {
         params = function () return {} end,
         expect = { holds = true, check = function (v)
             return v.recursive_types == 0 and v.refs_ambiguous == 1, vim.inspect({ v.recursive_types, v.refs_ambiguous })
+        end },
+    },
+    {
+        name = 'JPA: @Data on both ends of a mapped bidirectional relationship traverses it from both sides (CART-2120)',
+        files = {
+            ['e/Parent.java'] = 'package e;\nimport java.util.List;\n@Entity @Data\npublic class Parent {\n  @Id private Long id;\n  @OneToMany(mappedBy = "parent") private List<Child> children;\n}\n',
+            ['e/Child.java'] = 'package e;\n@Entity @Data\npublic class Child {\n  @Id private Long id;\n  @ManyToOne private Parent parent;\n}\n',
+        },
+        params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            local f = v.bidirectional_traversed[1]
+            return v.n_bidirectional == 1 and f and f.f == 'children' and f.g == 'parent'
+                and table.concat(f.traversed_by, ',') == 'equals(lombok/lombok),hashCode(lombok/lombok),toString(lombok/lombok)', vim.inspect(v.bidirectional)
+        end },
+    },
+    {
+        name = 'JPA: the back-pointer excluded from equals / hashCode / toString — the relationship is there, no traversal',
+        files = {
+            ['e/Parent.java'] = 'package e;\nimport java.util.List;\n@Entity @Data\npublic class Parent {\n  @OneToMany(mappedBy = "parent") private List<Child> children;\n}\n',
+            ['e/Child.java'] = 'package e;\n@Entity @Data\npublic class Child {\n  @ManyToOne @ToString.Exclude @EqualsAndHashCode.Exclude private Parent parent;\n}\n',
+        },
+        params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            return v.n_bidirectional == 1 and v.n_bidirectional_traversed == 0, vim.inspect(v.bidirectional)
+        end },
+    },
+    {
+        name = 'JPA: hand-written toString on both ends reads both ends; a toString that skips the back-pointer does not',
+        files = {
+            ['e/Parent.java'] = 'package e;\nimport java.util.List;\npublic class Parent {\n  @OneToMany(mappedBy = "parent") private List<Child> children;\n  private String name;\n  public String toString() { return name + children; }\n}\n',
+            ['e/Child.java'] = 'package e;\npublic class Child {\n  @ManyToOne private Parent parent;\n  private String label;\n  public String toString() { return label + parent; }\n  public boolean equals(Object o) { return label.equals(((Child) o).label); }\n}\n',
+        },
+        params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            local f = v.bidirectional_traversed[1]
+            return f and table.concat(f.traversed_by, ',') == 'toString(code/code)', vim.inspect(v.bidirectional)
+        end },
+    },
+    {
+        name = 'JPA: a hand-written method replaces the one Lombok would generate — @Data, but a toString that skips the back-pointer',
+        files = {
+            ['e/Parent.java'] = 'package e;\nimport java.util.List;\n@Entity @Data\npublic class Parent {\n  @OneToMany(mappedBy = "parent") private List<Child> children;\n}\n',
+            ['e/Child.java'] = 'package e;\n@Entity @Data\npublic class Child {\n  @ManyToOne private Parent parent;\n  private String label;\n  public String toString() { return label; }\n}\n',
+        },
+        params = function () return {} end,
+        expect = { holds = true, check = function (v)
+            local f = v.bidirectional_traversed[1]
+            return f and table.concat(f.traversed_by, ',') == 'equals(lombok/lombok),hashCode(lombok/lombok)', vim.inspect(v.bidirectional)
         end },
     },
 }

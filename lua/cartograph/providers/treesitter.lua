@@ -10559,7 +10559,9 @@ local MATCH_OPTS = { match_limit = 65536 }
             for _, r in ipairs(spec.scan_typerefs(tsroot, src)) do
                 data.typerefs = data.typerefs or {}
                 data.typerefs[#data.typerefs + 1] = { typename = r.typename, field = r.field, refs = r.refs,
-                    static = r.static, file = file }
+                    static = r.static, file = file,
+                    -- (the entity model, CART-2120: JPA relation + mappedBy, Lombok exclusions / generated methods)
+                    jpa = r.jpa, mappedby = r.mappedby, xeq = r.xeq, xts = r.xts, lombok = r.lombok }
             end
         end
         -- type aliases (cpp typedef / using, CART-2114): the recv pass and its veto read a receiver's class through them

@@ -803,14 +803,55 @@ local function java_type_refs(tn, src, out, seen)
         for _, c in inext, tn, -1 do java_type_refs(c, src, out, seen) end
     end
 end
+-- the annotations of a declaration's `modifiers`: name (`OneToMany`, `ToString.Exclude`) -> { key -> string value }
+local function java_annos(decl, src)
+    local out = {}
+    for _, m in inext, decl, -1 do
+        if m:type() == 'modifiers' then
+            for _, a in inext, m, -1 do
+                local t = a:type()
+                if t == 'annotation' or t == 'marker_annotation' then
+                    local nm = a:field('name')[1]
+                    local args = {}
+                    local al = a:field('arguments')[1]
+                    for _, ev in (al and inext or NOOP), al, -1 do
+                        if ev:type() == 'element_value_pair' then
+                            local k, v = ev:field('key')[1], ev:field('value')[1]
+                            if k and v and v:type() == 'string_literal' then
+                                args[node_text(k, src)] = (node_text(v, src):gsub('^"', ''):gsub('"$', ''))
+                            end
+                        end
+                    end
+                    if nm then out[(node_text(nm, src):gsub('%s+', ''))] = args end
+                end
+            end
+        end
+    end
+    return out
+end
+-- ★ THE ENTITY MODEL (CART-2120): a field's JPA relation (`jpa`, `mappedby`) and its Lombok exclusions, and a class's
+-- Lombok-GENERATED structural methods (a row with field '' and `lombok`): what makes a bidirectional relationship a
+-- DECLARED back-pointer, and what makes equals / hashCode / toString read a field with no line of code doing it
+local JPA_REL = { OneToMany = true, ManyToOne = true, OneToOne = true, ManyToMany = true }
+local LOMBOK = { Data = { equals = true, hashCode = true, toString = true }, Value = { equals = true, hashCode = true, toString = true },
+    EqualsAndHashCode = { equals = true, hashCode = true }, ToString = { toString = true } }
 local function java_scan_typerefs(tsroot, src)
     local rows = {}
     -- (`static`: a class-level constant is no part of an INSTANCE's structure — `static final TimeValue ONE_MINUTE`
     -- made every such class read as self-referential; the type graph's consumers skip it)
-    local function field(owner, tn, namen, static)
+    local function field(owner, tn, namen, static, annos)
         local refs = {}
         java_type_refs(tn, src, refs, {})
-        if #refs > 0 then rows[#rows + 1] = { typename = owner, field = node_text(namen, src), refs = refs, static = static or nil } end
+        if #refs > 0 then
+            local row = { typename = owner, field = node_text(namen, src), refs = refs, static = static or nil }
+            for a, args in pairs(annos or {}) do
+                local base = a:match('([%w_]+)$')
+                if JPA_REL[base] then row.jpa = base; row.mappedby = args.mappedBy end
+                if a:match('EqualsAndHashCode%.Exclude$') then row.xeq = true end
+                if a:match('ToString%.Exclude$') then row.xts = true end
+            end
+            rows[#rows + 1] = row
+        end
     end
     local function is_static(fd)
         for _, c in inext, fd, -1 do
@@ -831,12 +872,19 @@ local function java_scan_typerefs(tsroot, src)
                         for _, d in inext, c, -1 do
                             local dn = d:type() == 'variable_declarator' and d:field('name')[1]
                             -- (a C-style `Node next[]` puts the dimensions on the declarator: the refs are the same)
-                            if dn then field(owner, c:field('type')[1], dn, is_static(c)) end
+                            if dn then field(owner, c:field('type')[1], dn, is_static(c), java_annos(c, src)) end
                         end
                     end
                 elseif t == 'enum_body_declarations' then members(c)
                 elseif JAVA_TYPE_DECLS[t] then decl(c) end
             end
+        end
+        if owner then
+            local gen
+            for a in pairs(java_annos(n, src)) do
+                for m in pairs(LOMBOK[a:match('([%w_]+)$')] or {}) do gen = gen or {}; gen[m] = true end
+            end
+            if gen then rows[#rows + 1] = { typename = owner, field = '', refs = {}, lombok = gen } end
         end
         if owner and n:type() == 'record_declaration' then
             local ps = n:field('parameters')[1]

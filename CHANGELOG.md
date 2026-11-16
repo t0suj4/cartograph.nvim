@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `type-cycles` finds JPA relationships traversed from both ends (graph field; cache v321)
+
+- `data.typerefs` rows now record each field's JPA relation (`jpa`, `mappedby`) and its Lombok exclusions (`xeq`,
+  `xts`). A row with an empty `field` records the structural methods Lombok generates for the class (`lombok`).
+- `type-cycles` reports `bidirectional`, the mapped relationships (`@OneToMany(mappedBy = "g")` ↔ `g`), and
+  `bidirectional_traversed`, where the same `equals` / `hashCode` / `toString` reads both ends. A read is either
+  hand-written code or Lombok-generated (`@Data` on an entity, the classic case). Such a method recurses forever on
+  any populated instance. Tested on fixtures only: no JPA corpus is available on this machine (CART-2120).
+
 ## 2026-11-16 — C++ calls on a global variable are typed (graph; cache v320)
 
 - `g_settings->get(...)`: a receiver that is a global variable now resolves through the global's declared class
