@@ -1243,6 +1243,121 @@ function M.class_spaces(from, to)
     return cm.space(cta), cm.space(ctb), { from = na, to = nb, from_version = va, to_version = vb }
 end
 
+-- ── SIGNATURES (CART-1934) ──────────────────────────────────────────────────────────────────────────────────────────
+-- A name kept with a new signature scored `kept`: get/set_quick_bar_slot went (index[, filter]) -> (page_index,
+-- slot_index[, filter]) in 2.1, every 2-argument call breaks, and nothing said so. The api artifacts carry every class
+-- method's parameters in call order (`params`, tools/factoriodistill.lua); these read them. PURE over their inputs.
+
+--- a method's parameter record in an api artifact, on `class` or the nearest ancestor declaring it -> rec, owner | nil
+function M.method_params(art, class, member)
+    local seen = 0
+    while class and seen < 32 do
+        local r = art and art.params and art.params[class .. '::' .. member]
+        if r then return r, class end
+        local c = art and art.classes and art.classes[class]
+        class, seen = c and c.parent, seen + 1
+    end
+    return nil
+end
+
+local function render_params(r)
+    local ps = {}
+    for _, p in ipairs(r.p or {}) do ps[#ps + 1] = p.n .. (p.o and '?' or '') end
+    if r.va then ps[#ps + 1] = '...' end
+    local body = table.concat(ps, ', ')
+    return r.tt and ('{' .. body .. '}') or ('(' .. body .. ')')
+end
+M.render_params = render_params
+
+-- how many positional arguments a record accepts: required, max (math.huge with a variadic tail)
+local function arity(r)
+    local req = 0
+    for i, p in ipairs(r.p or {}) do if not p.o then req = i end end
+    return req, r.va and math.huge or #(r.p or {})
+end
+
+--- did a method's parameters change between two versions? -> 'signature-same' | 'signature-changed', detail.
+--- detail = { from, to (renderings), added, removed (names), required_from, required_to, max_from, max_to }.
+function M.signature_verdict(pa, pb)
+    if not (pa and pb) then return nil end
+    local ra, rb = render_params(pa), render_params(pb)
+    if ra == rb then return 'signature-same', { from = ra, to = rb } end
+    local na, nb = {}, {}
+    for _, p in ipairs(pa.p or {}) do na[p.n] = true end
+    for _, p in ipairs(pb.p or {}) do nb[p.n] = true end
+    local added, removed = {}, {}
+    for _, p in ipairs(pb.p or {}) do if not na[p.n] then added[#added + 1] = p.n end end
+    for _, p in ipairs(pa.p or {}) do if not nb[p.n] then removed[#removed + 1] = p.n end end
+    local qa, ma = arity(pa)
+    local qb, mb = arity(pb)
+    -- COMPATIBLE: every call the old parameters accepted, the new ones accept too — positional: the old list is a
+    -- prefix of the new (same names, none newly required) and only OPTIONAL parameters follow; a table argument: every
+    -- old key is still there and none newly required, and every added key is optional. `teleport` gaining
+    -- `snap_to_grid?` breaks nothing, and must not read as port work
+    local compatible = false
+    if (pa.tt or false) == (pb.tt or false) and (pb.va or not pa.va) then
+        compatible = true
+        local bb = {}
+        for i, p in ipairs(pb.p or {}) do bb[p.n] = { i = i, o = p.o } end
+        for i, p in ipairs(pa.p or {}) do
+            local q = bb[p.n]
+            if not q or (p.o and not q.o) or (not pa.tt and q.i ~= i) then compatible = false end
+        end
+        for _, p in ipairs(pb.p or {}) do if not na[p.n] and not p.o then compatible = false end end
+    end
+    return 'signature-changed', { from = ra, to = rb, added = added, removed = removed, compatible = compatible,
+        required_from = qa, required_to = qb, max_from = ma ~= math.huge and ma or nil, max_to = mb ~= math.huge and mb or nil,
+        table_arg = (pa.tt or pb.tt) or nil }
+end
+
+--- a CALL of n positional arguments against both records -> 'breaks' | 'shifted' | 'fits' | 'unknown', why.
+--- breaks  = it fits the old parameters and not the new; shifted = it fits both, but a written position now names a
+--- different parameter (an insertion before it); unknown = a table argument (its keys are the parameters), an
+--- unknown count, or a call that did not fit the OLD parameters either (the class hypothesis is wrong, not the call).
+function M.arity_fit(pa, pb, n)
+    local _, d = M.signature_verdict(pa, pb)
+    if d and d.compatible then return 'fits', nil end
+    if n == nil then return 'unknown', 'the argument count is not known (a multi-valued last argument)' end
+    if pb.tt and not pa.tt then
+        -- POSITIONAL -> ONE TABLE (spill_item_stack): a call that passed anything but one argument cannot be right
+        local qa, ma = arity(pa)
+        if n >= qa and n <= ma and n ~= 1 then return 'breaks', ('%d positional argument(s): the new method takes ONE table'):format(n) end
+        return 'unknown', 'the method now takes one table: whether this one argument is it, its keys decide'
+    end
+    if pa.tt or pb.tt then return 'unknown', 'a table argument: its keys are the parameters, not its position' end
+    local qa, ma = arity(pa)
+    local qb, mb = arity(pb)
+    if n < qa or n > ma then return 'unknown', ('%d argument(s) do not fit the old parameters either'):format(n) end
+    if n < qb or n > mb then return 'breaks', ('%d argument(s): the new parameters take %d..%s'):format(n, qb, mb == math.huge and 'any' or tostring(mb)) end
+    -- SHIFTED only when a parameter MOVED: the old name at a written position sits elsewhere in the new list, or the
+    -- new one came from elsewhere in the old (an insertion before it). A name changed in place (is_chunk_charted's
+    -- `position` -> `chunk_position`) is a rename of the same argument, not a different one
+    local ia, ib = {}, {}
+    for i, p in ipairs(pa.p or {}) do ia[p.n] = i end
+    for i, p in ipairs(pb.p or {}) do ib[p.n] = i end
+    for i = 1, n do
+        local a, b = pa.p[i], pb.p[i]
+        if a and b and a.n ~= b.n and ((ib[a.n] and ib[a.n] ~= i) or (ia[b.n] and ia[b.n] ~= i)) then
+            return 'shifted', ('argument %d was `%s`, is now `%s` (`%s` moved)'):format(i, a.n, b.n, ib[a.n] and a.n or b.n)
+        end
+    end
+    return 'fits', nil
+end
+
+--- the positional argument count of a call record, or nil when it cannot be known (a last argument that may expand
+--- to several values: a call, `...`). A Lua `:` call carries its receiver in slot 1 (argv.lua), not counted.
+function M.call_nargs(c)
+    local av = require 'cartograph.argv'
+    local n = av.n(c)
+    if n > 0 then
+        local last = av.at(c, n)
+        local k = last and last.k
+        if k == 'expr' or k == 'spread' then return nil end
+    end
+    if c.method then n = n - 1 end
+    return n
+end
+
 function M.class_space_name(from_space, to_space, name)
     if not from_space or not to_space or type(name) ~= 'string' then return nil end
     local base, rest = name:match('^([%w_]+)[.:](.+)$')

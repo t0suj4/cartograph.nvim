@@ -274,6 +274,28 @@ table.sort(templates, function (x, y) return x.verb < y.verb end)
 -- `player.character.insert()` is observed as a chain whose first segment is the
 -- ATTRIBUTE `character`, so a methods-only table makes a real member look absent.
 -- Operators (`[]`, `#`) stay out — they are not name-addressable.
+-- ── EVERY METHOD'S PARAMETER LIST, STRUCTURED (CART-1934) ─────────────────────
+-- `sigs` above is a RENDERING for hover, and only for the 9 global objects' classes; a port needs the parameters
+-- themselves for every class: `LuaPlayer::set_quick_bar_slot` went (index, filter) -> (page_index, slot_index,
+-- filter) in 2.1, a break no name diff sees. Keyed `Class::method` on the DECLARING class (the consumer walks
+-- `parent`, as the class table's closure does). A parameter is { n = name, o = optional }, in CALL ORDER:
+-- ⚠ v6 lists `parameters` ALPHABETICALLY and gives the position in `order` (set_quick_bar_slot is
+-- [filter, index] with orders 1, 0), so the array index is not the position. `tt` = takes ONE table argument
+-- (v5 `takes_table`, v6 `format.takes_table`) — its parameters are that table's fields, not positions; `va` = a
+-- variadic tail.
+local params, n_params = {}, 0
+for _, c in ipairs(api.classes or {}) do
+    for _, m in ipairs(c.methods or {}) do
+        local ps = {}
+        for i, p in ipairs(m.parameters or {}) do ps[#ps + 1] = { n = p.name, o = p.optional == true, k = p.order or (i - 1) } end
+        table.sort(ps, function (a, b) return a.k < b.k end)
+        for _, p in ipairs(ps) do p.k = nil end
+        local tt = m.takes_table or (type(m.format) == 'table' and m.format.takes_table) or false
+        params[c.name .. '::' .. m.name] = { p = ps, tt = tt == true, va = (m.variadic_parameter ~= nil or m.variadic_type ~= nil) }
+        n_params = n_params + 1
+    end
+end
+
 local classes, n_class, n_parent, n_cmembers = {}, 0, 0, 0
 for _, c in ipairs(api.classes or {}) do
     local mem = {}
@@ -373,9 +395,13 @@ local profile = {
     free = free, free_sigs = free_sigs,
     -- the `defines` value namespaces, enumerated (CART-0651): path -> { member = true }; nil when the document has none
     enums = next(enums) and enums or nil,
+    -- every class method's parameters in call order (CART-1934): `Class::method` -> { p = { { n, o } }, tt, va }
+    params = params,
 }
 
-local out = here .. '/../lua/cartograph/spec/profile/' .. RUNTIME .. '.mpack'
+-- arg[4]: another OUTPUT DIRECTORY (a scratch run beside the shipped artifacts; default: the shipped profile dir)
+local outdir = (arg and arg[4] and arg[4] ~= '') and arg[4] or (here .. '/../lua/cartograph/spec/profile')
+local out = outdir .. '/' .. RUNTIME .. '.mpack'
 local tmp = out .. '.tmp.' .. vim.fn.getpid()
 local wf = assert(io.open(tmp, 'wb'))
 wf:write(vim.mpack.encode(profile)); wf:close()
@@ -394,6 +420,7 @@ for _, g in ipairs(api.global_objects) do
 end
 io.write(('  full class table: %d classes, %d with a parent, %d member names\n')
     :format(n_class, n_parent, n_cmembers))
+io.write(('  method parameter lists: %d\n'):format(n_params))
 io.write(('  registry TEMPLATES derived: %d\n'):format(n_tpl))
 for _, t in ipairs(templates) do
     io.write(('    %-34s %-11s key=%s fn=%s%s\n'):format(t.verb, t.kind,

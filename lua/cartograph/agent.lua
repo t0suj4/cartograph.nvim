@@ -2537,7 +2537,9 @@ end
 -- ⚠ THE VERDICT IS THE NAME'S, and every site of a name shares it: the profiles answer per name. ⚠ KEPT MEANS THE NAME
 -- IS KEPT, not that the call still works — a changed signature (the get/set_quick_bar_slot `page` argument) and a changed
 -- behaviour are not measured; a note says so on every answer.
-local SITE_VERDICTS = { 'lost', 'moved', 'kept', 'gained', 'not-adjudicable' }
+local SITE_VERDICTS = { 'lost', 'moved', 'kept', 'gained', 'not-adjudicable', 'signature-changed' }
+-- (a NAME's verdicts; `signature-changed` is a SITE's: one name's sites can differ by their argument count)
+local NAME_VERDICTS = { 'lost', 'moved', 'kept', 'gained', 'not-adjudicable' }
 local function v_portability_sites(store, args)
     local port, ext = require 'cartograph.portability', require 'cartograph.externals'
     local pre, bad = version_pair(args)
@@ -2607,13 +2609,65 @@ local function v_portability_sites(store, args)
     end
     local P, atr, callrec = require 'cartograph.pos', require 'cartograph.at', require 'cartograph.callrec'
     local rows, total, by_site, names = {}, 0, {}, {}
-    for _, v in ipairs(SITE_VERDICTS) do by_site[v], names[v] = 0, 0 end
+    for _, v in ipairs(SITE_VERDICTS) do by_site[v] = 0 end
+    for _, v in ipairs(NAME_VERDICTS) do names[v] = 0 end
     for name, v in pairs(verdict) do names[v] = names[v] + 1 end
+    -- ★ A KEPT NAME WITH A NEW SIGNATURE (CART-1934): the api artifacts carry every class method's parameters in call
+    -- order, so a kept METHOD is compared between the two versions — on the global's class for `<global>.<method>`,
+    -- on the receiver's class when the audit typed it, else on EVERY class that declares it, which must all agree (a
+    -- disagreement decides nothing). A changed signature is checked against each SITE's argument count: `breaks`
+    -- (fits the old parameters, not the new), `shifted` (a written position now names another parameter), `fits`
+    -- (still a valid call: the site stays kept), `unknown` (a table argument, or an unknowable count)
+    local pm = require 'cartograph.spec.profile'
+    local artA, artB = cmeta and pm.load(cmeta.from), cmeta and pm.load(cmeta.to)
+    local have_sigs = artA and artB and artA.params and artB.params and true or false
+    local sigmemo, sigs = {}, { names = 0, compatible = 0, ambiguous = 0, by_arity = { breaks = 0, shifted = 0, fits = 0, unknown = 0 } }
+    local function signature_of(name)
+        if sigmemo[name] ~= nil then return sigmemo[name] or nil end
+        sigmemo[name] = false
+        if not have_sigs or verdict[name] ~= 'kept' then return nil end
+        local root, m = name:match('^([%w_]+)[.:]([%w_]+)$')
+        if not root then m = name:match('[.:]([%w_]+)$') end
+        if not m then return nil end
+        local classes = {}
+        local g = root and (artA.global2class or {})[root]
+        local rcv = (eb[name] or {}).receiver
+        if g then classes = { g }
+        elseif type(rcv) == 'table' and rcv.class and rcv.outcome == 'determined' then classes = { rcv.class }
+        -- every declaring class ONLY for a name decided by its member name: a name a PROFILE kept whose root is no
+        -- api global (`string.find`, the language's own library) is not a method of any of these classes
+        elseif bymember[name] and fs and fs[m] then for cname in pairs(fs[m]) do classes[#classes + 1] = cname end end
+        table.sort(classes)
+        local pick, key
+        for _, cname in ipairs(classes) do
+            local pa, pb = port.method_params(artA, cname, m), port.method_params(artB, cname, m)
+            if pa and pb then
+                local k = port.render_params(pa) .. ' -> ' .. port.render_params(pb)
+                if key and k ~= key then sigs.ambiguous = sigs.ambiguous + 1; return nil end
+                key, pick = k, { pa = pa, pb = pb }
+            end
+        end
+        if not pick then return nil end
+        local sv, sd = port.signature_verdict(pick.pa, pick.pb)
+        if sv ~= 'signature-changed' then return nil end
+        -- a COMPATIBLE change (only optional parameters / keys added) breaks no call that fit before: counted, not a finding
+        if sd.compatible then sigs.compatible = sigs.compatible + 1; return nil end
+        sd.pa, sd.pb = pick.pa, pick.pb
+        sigs.names = sigs.names + 1
+        sigmemo[name] = sd
+        return sd
+    end
     for _, c in callrec.each(store.data) do
         local base, member = ext.site(c)
         if base then
             local name = member and (base .. '.' .. member) or base
             local v = verdict[name] or 'not-adjudicable'
+            local sd, fit, fitwhy = signature_of(name), nil, nil
+            if sd then
+                fit, fitwhy = port.arity_fit(sd.pa, sd.pb, port.call_nargs(c))
+                sigs.by_arity[fit] = sigs.by_arity[fit] + 1
+                if fit ~= 'fits' then v = 'signature-changed' end
+            end
             total = total + 1
             by_site[v] = by_site[v] + 1
             local file = callrec.file(c)
@@ -2635,7 +2689,9 @@ local function v_portability_sites(store, args)
                         or (v ~= 'not-adjudicable' and 'profile' or NUL),
                     member = mv and mv.member or NUL, classes = mv and mv.classes or NUL,
                     to = newform[name] and newform[name].to or NUL,
-                    basis = newform[name] and newform[name].basis or NUL }
+                    basis = newform[name] and newform[name].basis or NUL,
+                    signature = sd and { from = sd.from, to = sd.to, added = sd.added, removed = sd.removed } or NUL,
+                    arity = fit or NUL, arity_why = nn(fitwhy) }
             end
         end
     end
@@ -2646,10 +2702,15 @@ local function v_portability_sites(store, args)
     end)
     local subject = { from = a.runtime, to = b.runtime, sites = total, by_site = by_site, names = names,
         -- (CART-1939) names a profile could not adjudicate, decided by the METHOD NAME against both class spaces
-        refined = refined, class_tables = cmeta or NUL }
+        refined = refined, class_tables = cmeta or NUL,
+        -- (CART-1934) kept METHOD names whose parameters changed, and their sites by argument fit
+        signatures = have_sigs and sigs or NUL }
+    local not_measured = have_sigs and { 'behaviour-changed' } or { 'signature-changed', 'behaviour-changed' }
     local notes = move_notes(store, { { kind = 'verdict-is-the-names', premise = 'granularity',
-        why = 'the profiles answer per NAME: every site of a name carries that name\'s verdict. `kept` means the NAME is kept, not that the call still works — a changed SIGNATURE (an added or removed parameter) and a changed BEHAVIOUR are not measured here',
-        evidence = { not_measured = { 'signature-changed', 'behaviour-changed' } } } })
+        why = have_sigs
+            and 'the profiles answer per NAME: every site of a name carries that name\'s verdict — except `signature-changed`, a SITE\'s: a kept method whose parameters changed, at a site whose argument count breaks or shifts against them (a site that still fits stays `kept`). A changed BEHAVIOUR is not measured'
+            or 'the profiles answer per NAME: every site of a name carries that name\'s verdict. `kept` means the NAME is kept, not that the call still works — the api artifacts carry no parameter lists here, so a changed SIGNATURE is not measured, nor a changed BEHAVIOUR',
+        evidence = { not_measured = not_measured } } })
     if not fs then
         notes[#notes + 1] = { kind = 'no-member-check', premise = 'class-space',
             why = ('a method on an object was NOT checked by name against the two versions\' classes: %s'):format(tostring(tsp)),
@@ -5025,7 +5086,7 @@ M.VERBS = {
                 desc = 'the OLD environment profile (portability_targets lists them)' },
             { name = 'to', type = 'string', required = true, desc = 'the NEW environment profile' },
             { name = 'file', type = 'string', desc = 'only the sites in this file (a path suffix)' },
-            { name = 'verdict', type = 'string', desc = 'only the sites with this verdict: lost | moved | kept | gained | not-adjudicable' },
+            { name = 'verdict', type = 'string', desc = 'only the sites with this verdict: lost | moved | kept | gained | not-adjudicable | signature-changed' },
             { name = 'limit', type = 'integer', desc = 'max rows (default 200); a clip is reported as a note' },
         },
         run = v_portability_sites,

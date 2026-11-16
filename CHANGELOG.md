@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — `portability_sites`: signature changes are port sites (agent surface, additive)
+
+- New site verdict `signature-changed`: a kept method whose parameters changed between the two versions' api
+  artifacts, at a site whose argument count `breaks` (fits the old parameters, not the new), is `shifted` (an inserted
+  parameter moved a written one) or is `unknown` (a table argument, an unknowable count). Rows carry `signature`
+  `{ from, to, added, removed }`, `arity` and `arity_why`; `subject.signatures` counts them. A site that still fits
+  stays `kept`, and a compatible change (only optional parameters / keys added) is no finding (CART-1934).
+- The Factorio api artifacts (`lua-factorio-api`, `-20`, `-11`) carry a new `params` field: every class method's
+  parameters in call order. Re-distilled from their recorded sources; every existing field is unchanged.
+
 ## 2026-11-16 — `portability_sites` decides methods on objects by name (agent surface, additive)
 
 - A site whose name no profile adjudicates (`player.teleport`: a method on an object) is decided by its METHOD NAME

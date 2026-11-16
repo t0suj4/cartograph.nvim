@@ -75,10 +75,12 @@ test('portability_sites: every external call site carries its name\'s verdict â€
     ok(at(a, 8, 3) and at(a, 8, second - 1), 'one row per SITE, the second at its character column: ' .. vim.inspect(a.result))
     eq(10, a.subject.sites)
     eq({ lost = 2, moved = 1, kept = 2, gained = 1, ['not-adjudicable'] = 2 }, a.subject.names)
-    eq({ lost = 2, moved = 1, kept = 4, gained = 1, ['not-adjudicable'] = 2 }, a.subject.by_site)
+    eq({ lost = 2, moved = 1, kept = 4, gained = 1, ['not-adjudicable'] = 2, ['signature-changed'] = 0 }, a.subject.by_site)
     local granular
     for _, n in ipairs(a.notes) do if n.kind == 'verdict-is-the-names' then granular = n end end
-    ok(granular and vim.tbl_contains(granular.evidence.not_measured, 'signature-changed'), 'kept is the NAME kept: a signature change is not measured, and it says so')
+    -- (CART-1934: the shipped api artifacts carry parameter lists, so a signature IS measured; a behaviour is not)
+    ok(granular and vim.tbl_contains(granular.evidence.not_measured, 'behaviour-changed')
+        and not vim.tbl_contains(granular.evidence.not_measured, 'signature-changed'), 'what is not measured, said: ' .. vim.inspect(granular))
     vim.fn.delete(root, 'rf')
 end)
 
