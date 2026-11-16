@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — C++ member-field receivers are typed too (graph; cache v313)
+
+- `m_env->step()` inside a member function, where `m_env` is a field the class declares (usually in its header), now
+  resolves through the field's declared class, as a declared local does. `this->m_env->step()` too. luanti/src: +542
+  resolved, `qhow = 'field'` (CART-2112).
+- `data.fieldtypes` gains C++ rows `{ typename, field, ftype, ptr }`, where `ptr` is the pointer depth. A call record
+  carries `rfld` (owner class, field, operator).
+
 ## 2026-11-16 — a chain whose head only a profile resolves is typed on the first open (graph; cache v311)
 
 - `x.querySelectorAll(s).forEach(…)`, where the node profile resolves `querySelectorAll` and declares its return type

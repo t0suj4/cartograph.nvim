@@ -66,3 +66,30 @@ test('cpp recv: the class of `ns::Cls::m` is its INNERMOST scope; a resolved cal
     ok(c.to and c.to:match('ns::Cls::kick@'), vim.inspect(c))
     eq('recv', c.prov)
 end)
+
+test('cpp recv: a FIELD receiver is typed by its class\'s declaration in another file; the operator must fit (CART-2112)', function ()
+    if not parser_available('cpp') then skip 'no cpp parser' end
+    local data = ts.extract(tree({
+        ['env.h'] = 'class Env {\npublic:\n  int stepAll(float dt);\n};\nclass Map { public: int stepAll(float dt); };\n',
+        ['env.cpp'] = '#include "env.h"\nint Env::stepAll(float dt) { return 1; }\nint Map::stepAll(float dt) { return 2; }\n',
+        ['server.h'] = '#include "env.h"\nclass Server {\npublic:\n  int tick();\n  Env *m_env;\n  Env m_val;\n  Map *m_map;\n};\n',
+        ['server.cpp'] = table.concat({
+            '#include "server.h"',
+            'int Server::tick() {',
+            '  m_env->stepAll(1.0f);',        -- 2: pointer field, ->
+            '  m_val.stepAll(1.0f);',         -- 3: value field, .
+            '  m_env.stepAll(1.0f);',         -- 4: `.` on a pointer field
+            '  this->m_map->stepAll(1.0f);',  -- 5: this->field->
+            '  return 0;',
+            '}', '' }, '\n'),
+    }))
+    local function pv(line) local c = at(data, 'server.cpp', line); return { c.to, c.prov, c.qhow } end
+    eq({ 'env.cpp::Env::stepAll@1', 'recv', 'field' }, pv(2))
+    eq({ 'env.cpp::Env::stepAll@1', 'recv', 'field' }, pv(3))
+    eq(nil, at(data, 'server.cpp', 4).to, 'the operator does not fit the declarator')
+    eq({ 'env.cpp::Map::stepAll@2', 'recv', 'field' }, pv(5))
+    local rows = {}
+    for _, f in ipairs(data.fieldtypes or {}) do if f.typename == 'Server' then rows[#rows + 1] = f.field .. ':' .. f.ftype .. ':' .. f.ptr end end
+    table.sort(rows)
+    eq({ 'm_env:Env:1', 'm_map:Map:1', 'm_val:Env:0' }, rows)
+end)

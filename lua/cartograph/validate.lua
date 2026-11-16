@@ -202,6 +202,7 @@ M.CALL_FIELDS = {
     -- retrieval (LibStub("X")/:GetModule("Y")) resolves to (the registered table)
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     qcls = true, -- the class as written a qualified key names (php's class veto, CART-0735)
+    rfld = true, -- a FIELD receiver (cpp): owner class \31 field \31 operator — typed via data.fieldtypes (CART-2112)
     rcls = true, -- the receiver's declared / enclosing CLASS (cpp spec.recv_class): the `recv` pass's key (CART-2111)
     qhow = true, -- qualify_call's MECHANISM: binder / self / super / ctor / written — prov `recv` vs `base` (CART-0695)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)

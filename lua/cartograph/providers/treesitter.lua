@@ -5178,7 +5178,7 @@ local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     -- the receiver's CLASS keys a still-unresolved call (cpp, CART-2111); named `recv` so it stamps that provenance
-    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail) end },
+    { name = 'recv', run = function (x) return M._resolve_recv_class(x.cv, x.exact, x.addref, x.tail, x.data.fieldtypes) end },
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
@@ -5277,7 +5277,7 @@ M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
 --- the mechanisms of qualify_call's 6th value that are RECEIVER TYPING (CART-0695): the key's class was inferred for
 --- the receiver, not written at the call. `written` (a class the source names) and any other value are not
-M.RECV_HOW = { binder = true, self = true, super = true, ctor = true }
+M.RECV_HOW = { binder = true, self = true, super = true, ctor = true, field = true }
 --- 'recv' when the call's typed key itself matched its target exactly, else 'base'
 function M._base_prov(how, full, to, exact, rkey, node_index)
     -- (rkey: the receiver-class key a spec recorded as a side fact — cpp's rcls::callee, CART-2111 — counts the same,
@@ -5298,11 +5298,37 @@ end
 --- binder class / enclosing class) resolves to `<class>::<callee>` when exactly one definition of that key, in the
 --- call's language, exists. ADDITIVE: it never touches a resolved call; an overload pair or a missing key leaves the
 --- call as it was (an inherited method is the super pass's)
-function M._resolve_recv_class(cv, exact, addref, tail)
+function M._resolve_recv_class(cv, exact, addref, tail, fieldtypes)
     local cget, cset = cv.get, cv.set
     local n = 0
+    -- (CART-2112) owner \31 field -> { ftype, ptr } from data.fieldtypes; two different declarations of one owner's field
+    -- (same-named classes in two files) decide nothing — false
+    local fmap
+    local function field_type(rf)
+        local own, fld, op = rf:match('^(.-)\31(.-)\31(.*)$')
+        if not own then return nil end
+        if not fmap then
+            fmap = {}
+            for _, f in ipairs(fieldtypes or {}) do
+                if f.ptr ~= nil then
+                    local k = f.typename .. '\31' .. f.field
+                    local cur = fmap[k]
+                    if cur == nil then fmap[k] = { f.ftype, f.ptr }
+                    elseif cur and (cur[1] ~= f.ftype or cur[2] ~= f.ptr) then fmap[k] = false end
+                end
+            end
+        end
+        local t = fmap[own .. '\31' .. fld]
+        if not t then return nil end
+        -- the operator must fit the declarator, as for a binder: `->` on a pointer, `.` on a value / reference
+        if (op == '->') ~= (t[2] == 1) or (op == '.' and t[2] ~= 0) then return nil end
+        return t[1]
+    end
     for i = 1, cv.n do
         local rc = not cget(i, 'to') and cget(i, 'rcls')
+        local rf = not rc and not cget(i, 'to') and cget(i, 'rfld')
+        local byfield = false
+        if rf then rc = field_type(rf); byfield = rc ~= nil end
         if rc then
             local file = cget(i, 'file')
             local callee = tostring(cget(i, 'callee'))
@@ -5324,6 +5350,7 @@ function M._resolve_recv_class(cv, exact, addref, tail)
                 cset(i, 'to', cands[1].id)
                 cset(i, 'refused', nil)
                 cset(i, 'ext', nil)
+                if byfield then cset(i, 'qhow', 'field') end
                 local cfn = cget(i, 'fn')
                 if cfn then
                     local cline = cget(i, 'line')
@@ -9720,10 +9747,11 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qhow = q and hw or nil
                     end
                     -- the receiver's CLASS as a side fact (cpp, CART-2111): read by the `recv` pass, never a key here
-                    local rcls
+                    local rcls, rfld
                     if spec.recv_class then
-                        local rc, rh = spec.recv_class(calln, src, jvt_sm)
+                        local rc, rh, rf = spec.recv_class(calln, src, jvt_sm)
                         if rc then rcls, qhow = rc, qhow or rh end
+                        rfld = rf
                     end
                     -- ★ A STRING RECEIVER MAKES IT THE STDLIB'S (CART-1062): `('%s'):format(x)` keys `string.format`,
                     -- which the spec's stdlib prefixes answer as external — instead of the name-match landing it on
@@ -10127,6 +10155,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qcls = qcls, -- the class AS WRITTEN that the key names (php, CART-0735: the class veto)
                         qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
                         rcls = rcls, -- the receiver's class (cpp spec.recv_class): the `recv` pass's key (CART-2111)
+                        rfld = rfld, -- a FIELD receiver: owner class \31 field \31 operator, typed via data.fieldtypes (CART-2112)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         -- identifier receiver (`x.foo`): the local name, for
@@ -10240,7 +10269,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             for _, f in ipairs(spec.scan_fields(tsroot, src)) do
                 data.fieldtypes = data.fieldtypes or {}
                 data.fieldtypes[#data.fieldtypes + 1] = { typename = f.typename,
-                    field = f.field, ftype = f.ftype, file = file }
+                    field = f.field, ftype = f.ftype, file = file, ptr = f.ptr } -- (ptr: cpp's pointer depth, CART-2112)
             end
         end
     end

@@ -103,6 +103,40 @@ local function cpp_template_param(n, name, src)
     end
     return false
 end
+--- ★ A CLASS'S FIELDS AND THEIR DECLARED CLASS (CART-2112): data.fieldtypes rows { typename, field, ftype, ptr } for
+--- every field a class / struct body declares with a named class type (tsutil.c_decl_type: no primitive, auto, std::,
+--- template instance, or an enclosing template's parameter). The `recv` pass reads them for `m_env->step()` inside
+--- a member function — the field lives in the class declaration, usually a header another worker parsed
+local function cpp_scan_fields(tsroot, src)
+    local out = {}
+    local stack = { tsroot }
+    while #stack > 0 do
+        local n = table.remove(stack)
+        local t = n:type()
+        if t == 'class_specifier' or t == 'struct_specifier' then
+            local nm, body = n:field('name')[1], n:field('body')[1]
+            if nm and nm:type() == 'type_identifier' and body then
+                local cls = node_text(nm, src)
+                for _, fd in tsutil.inamed, body, -1 do
+                    if fd:type() == 'field_declaration' then
+                        local tyn = fd:field('type')[1]
+                        for _, d in ipairs(fd:field('declarator')) do
+                            local id = d
+                            while id and id:type() ~= 'field_identifier' do id = id:field('declarator')[1] end
+                            local ty, ptr = tsutil.c_decl_type(tyn, d, src)
+                            if id and ty and not cpp_template_param(n, ty, src) then
+                                out[#out + 1] = { typename = cls, field = node_text(id, src), ftype = ty, ptr = ptr }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        for _, c in tsutil.inamed, n, -1 do stack[#stack + 1] = c end
+    end
+    return out
+end
+
 local function cpp_recv_class(calln, src, model)
     if calln:type() ~= 'call_expression' or not model then return nil end
     local f = calln:field('function')[1]
@@ -122,9 +156,23 @@ local function cpp_recv_class(calln, src, model)
         local cls = cpp_enclosing_class(calln, src)
         return cls, cls and 'self' or nil
     end
+    -- (3rd value, CART-2112: a FIELD receiver — `m_env->step()` with m_env bound by no param or local, or
+    -- `this->m_env->step()` — as owner class \31 field \31 operator; the recv pass looks the field's type up)
+    local function field_fact(fname)
+        local own = cpp_enclosing_class(calln, src)
+        return own and (own .. '\31' .. fname .. '\31' .. opt) or nil
+    end
+    if arg:type() == 'field_expression' then
+        local ta, top, tf = arg:field('argument')[1], arg:field('operator')[1], arg:field('field')[1]
+        if ta and ta:type() == 'this' and top and node_text(top, src) == '->' and tf and tf:type() == 'field_identifier' then
+            return nil, nil, field_fact(node_text(tf, src))
+        end
+        return nil
+    end
     if arg:type() ~= 'identifier' then return nil end
     local chain, k = model.resolve(node_text(arg, src), calln)
-    local b = k > 0 and chain[1] or nil
+    if k == 0 then return nil, nil, field_fact(node_text(arg, src)) end
+    local b = chain[1]
     if not (b and b.ty) then return nil end
     if (opt == '->') ~= (b.ptr == 1) or (opt == '.' and b.ptr ~= 0) then return nil end
     if cpp_template_param(calln, b.ty, src) then return nil end
@@ -133,6 +181,7 @@ end
 
 return {
     recv_class = cpp_recv_class, -- the receiver's declared / enclosing class, a side fact for the `recv` pass (CART-2111)
+    scan_fields = cpp_scan_fields, -- a class's fields and their declared class: data.fieldtypes (CART-2112)
     clink = tsutil.c_linkage, -- extern "C" evidence for the C/C++ join bridge (CART-1079)
     flocal = tsutil.c_file_local, -- `static` / source-file macro: invisible outside its file (CART-1081)
     torn_context = tsutil.c_torn_context, -- tear by damaged CONTEXT, not by position after an error (CART-1084)
