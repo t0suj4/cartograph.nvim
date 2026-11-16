@@ -2,6 +2,20 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — a polyglot root applies a profile PER BOUNDARY (agent surface + graph fields, additive)
+
+- A root whose build markers below (up to two directories down: `rebar.config`, `package.json`, …) add a language
+  the upward probe lacks is POLYGLOT: each file takes the profile of its nearest boundary declaring its language. The
+  brotardcast parent opened as one root resolves 64,757 calls, up from 39,576 (+25,181, all `stdlib`: OTP on the
+  ejabberd side, node on converse.js) (CART-2108).
+- The graph carries `profiles` (the boundaries: dir, source user / computed / default, markers, language -> profile);
+  `profile` on such a graph is a display summary of the runtimes (`node+otp`).
+- `graph.profile` gains `boundaries` on a polyglot root; `below` keeps the shapes NO boundary applies (upward wins for
+  a language). `graph_info` adds a `profile-boundaries` note.
+- Cache: a polyglot root's manifest carries the boundaries' canonical key and is gated on it: a marker added or removed
+  below is a clean miss. A root whose markers below add nothing (51 of 51 cached roots but hugo) keeps its key, its
+  graph and its envelope byte for byte. No VERSION bump, no protocol bump.
+
 ## 2026-11-16 — `sites { kind = 'literal' }`: where a name is handled as a STRING (agent surface, additive)
 
 - `sites` takes `kind = 'literal'`: every string literal whose content is the name (`fname == 'loadstring'`), found

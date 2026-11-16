@@ -92,6 +92,9 @@ test('cache: every resolver input the pass table reads survives the round trip',
     local EXEMPT = {
         edges = 'already persisted',
         root = 'already persisted (manifest)',
+        -- a polyglot root's boundaries are the WHOLE TREE's, not a file's: they ride the manifest (cache.manifest_of,
+        -- restored by empty_data) and the read gate compares their canonical key (CART-2108)
+        profiles = 'already persisted (manifest), and gated',
         beans = 'rides the implements row — no file of its own',
         -- store.lua sets selft_seed per call and clears it immediately: "never
         -- persist a resolution input onto the graph". The self-type map has its

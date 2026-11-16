@@ -389,7 +389,7 @@ end
 --- the profile part of the graph doc (CART-0815), memoized per (root, profile) on the store — a root-keyed field, the
 --- band-safe shape (CART-0823). `selected` = the shape and directory that select it (up the ancestor chain), or
 --- `override` when the graph's profile is not the one shapes select; `below` = shapes under the root whose profile the
---- graph does NOT apply.
+--- graph does NOT apply; `boundaries` (a polyglot root only, CART-2108) = the boundaries that attach a profile.
 function M.profile_doc(store)
     local d = store.data or {}
     if type(d.root) ~= 'string' or d.root == '' or d.root:match('^%w+://') then
@@ -401,7 +401,14 @@ function M.profile_doc(store)
     local ok, sel = pcall(shapes.profile_for, d.root)
     sel = ok and sel or nil
     local selected = NUL
-    if d.profile and sel and sel.profile == d.profile then
+    -- ★ BOUNDARIES (CART-2108): a POLYGLOT graph applies a profile per boundary — its name is the summary
+    -- ('node+otp'), its `selected` the root boundary's upward selection, and a shape below is APPLIED when its
+    -- boundary resolves its language to its profile. A trivial graph answers exactly as before
+    local Bd = d.profiles and require('cartograph.boundary') or nil
+    local B = Bd and Bd.from_data(d.profiles) or nil
+    if B then
+        if sel then selected = { shape = sel.name, dir = sel.dir, inherited = sel.inherited or false } end
+    elseif d.profile and sel and sel.profile == d.profile then
         selected = { shape = sel.name, dir = sel.dir, inherited = sel.inherited or false }
     elseif d.profile then
         selected = 'override'
@@ -409,9 +416,26 @@ function M.profile_doc(store)
     local below = {}
     local okb, rows = pcall(shapes.profiles_below, d.root)
     for _, r in ipairs(okb and rows or {}) do
-        if r.profile ~= d.profile then below[#below + 1] = { dir = r.dir, shape = r.name, profile = r.profile } end
+        local applied
+        if B then
+            local p = require('cartograph.spec.profile').load(r.profile)
+            applied = p and p.lang and Bd.resolve(B, r.dir .. '/', p.lang) == r.profile
+        else
+            applied = r.profile == d.profile
+        end
+        if not applied then below[#below + 1] = { dir = r.dir, shape = r.name, profile = r.profile } end
     end
     local doc = { name = nn(d.profile), selected = selected, below = below }
+    if B then
+        -- (polyglot only — a new field: each boundary that attaches a profile, its source and markers)
+        local bl = {}
+        for _, b in ipairs(B.list) do
+            if next(b.langs) then
+                bl[#bl + 1] = { dir = b.dir, source = b.source, markers = b.markers, langs = b.langs }
+            end
+        end
+        doc.boundaries = bl
+    end
     store._profile_memo = { root = d.root, profile = d.profile, doc = doc }
     return doc
 end
@@ -836,6 +860,21 @@ local function v_graph_info(store)
     -- carry their own build-system shapes, and their environment calls (OTP's stdlib: 14,735 on brotardcast) read as
     -- external while every count looks clean. Named here, so an empty profile is not mistaken for a language that has none
     local pd = M.profile_doc(store)
+    if pd.boundaries then
+        -- ★ THE BOUNDARIES IN FORCE (CART-2108): a polyglot root resolves each file's profile through its boundary
+        local parts = {}
+        for _, b in ipairs(pd.boundaries) do
+            local ls = {}
+            for l, rt in pairs(b.langs) do ls[#ls + 1] = l .. '=' .. rt end
+            table.sort(ls)
+            parts[#parts + 1] = ('%s %s (%s)'):format(b.dir == '' and '.' or b.dir, table.concat(ls, ','), b.source)
+        end
+        notes = notes or {}
+        notes[#notes + 1] = { kind = 'profile-boundaries', premise = 'profile-selection',
+            why = ('this root is POLYGLOT: each file takes the profile of its nearest boundary declaring its language — %s. Detected from build markers up from the root and down to depth %d'):format(
+                table.concat(parts, ' · '), require('cartograph.boundary').DEPTH),
+            evidence = { profile = pd.name, boundaries = pd.boundaries } }
+    end
     if #pd.below > 0 then
         local parts, profs = {}, {}
         for i, r in ipairs(pd.below) do

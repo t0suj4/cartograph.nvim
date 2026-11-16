@@ -158,7 +158,7 @@ M.SIGS = {
 -- runtime source is here. A tree that holds the source summarizes it as its own code
 M.DERIVED = nil
 function M.derived_for(store)
-    local prof = store.data and store.data.profile
+    local prof = store.data and require('cartograph.boundary').runtime_for_lang(store.data, 'lua') -- (CART-2108)
     local ok, HS = pcall(require, 'cartograph.hostsummary')
     local hs = ok and prof and HS.of(prof)
     if not hs then return nil end
@@ -734,7 +734,8 @@ end
 local function profile_methods(store, s)
     if s.pmeth ~= nil then return s.pmeth or nil end
     local P = require 'cartograph.spec.profile'
-    local prof = store.data.profile and P.load(store.data.profile)
+    local prt = require('cartograph.boundary').runtime_for_lang(store.data, 'lua') -- (the Lua profile, CART-2108)
+    local prof = prt and P.load(prt)
     local out = false
     if prof and prof.sigs then
         out = {}
@@ -746,7 +747,7 @@ local function profile_methods(store, s)
         end
         add(prof.sigs)
         local base = P.base_for(prof.lang)
-        if base and base ~= store.data.profile then local bp = P.load(base); add(bp and bp.sigs) end
+        if base and base ~= prt then local bp = P.load(base); add(bp and bp.sigs) end
     end
     s.pmeth = out
     return out or nil

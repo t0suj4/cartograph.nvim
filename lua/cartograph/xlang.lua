@@ -410,17 +410,19 @@ end
 --- deliberate separate step — it moves the open graph, so it needs a cache VERSION bump
 --- and a gate re-save rather than riding along here.
 local function profile_bindings(data)
-    local name = data and data.profile
-    if not name then return {} end
-    local ok, pm = pcall(require, 'cartograph.spec.profile')
-    local prof = ok and pm.load(name) or nil
+    -- (every runtime the graph applies: one, or a polyglot root's boundaries' — CART-2108)
     local out = {}
-    for _, t in ipairs((prof or {}).templates or {}) do
-        out[#out + 1] = { export = { verb = t.verb, name = t.key or 1 },
-            -- provenance: which profile declared it, and what kind of idiom it is, so a
-            -- consumer can say "this IS the platform's registry" rather than just
-            -- suppressing a finding silently
-            template = t, profile = name }
+    local ok, pm = pcall(require, 'cartograph.spec.profile')
+    if not ok then return out end
+    for _, name in ipairs(require('cartograph.boundary').runtimes_of(data)) do
+        local prof = pm.load(name)
+        for _, t in ipairs((prof or {}).templates or {}) do
+            out[#out + 1] = { export = { verb = t.verb, name = t.key or 1 },
+                -- provenance: which profile declared it, and what kind of idiom it is, so a
+                -- consumer can say "this IS the platform's registry" rather than just
+                -- suppressing a finding silently
+                template = t, profile = name }
+        end
     end
     return out
 end

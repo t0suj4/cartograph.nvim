@@ -110,7 +110,8 @@ local function reserved_uses(text, lang, prof)
 end
 local function profile_of(store)
     local ok, prf = pcall(function ()
-        return store and store.data and store.data.profile and require('cartograph.spec.profile').load(store.data.profile)
+        local rt = store and store.data and require('cartograph.boundary').runtime_for_lang(store.data, 'lua') -- (CART-2108)
+        return rt and require('cartograph.spec.profile').load(rt)
     end)
     return ok and prf or nil
 end

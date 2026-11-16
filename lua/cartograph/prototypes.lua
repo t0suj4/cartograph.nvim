@@ -78,7 +78,7 @@ M.FACTORIO = {
 --- factorio vocabulary — never off the file extension: a plain Lua project must
 --- not be read as a prototype tree.
 function M.adapter(store)
-    local prof = store.data and store.data.profile
+    local prof = store.data and require('cartograph.boundary').runtime_for_lang(store.data, 'lua') -- (CART-2108)
     if prof == 'lua-factorio' then return M.FACTORIO end
     return nil
 end

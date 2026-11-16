@@ -1,8 +1,8 @@
 -- CART-0815: profile SELECTION walks UP from the root and picks one; a monorepo PARENT (brotardcast: ejabberd/rebar.config,
 -- converse.js/package.json side by side) selected NONE, and 14,735 OTP stdlib calls read as external while graph_info
--- said `index: full, 0 unparsed` — a clean-looking answer. Selection is unchanged here (per-language selection is the
--- open half of the ticket); what changed is that an answer NAMES the profile in force, how it was chosen, and the
--- build-system shapes below the root whose profiles it does not apply.
+-- said `index: full, 0 unparsed` — a clean-looking answer. An answer NAMES the profile in force, how it was chosen, and
+-- the build-system shapes below the root whose profiles it does not apply. Since CART-2108 the parent applies them per
+-- boundary (tests/profileboundaries_spec.lua); `below` keeps what NO boundary applies (upward wins for a language).
 
 local ts    = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
@@ -27,19 +27,35 @@ local MONO = {
     ['apps/core/rebar.config'] = '{deps, []}.\n', -- two levels down
 }
 
-test('profile: a monorepo PARENT applies no profile, and its answers say so and name the shapes below it (CART-0815)', function ()
+test('profile: a monorepo PARENT applies each shape below through its boundary, and names them (CART-0815, CART-2108)', function ()
     local root = tree(MONO)
     open(root)
     local a = agent.answer(store, 'graph_info', {})
-    eq(vim.NIL, a.graph.profile.name, 'no shape at or above the parent')
+    eq('node+otp', a.graph.profile.name, 'the boundaries\' summary — it was NONE before the boundary model')
+    eq(vim.NIL, a.graph.profile.selected, 'nothing at or above the parent selects one')
+    eq({}, a.graph.profile.below, 'every shape below is applied by its boundary')
+    local dirs = {}
+    for _, b in ipairs(a.graph.profile.boundaries) do dirs[#dirs + 1] = b.dir end
+    eq({ 'apps/core', 'srv', 'web' }, dirs, 'two levels down too')
+    eq(nil, note(a, 'profiles-not-applied'))
+    ok(note(a, 'profile-boundaries'), vim.inspect(a.notes))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('profile: a shape below whose profile UPWARD overrides for its language is still reported unapplied (CART-0815, CART-2108)', function ()
+    -- an nvim plugin root (plugin/ + lua/) holding a factorio mod: both Lua — upward wins for the language
+    local root = tree({ ['plugin/p.lua'] = 'local x = 1\n', ['lua/m.lua'] = 'return {}\n',
+        ['mods/m/info.json'] = '{ "name": "m" }\n', ['mods/m/control.lua'] = 'script.on_init(function () end)\n',
+        ['mods/m/data.lua'] = 'local d = 1\n' })
+    open(root)
+    local a = agent.answer(store, 'graph_info', {})
+    eq('nvim', a.graph.profile.name)
+    eq(nil, a.graph.profile.boundaries, 'a TRIVIAL root: the envelope gains no field')
     local below = {}
     for _, r in ipairs(a.graph.profile.below) do below[#below + 1] = r.dir .. '=' .. r.profile end
-    table.sort(below)
-    ok(vim.tbl_contains(below, 'srv=otp'), vim.inspect(below))
-    ok(vim.tbl_contains(below, 'web=node'), vim.inspect(below))
-    ok(vim.tbl_contains(below, 'apps/core=otp'), 'two levels down too: ' .. vim.inspect(below))
+    eq({ 'mods/m=lua-factorio' }, below)
     local n = note(a, 'profiles-not-applied')
-    ok(n and n.why:match('NO profile') and n.why:match('EXTERNAL'), 'graph_info says the parent applies none: ' .. vim.inspect(a.notes))
+    ok(n and n.why:match('the profile nvim') and n.why:match('EXTERNAL'), vim.inspect(a.notes))
     vim.fn.delete(root, 'rf')
 end)
 

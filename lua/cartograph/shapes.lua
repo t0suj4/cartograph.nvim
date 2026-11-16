@@ -516,7 +516,8 @@ end
 --- stays nearest-up and single-valued — it lets an answer NAME what the root does not apply. Bounded: depth <= 2,
 --- hidden / vendored directories skipped, at most `cap` directories probed.
 --- Returns { { dir = rel, name = shape, profile = runtime } }, sorted by dir.
-M.BELOW_SKIP = { node_modules = true, vendor = true, _build = true, deps = true, target = true, dist = true, build = true }
+-- (CART-2108: exactly the approved boundary design's skip list — .git, node_modules, deps, _build; kb polyglot-root-boundaries-design §3)
+M.BELOW_SKIP = { ['.git'] = true, node_modules = true, deps = true, _build = true }
 function M.profiles_below(root, depth, cap)
     depth, cap = depth or 2, cap or 200
     local out, probed = {}, 0
@@ -528,7 +529,7 @@ function M.profiles_below(root, depth, cap)
         while it do
             local n, t = vim.uv.fs_scandir_next(it)
             if not n then break end
-            if t == 'directory' and not n:match('^%.') and not M.BELOW_SKIP[n] then subs[#subs + 1] = n end
+            if t == 'directory' and not M.BELOW_SKIP[n] then subs[#subs + 1] = n end
         end
         table.sort(subs)
         for _, n in ipairs(subs) do

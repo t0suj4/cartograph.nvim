@@ -458,7 +458,7 @@ function M.demand(file)
     -- future narrowing of fileset from silently re-deciding the language.
     local chunk = ts.extract(s.root,
         { files = { file }, fileset = s.fileset, skip_idpass = true,
-            abs = s.abs, packs = s.packs, profile = s.profile,
+            abs = s.abs, packs = s.packs, profile = s.profile, profiles = s.profiles,
             h_lang = s.h_lang, lua_dialect = s.lua_dialect, transport = s.transport })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
@@ -522,12 +522,20 @@ function M.extract(root, o)
     ts.set_h_lang(o.h_lang)
     -- the Lua dialect likewise: resolved ONCE here (and adopted by the parent, which relinks), shipped explicitly
     o.lua_dialect = o.lua_dialect or ts.lua_dialect_for(root, nil)
+    -- the BOUNDARIES likewise (CART-2108): detected ONCE here, shipped to every worker — a polyglot root's per-file
+    -- profile assignment is a property of the whole tree, and the parent's relink reads it from the merged graph.
+    -- A trivial root ships none and stays exactly as before
+    if o.profiles == nil and o.profile == nil and not o.roots and type(root) == 'string' then
+        local Bd = require 'cartograph.boundary'
+        local B = Bd.detect(root)
+        if not B.trivial then o.profiles = Bd.to_data(B) end
+    end
 
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
         o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs,
-            profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect, transport = tstack }))
+            profile = o.profile, profiles = o.profiles, h_lang = o.h_lang, lua_dialect = o.lua_dialect, transport = tstack }))
         return
     end
     local rtp = worker_rtp()
@@ -542,7 +550,9 @@ function M.extract(root, o)
         -- the profile OVERRIDE rides to every worker exactly like packs (CART-0217):
         -- one explicit value decided in the parent, so no worker re-derives it and
         -- none can disagree about which environment it is resolving against
-        profile = o.profile,
+        profile = (o.profiles and require('cartograph.boundary').summary(require('cartograph.boundary').from_data(o.profiles)))
+            or o.profile,
+        profiles = o.profiles, -- (relink reads the boundaries off the merged graph, CART-2108; profile = their summary)
         h_lang = o.h_lang, -- the merged graph carries it, as the inline build does
         lua_dialect = o.lua_dialect,
         capabilities = { calls = true, litdata = true, df = 'lite' },
@@ -550,7 +560,7 @@ function M.extract(root, o)
         mentions = {}, _no_parser = {}, _unparsed = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        packs = o.packs, profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
+        packs = o.packs, profile = o.profile, profiles = o.profiles, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
         transport = tstack, wmetrics = {} }
     M._session = s
 
@@ -755,7 +765,7 @@ function M.extract(root, o)
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
                 fileset = files, skip_idpass = true, abs = abs, packs = o.packs,
-                profile = o.profile, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
+                profile = o.profile, profiles = o.profiles, h_lang = o.h_lang, lua_dialect = o.lua_dialect,
                 transport = tstack }))
         end
         canonicalize()
@@ -813,7 +823,7 @@ function M.extract(root, o)
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
-            profile = o.profile,
+            profile = o.profile, profiles = o.profiles,
             h_lang = o.h_lang, -- the parent's whole-tree answer (CART-0410)
             lua_dialect = o.lua_dialect,
             transport = tspec, -- the serialisable half; the worker rebuilds it

@@ -4033,6 +4033,27 @@ end
 -- settle in ROUNDS — a().b().c() unlocks one link per pass: the
 -- types⇄call-graph mutual fixpoint in its smallest form. Round count is
 -- returned for the measurement protocol. Shared by extract and relink.
+--- the SIGNATURES of the graph's minting profile(s): one profile's table, or — a polyglot root (CART-2108) — a
+--- read-through over each minting runtime's (keys are the profile's own spellings, so they do not collide in practice)
+function M._minting_sigs(data)
+    if not data then return nil end
+    local names = {}
+    if data.profiles then
+        names = require('cartograph.boundary').runtimes(require('cartograph.boundary').from_data(data.profiles))
+    elseif data.profile then
+        names = { data.profile }
+    end
+    local list = {}
+    for _, rt in ipairs(names) do
+        local okp, prof = pcall(_profile_mod.load, rt)
+        if okp and prof and prof.mint and prof.sigs then list[#list + 1] = prof.sigs end
+    end
+    if #list <= 1 then return list[1] end
+    return setmetatable({}, { __index = function (_, k)
+        for _, t in ipairs(list) do local v = t[k]; if v ~= nil then return v end end
+    end })
+end
+
 local function resolve_returns(cv, node_index, exact, addref, data)
     local cget, cset = cv.get, cv.set
     -- ★★★ THE CHAIN HAD NO WAY TO REACH THE PROFILE (CART-0808). Every rung below
@@ -4045,11 +4066,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
     -- The profile is consulted only AFTER the corpus lookup fails, so a project
     -- type of the same name still wins — the nodef ordering the profile law asks
     -- for, applied to the chain.
-    local psigs
-    if data and data.profile then
-        local okp, prof = pcall(_profile_mod.load, data.profile)
-        if okp and prof and prof.mint then psigs = prof.sigs end
-    end
+    local psigs = M._minting_sigs(data)
     -- ci -> the return type of a call this pass STAGED for the profile mint. The
     -- mint runs after every resolution pass, so a staged call has no `to` yet and
     -- a longer chain (`sinon.stub().returns(x).withArgs(y)`) would stall on its
@@ -4914,9 +4931,11 @@ end
 -- name ir.lua also defines) is then that type's member — EXTERNAL, typed-receiver, `inferred` (the member is the
 -- profile's, the receiver is a hedge: a name rebound to another type in the same function breaks it). Two uniquely
 -- owned members naming DIFFERENT types type nothing. A DISPOSITION: no edge is added, a wrong join is withdrawn.
-local function resolve_receiver_type(cv, data, exact, tail)
+local function resolve_receiver_type(cv, data, exact, tail, rtname)
     local P = require 'cartograph.spec.profile'
-    local prof = data.profile and P.load(data.profile)
+    -- (rtname: one runtime of a polyglot root's boundaries, CART-2108 — the pass runs once per runtime)
+    rtname = rtname or data.profile
+    local prof = rtname and P.load(rtname)
     if not (prof and prof.sigs and prof.lang) then return 0 end
     -- every TYPE a receiver could be: the profile's, its language's BASE profile's (luajit: string, file — a file
     -- handle is never mistyped as an nvim type for want of the competitor), and the project's own classes
@@ -4939,7 +4958,7 @@ local function resolve_receiver_type(cv, data, exact, tail)
     end
     add_profile(prof.sigs)
     local base = P.base_for(prof.lang)
-    if base and base ~= data.profile then local bp = P.load(base); add_profile(bp and bp.sigs) end
+    if base and base ~= rtname then local bp = P.load(base); add_profile(bp and bp.sigs) end
     for _, nd in ipairs(data.nodes or {}) do
         if (nd.kind == 'function' or nd.kind == 'method') and nd.file and elang_for(nd.file) == prof.lang then
             local owner, m = tostring(nd.name):match('^(.+):([%w_]+)$')
@@ -5242,6 +5261,14 @@ local RESOLVE_PASSES = {
     -- (WHOLE: the project's classes compete for every receiver, so a subset — ts.relink's early cutoff — saw fewer
     -- competitors and typed `tree:root()` the full graph leaves refused: refresh-parity's step 13, CART-1571)
     { name = 'typed_receiver', whole = true, run = function (x)
+        if x.data.profiles then
+            local B = require 'cartograph.boundary'
+            local n = 0
+            for _, rt in ipairs(B.runtimes(B.from_data(x.data.profiles))) do
+                n = n + resolve_receiver_type(x.cv, x.data, x.exact, x.tail, rt)
+            end
+            return n
+        end
         return resolve_receiver_type(x.cv, x.data, x.exact, x.tail) end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
@@ -7704,19 +7731,48 @@ end
 -- composition (base ⊕ packs) and the L2 profile overlay (base ⊕ L2), once per
 -- lang. extract and relink build the SAME thing over their own active_packs /
 -- active_profile — this is that shared closure, memo per call (fresh per builder).
-local function spec_overlay(active_packs, active_profile)
+local function spec_overlay(active_packs, active_profile, bounds)
     local composed_spec = {}
-    return function (lang, spec)
+    return function (lang, spec, file)
         if not lang then return spec end
-        local c = composed_spec[lang]
+        -- ★ PER BOUNDARY (CART-2108): a POLYGLOT root's profile is the file's shard boundary's for its language — the
+        -- memo keys on (language, profile), never the language alone: two boundaries of one language may carry two
+        -- profiles. A trivial root (bounds nil) keeps the one active profile by language, as before
+        local rt = bounds and file and require('cartograph.boundary').resolve(bounds, file, lang) or nil
+        local key = bounds and (lang .. '\0' .. (rt or '')) or lang
+        local c = composed_spec[key]
         if c == nil then
             c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
-            if active_profile and lang == active_profile.lang then
-                c = setmetatable({ _profile = active_profile }, { __index = c })
+            local prof = bounds and rt and _profile_mod.load(rt) or (not bounds and active_profile and lang == active_profile.lang and active_profile) or nil
+            if prof and prof.lang == lang then
+                c = setmetatable({ _profile = prof }, { __index = c })
             end
-            composed_spec[lang] = c
+            composed_spec[key] = c
         end
         return c
+    end
+end
+
+--- MINT per boundary profile (CART-2108): each minting profile mints only the calls whose file its boundary assigns it
+--- — otp's port must not mint a javascript call, node's not an erlang one
+function M._mint_bounds(data, node_index, bounds)
+    local B = require 'cartograph.boundary'
+    for _, rt in ipairs(B.runtimes(bounds)) do
+        local prof = _profile_mod.load(rt)
+        if prof and prof.mint then
+            local port = profile_port(prof)
+            local memo = {}
+            local function mine(file)
+                local m = memo[file]
+                if m == nil then m = B.resolve(bounds, file, M.lang_of(file)) == rt; memo[file] = m end
+                return m
+            end
+            mint_nodes(data, node_index, prof.runtime .. '::', prof.runtime, function (cget, i)
+                local f = cget(i, 'file')
+                if not (f and mine(f)) then return nil end
+                return port(cget, i)
+            end)
+        end
     end
 end
 
@@ -8277,11 +8333,28 @@ function M.extract(root, opts)
     -- profile, `false` activates none. Recorded on data.profile like the detected
     -- case, so relink/refresh and the cache identity see what was actually used.
     local active_profile = active_profile_for(root, opts and opts.profile)
+    -- ★ BOUNDARIES (CART-2108): with no override, a POLYGLOT root (a build marker below adds a language's profile the
+    -- upward probe lacks) resolves its profile per file — boundary, then language. data.profiles carries the structure
+    -- (relink, workers, the cache); data.profile becomes the display summary. A TRIVIAL root takes the path above,
+    -- unchanged: same profile, same data.profile, same cache key. opts.profiles = the structure a parent decided
+    local bounds
+    if opts and opts.profiles then
+        bounds = require('cartograph.boundary').from_data(opts.profiles)
+    elseif not (opts and opts.profile ~= nil) and type(root) == 'string' then
+        local Bd = require('cartograph.boundary').detect(root)
+        if not Bd.trivial then bounds = Bd end
+    end
+    if bounds then
+        local Bm = require 'cartograph.boundary'
+        data.profiles = Bm.to_data(bounds)
+        data.profile = Bm.summary(bounds)
+        active_profile = nil
+    end
     if active_profile then data.profile = active_profile.runtime end
     -- a FEDERATED extraction keeps the profile's disposed calls as PORTS (no mint): recorded on the graph so relink
     -- keeps honouring it (CART-1160 step 9)
     if opts and opts.profile_mint == false then data.profile_mint = false end
-    local eff_spec = spec_overlay(active_packs, active_profile)
+    local eff_spec = spec_overlay(active_packs, active_profile, bounds)
 
     -- per-name def indexes for the resolution pass
     local exact, tail = {}, {} -- name -> {fn node,...}; last segment -> {...}
@@ -9575,11 +9648,13 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- will not — measured: jquery fell 37.3% -> 36.1% before this
                     -- gate, because its bindings name packages the profile does
                     -- not model. The rewrite must ADD a resolution, never trade one.
+                    -- (the FILE's profile on a polyglot root — its boundary's, CART-2108; else the one active)
+                    local fprof = (bounds and spec._profile) or active_profile
                     local pb = pkgbinds[file]
-                    if pb and next(pb) and active_profile and active_profile.sigs then
+                    if pb and next(pb) and fprof and fprof.sigs then
                         local r, mem = full:match('^([%w_$]+)%.([%w_$]+)$')
                         local pkg = r and pb[r]
-                        if pkg and active_profile.sigs[pkg .. '.' .. mem] then
+                        if pkg and fprof.sigs[pkg .. '.' .. mem] then
                             full = pkg .. '.' .. mem
                         end
                     end
@@ -9589,9 +9664,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- ordinary and often shadows something, so the profile
                     -- confirming the member is the whole warrant.
                     local mb = membinds[file]
-                    if mb and next(mb) and active_profile and active_profile.sigs then
+                    if mb and next(mb) and fprof and fprof.sigs then
                         local key = full:match('^[%w_$]+$') and mb[full]
-                        if key and active_profile.sigs[key] then full = key end
+                        if key and fprof.sigs[key] then full = key end
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
@@ -10187,7 +10262,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         end
         do
             local lang, spec = lang_for(file)
-            spec = eff_spec(lang, spec) -- overlay pack composition (rails)
+            spec = eff_spec(lang, spec, file) -- overlay pack composition (rails); the file's boundary profile (CART-2108)
             -- vendored bundles that dodge the *.min.js name (nocodb's
             -- swagger-ui-bundle.js): a line no human wrote means BUNDLE —
             -- content decides what the filename doesn't say. Opaque
@@ -10390,7 +10465,7 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- cross-file fallback below stays behind the noise floor.
         local short = #name < 3
         local clang, spec = elang_for(file)
-        spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
+        spec = eff_spec(clang, spec, file) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
@@ -11155,7 +11230,9 @@ local MATCH_OPTS = { match_limit = 65536 }
         -- profile's disposed framework calls (ruby-rails). Same inline-vs-relink split.
         -- (a FEDERATED extraction — opts.profile_mint = false — leaves the disposed calls as PORTS: the profile is
         -- mounted as its own band and the linkage is derived over the namespace, cartograph.federation)
-        if active_profile and active_profile.mint and data.profile_mint ~= false then
+        if bounds and data.profile_mint ~= false then
+            M._mint_bounds(data, node_index, bounds)
+        elseif active_profile and active_profile.mint and data.profile_mint ~= false then
             mint_profile_nodes(data, node_index, active_profile)
         end
     else
@@ -11388,12 +11465,15 @@ function M.relink(data, touched, opts)
     -- OWN recorded value, already validated when it was chosen, so re-validating it
     -- here would only create a new failure mode: a warm graph naming a profile since
     -- renamed or removed would make relink THROW instead of degrading to detection.
-    local active_profile = (data.profile and _profile_mod.load(data.profile))
-        or active_profile_for(data.root)
+    -- ★ BOUNDARIES FIRST (CART-2108): a polyglot graph carries data.profiles — its per-file assignment — and its
+    -- data.profile is only the display summary ('node+otp' loads nothing), so relink reads the structure, never the name
+    local bounds = data.profiles and require('cartograph.boundary').from_data(data.profiles) or nil
+    local active_profile = not bounds and ((data.profile and _profile_mod.load(data.profile))
+        or active_profile_for(data.root)) or nil
     -- record the active profile on the parallel-parent result too (extract stamps
     -- it inline; relink is the parallel path — keep the provenance field consistent)
     if active_profile then data.profile = active_profile.runtime end
-    local eff_spec = spec_overlay(active_packs, active_profile)
+    local eff_spec = spec_overlay(active_packs, active_profile, bounds)
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
@@ -11479,7 +11559,7 @@ function M.relink(data, touched, opts)
         -- synjs q3 witness); cross-file fallbacks stay noise-gated
         local short = #name < 3
         local clang, spec = elang_for(file)
-        spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
+        spec = eff_spec(clang, spec, file) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
@@ -12009,7 +12089,9 @@ function M.relink(data, touched, opts)
     if data.stdaliases then mint_std_nodes(data, node_index) end
     -- profile resolution face: covers the parallel parent (relink recomputes
     -- active_profile; data.profile isn't restamped here). Idempotent like above.
-    if active_profile and active_profile.mint and data.profile_mint ~= false then
+    if bounds and data.profile_mint ~= false then
+        M._mint_bounds(data, node_index, bounds)
+    elseif active_profile and active_profile.mint and data.profile_mint ~= false then
         mint_profile_nodes(data, node_index, active_profile)
     end
     -- federated_resolve: cbarg marks the pre-scan added went to the light STUBS

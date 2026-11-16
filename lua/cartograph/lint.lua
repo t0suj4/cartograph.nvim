@@ -2267,10 +2267,13 @@ M.rules = {
     -- for every environment that does not.
     { name = 'idiom-shadow', severity = 'info', quantifier = 'witness', disposition = 'annotation',
         run = function (store)
-            local prof = store.data and store.data.profile
-                and require('cartograph.spec.profile').load(store.data.profile)
-            return require('cartograph.greenspun').idiom_shadows(store.data,
-                prof and prof.templates or nil)
+            -- (every runtime the graph applies — a polyglot root's boundaries, CART-2108 — contributes its templates)
+            local tpls
+            for _, rt in ipairs(require('cartograph.boundary').runtimes_of(store.data)) do
+                local prof = require('cartograph.spec.profile').load(rt)
+                for _, t in ipairs((prof and prof.templates) or {}) do tpls = tpls or {}; tpls[#tpls + 1] = t end
+            end
+            return require('cartograph.greenspun').idiom_shadows(store.data, tpls)
         end },
     { name = 'pair-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = pair_audit_findings },

@@ -2025,7 +2025,7 @@ local function build(store, opts)
     do
         local HKINDS = G7.HKINDS
         local P = require 'cartograph.spec.profile'
-        for _, nm in ipairs { P.base_for('lua'), store.data.profile } do
+        for _, nm in ipairs { P.base_for('lua'), require('cartograph.boundary').runtime_for_lang(store.data, 'lua') } do
             local pr = nm and P.load(nm)
             for k, v in pairs(pr and pr.sigs or NOTHING) do if PSIGS[k] == nil then PSIGS[k] = v end end
             for t, k in pairs(pr and pr.kinds or NOTHING) do if HKINDS[t] == nil then HKINDS[t] = k end end
@@ -2797,7 +2797,7 @@ local function build(store, opts)
     G7.ANYFRAME = {} -- ({ port, true: a setlocal value into every local | false: a getlocal result out of it }, CART-1956)
     G7.LIBSITES, G7.PKGL = {}, {}
     do -- (the analysed code's Lua version, from its profile: 5.2+ changes comparison semantics, CART-1802)
-        local okp, prf = pcall(function () return store.data.profile and require('cartograph.spec.profile').load(store.data.profile) end)
+        local okp, prf = pcall(function () return require('cartograph.boundary').runtime_for_lang(store.data, 'lua') and require('cartograph.spec.profile').load(require('cartograph.boundary').runtime_for_lang(store.data, 'lua')) end)
         local lv = okp and prf and tonumber(prf.lua_version)
         G7.LUA52 = lv ~= nil and lv >= 5.2
         G7.LUAVER = lv and math.floor(lv * 10 + 0.5) or 51 -- (the dump's `ver`: 51 unless the profile says, CART-1810)
@@ -2827,7 +2827,7 @@ local function build(store, opts)
             -- lost one would taint every gmatch loop, CART-1793)
             if (lib and (lib ~= 'string' or G7.NATMODEL[k])) or k:match('^[%a_][%w_]*$') then if objectish(sg) then cand[k] = true end end
         end
-        local ps = store.data.profile and store.data.profile ~= base and P.load(store.data.profile)
+        local ps = require('cartograph.boundary').runtime_for_lang(store.data, 'lua') and require('cartograph.boundary').runtime_for_lang(store.data, 'lua') ~= base and P.load(require('cartograph.boundary').runtime_for_lang(store.data, 'lua'))
         for k, sg in pairs(ps and ps.sigs or NOTHING) do if k:match('^[%a_][%w_]*$') and objectish(sg) then cand[k] = true end end
         for k in pairs(cand) do G7.NATKEYS[#G7.NATKEYS + 1] = k end
         table.sort(G7.NATKEYS)
@@ -5638,14 +5638,14 @@ local function build(store, opts)
     -- (opts.hostsummary: the store's profile's runtime Lua SUMMARIZED — cartograph.hostsummary — and applied at its calls
     -- as edges; not when the tree holds that source itself, CART-1786. A TABLE { [sig key] = summary }: those, a spec's)
     if type(opts.hostsummary) == 'table' then G7.HOSTSUM = opts.hostsummary
-    elseif opts.hostsummary and store.data.profile then
+    elseif opts.hostsummary and require('cartograph.boundary').runtime_for_lang(store.data, 'lua') then
         local HS = require 'cartograph.hostsummary'
-        local list = HS.sources(store.data.profile)
+        local list = HS.sources(require('cartograph.boundary').runtime_for_lang(store.data, 'lua'))
         local holds = false
         local fset = {}
         for _, f in ipairs(files) do fset[f] = true end
         for _, x in ipairs(list or NOTHING) do if fset[x[1]] then holds = true end end
-        local hs = list and not holds and HS.of(store.data.profile)
+        local hs = list and not holds and HS.of(require('cartograph.boundary').runtime_for_lang(store.data, 'lua'))
         G7.HOSTSUM = hs and hs.fns or nil
     end
     do
@@ -5666,7 +5666,7 @@ local function build(store, opts)
             -- merged every caller and cost an E-certified file cut. The design is being prototyped in flowpath)
             local have = {}
             for _, f in ipairs(files) do have[f] = true end
-            for _, nm in ipairs { P.base_for('lua') or false, store.data.profile or false } do
+            for _, nm in ipairs { P.base_for('lua') or false, require('cartograph.boundary').runtime_for_lang(store.data, 'lua') or false } do
                 local src = opts.hostmodels and nm and M.hostmodel_src(nm)
                 if src then keyed[#keyed + 1] = { nm, src } end
                 -- (a runtime's own Lua as its model, opts.hostsources: measured on the repo, shared.lua walked as code

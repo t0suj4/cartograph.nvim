@@ -41,6 +41,9 @@ if job.phase == 'parse' then
     out = ts.extract(job.root, {
         files = job.files, fileset = job.fileset, skip_idpass = true,
         abs = abs, packs = job.packs, -- overlay packs (rails) apply in workers
+        -- the parent's profile decision: an override and a polyglot root's boundaries (CART-2108). The override rode
+        -- in the job since CART-0217 but was never read here — a worker re-detected the shape's profile
+        profile = job.profile, profiles = job.profiles,
         -- what `.h` means, DECIDED BY THE PARENT from the whole tree (CART-0410).
         -- This worker sees a BATCH; a batch of `include/*.h` holds no C++ source, so
         -- deriving it here would answer C for a C++ repo and this chunk would be

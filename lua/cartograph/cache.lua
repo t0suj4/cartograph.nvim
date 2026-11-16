@@ -2382,14 +2382,14 @@ end
 -- DIFFERENT profile (or none), or the profile ARTIFACT was edited (stamp changes).
 -- Lazy pcall-require (shapes needs only config; no cache cycle). nil,nil = no
 -- profile (the common case — most roots), which matches a profileless manifest.
+-- ★ BOUNDARIES (CART-2108): the identity is the root's boundary model's. A TRIVIAL root (no build marker below adds
+-- a profile — 73 of 75 measured roots) answers exactly the old (name, stamp) and no key, so its manifest and its
+-- cache validity are byte-identical; a POLYGLOT root answers (summary, joined stamps, canonical key) and the key is
+-- gated too — a marker added or removed below, or a runtime's artifact edited, is a clean miss
 local function profile_id(nroot)
-    local ok_s, shapes = pcall(require, 'cartograph.shapes')
-    if not ok_s then return nil, nil end
-    local pf = shapes.profile_for(nroot)
-    if not pf then return nil, nil end
-    local ok_p, profmod = pcall(require, 'cartograph.spec.profile')
-    local stamp = ok_p and profmod.stamp_of and profmod.stamp_of(pf.profile) or nil
-    return pf.profile, stamp
+    local ok_b, bnd = pcall(require, 'cartograph.boundary')
+    if not ok_b then return nil, nil, nil end
+    return bnd.identity(nroot)
 end
 
 --- Was this graph built with a PROFILE OVERRIDE (CART-0217)? True when what the
@@ -2450,8 +2450,8 @@ local function read_manifest(root)
         -- stamp) must equal what this cache was built with, else its minted/disposed
         -- resolution is stale ([[cartograph-repo-shapes]] stamping gap). A mismatch
         -- = a clean cache miss → cold re-extract. Profileless roots: nil == nil.
-        local cur_prof, cur_stamp = profile_id(nroot)
-        if m.profile ~= cur_prof or m.profile_stamp ~= cur_stamp then
+        local cur_prof, cur_stamp, cur_bounds = profile_id(nroot)
+        if m.profile ~= cur_prof or m.profile_stamp ~= cur_stamp or m.boundaries ~= cur_bounds then
             return nil, dir
         end
         -- ECOSYSTEM IDENTITY, same gate for the same reason: package-layout rules
@@ -2681,8 +2681,14 @@ local function manifest_of(data, sizes)
     -- producer only has to set data.profile). read_manifest re-derives the CURRENT
     -- identity for the root and invalidates on mismatch. packs are persisted so a
     -- warm-loaded graph carries them into a later refresh's relink (they were lost).
-    local profile_stamp
-    if data.profile then
+    local profile_stamp, boundaries
+    if data.profiles then
+        -- a POLYGLOT graph (CART-2108): the identity of the boundaries it was built with — the SAME function the read
+        -- gate derives the current one with, over the recorded structure
+        local bnd = require 'cartograph.boundary'
+        local _
+        _, profile_stamp, boundaries = bnd.identity_of(bnd.from_data(data.profiles))
+    elseif data.profile then
         local ok, profmod = pcall(require, 'cartograph.spec.profile')
         profile_stamp = ok and profmod.stamp_of and profmod.stamp_of(data.profile) or nil
     end
@@ -2715,6 +2721,9 @@ local function manifest_of(data, sizes)
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
         packs = data.packs, profile = data.profile, profile_stamp = profile_stamp,
+        -- (polyglot only, CART-2108: the canonical key the gate compares, and the structure a warm relink reads; both
+        -- nil on a trivial root, so its manifest is unchanged)
+        boundaries = boundaries, profiles = data.profiles,
         -- per-TREE parse decisions a warm graph must keep: what `.h` meant (CART-0410; before this the manifest
         -- dropped it and a warm graph re-parsed headers as C) and the Lua dialect (luadialect.lua)
         h_lang = data.h_lang, lua_dialect = data.lua_dialect,
@@ -2988,7 +2997,7 @@ local function empty_data(m)
         no_parser = m.no_parser, stamps = m.stamps,
         -- restore the activation context so a refresh on a warm graph relinks with
         -- the SAME packs/profile it was built with (empty_data dropped both before)
-        packs = m.packs, profile = m.profile,
+        packs = m.packs, profile = m.profile, profiles = m.profiles,
         h_lang = m.h_lang, lua_dialect = m.lua_dialect,
         pos_base = m.pos_base, -- (CART-2086)
         -- carry the thin-index marker back so is_index_only() holds on a warm reopen
