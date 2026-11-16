@@ -125,13 +125,15 @@ if not check and not want then
             -- pattern (a lazy quantifier), so a raw `lua-factorio-api-(%d+)` matches
             -- nothing and this reported "none distilled yet" with two on disk
             local prefix = o.src.artifact:format(''):gsub('(%W)', '%%%1')
-            local it = vim.uv.fs_scandir(PROFDIR)
-            while it do
-                local n = vim.uv.fs_scandir_next(it)
-                if not n then break end
-                local base = n:match('^(.+)%.mpack$')
-                if base and base:match('^' .. prefix .. '%d+$') then
-                    have[#have + 1] = base
+            for _, dir in ipairs({ PROFDIR, profmod.ONDEMAND }) do
+                local it = vim.uv.fs_scandir(dir)
+                while it do
+                    local n = vim.uv.fs_scandir_next(it)
+                    if not n then break end
+                    local base = n:match('^(.+)%.mpack$')
+                    if base and base:match('^' .. prefix .. '%d+$') then
+                        have[#have + 1] = base .. (dir == PROFDIR and '' or ' (on demand)')
+                    end
                 end
             end
             table.sort(have)
@@ -238,8 +240,12 @@ for _, o in ipairs(list) do
             -- the URL, not the tempfile: the artifact's stamp is provenance, and a
             -- path under /tmp names something that will not exist by the time anyone
             -- reads it
+            -- ★ INTO THE ON-DEMAND DIRECTORY (CART-1950 / CART-1938), never the checkout: a version fetched for one port
+            -- is the user's, not the release's — it left untracked .mpack files in spec/profile/. The profile loader
+            -- finds it there after the shipped set; a shipped artifact of the same name wins
+            vim.fn.mkdir(profmod.ONDEMAND, 'p')
             local d = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l',
-                here .. '/../' .. dist, tmp, sfx, o.src.url:format(version) },
+                here .. '/../' .. dist, tmp, sfx, o.src.url:format(version), profmod.ONDEMAND },
                 { text = true }):wait()
             -- gsub returns (string, count): io.write would print the count too
             io.write(((d.stdout or ''):gsub('^', '    ')))

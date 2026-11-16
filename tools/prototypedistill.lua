@@ -228,7 +228,9 @@ local profile = {
                                 -- arrays transparent; ABSENT when not exactly one
 }
 
-local out = here .. '/../lua/cartograph/spec/profile/' .. RUNTIME .. '.mpack'
+-- arg[4]: another OUTPUT DIRECTORY (apifetch passes the on-demand one, CART-1938; default: the shipped profile dir)
+local outdir = (arg and arg[4] and arg[4] ~= '') and arg[4] or (here .. '/../lua/cartograph/spec/profile')
+local out = outdir .. '/' .. RUNTIME .. '.mpack'
 local tmp = out .. '.tmp.' .. vim.fn.getpid()
 local wf = assert(io.open(tmp, 'wb'))
 wf:write(vim.mpack.encode(profile)); wf:close()

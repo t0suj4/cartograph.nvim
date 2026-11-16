@@ -58,6 +58,14 @@ function M.for_profile(profile)
             if p == profile then return eco, n end
         end
     end
+    -- a DERIVED profile (CART-1938: lua-factorio-21 over an on-demand api) DECLARES its ecosystem — by a field the
+    -- derivation sets, never by its spelling
+    local ok, pm = pcall(require, 'cartograph.spec.profile')
+    local dr = ok and pm.derive_rule and pm.derive_rule(profile)
+    if dr and dr.ecosystem then
+        local eco = M.load(dr.ecosystem)
+        if eco then return eco, dr.ecosystem end
+    end
     local direct = M.load(profile)
     if direct then return direct, profile end
     return nil

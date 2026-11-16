@@ -8,6 +8,7 @@
 local M = {}
 
 local DIR = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/init%.lua$')
+M.DIR = DIR -- (the shipped profile directory; classmatch derives its api artifact set from it, CART-1938)
 local validity = require 'cartograph.validity'
 
 --- THE ON-DEMAND DIRECTORY (CART-0651 (b), CART-1938): artifacts distilled from an
@@ -18,6 +19,81 @@ local validity = require 'cartograph.validity'
 --- so a user's distilled artifacts never change what a spec measures.
 M.ONDEMAND = os.getenv('CARTOGRAPH_PROFILE_ONDEMAND')
     or (vim.fn.stdpath('data') .. '/cartograph/profile')
+
+-- ── DERIVED PROFILES (CART-1938) ─────────────────────────────────────────────────────────────────────────────────────
+-- "Most profiles should be extracted on demand rather than packaged with the release" (user, 2026-11-05). A Factorio
+-- NAME profile is a hand-authored environment (Lua 5.2, the globals, the stages) over ONE distilled api artifact, so
+-- `lua-factorio-<v>` exists wherever `lua-factorio-api-<v>` loads — shipped or distilled on demand (2.1 for BNW) —
+-- built by the base profile's own builder. FENCED: only an api whose global objects and global functions are the
+-- base api's own (the hand tables are that environment); a version that changed them needs a hand delta, like `-11`.
+-- A hand module or a distilled blob of the same name always wins.
+M.DERIVE = {
+    { pattern = '^lua%-factorio%-(%w+)$', profile = 'lua-factorio-%s', api = 'lua-factorio-api-%s', base = 'lua-factorio',
+      base_api = 'lua-factorio-api', ecosystem = 'lua-factorio' },
+}
+
+--- the derivation rule for a runtime with no artifact of its own -> rule, api artifact name | nil
+function M.derive_rule(runtime)
+    if type(runtime) ~= 'string' then return nil end
+    for _, r in ipairs(M.DERIVE) do
+        local v = runtime:match(r.pattern)
+        if v then return r, r.api:format(v) end
+    end
+    return nil
+end
+
+local function own_artifact(runtime)
+    return vim.uv.fs_stat(DIR .. '/' .. runtime .. '.lua') or vim.uv.fs_stat(DIR .. '/' .. runtime .. '.mpack')
+        or vim.uv.fs_stat(M.ONDEMAND .. '/' .. runtime .. '.mpack')
+end
+
+--- every DERIVABLE profile name: one per api artifact of a rule's family, shipped or on demand, that has no artifact of
+--- its own (listings — portability_targets, completion — offer them like shipped ones)
+function M.derivable()
+    local out = {}
+    for _, r in ipairs(M.DERIVE) do
+        local pre = r.api:format('')
+        for _, d in ipairs({ DIR, M.ONDEMAND }) do
+            local it = d and vim.uv.fs_scandir(d)
+            while it do
+                local n = vim.uv.fs_scandir_next(it)
+                if not n then break end
+                local v = n:match('^' .. vim.pesc(pre) .. '(%w+)%.mpack$')
+                local name = v and r.profile:format(v)
+                if name and not own_artifact(name) then out[name] = true end
+            end
+        end
+    end
+    local l = {}
+    for n in pairs(out) do l[#l + 1] = n end
+    table.sort(l)
+    return l
+end
+
+--- build a derived profile -> prof | nil, why
+function M.derive(runtime)
+    local r, apiname = M.derive_rule(runtime)
+    if not r then return nil, ('no derivation rule names %q'):format(tostring(runtime)) end
+    local api, base_api, base = M.load(apiname), M.load(r.base_api), M.load(r.base)
+    if not api then return nil, ('%s has no api artifact %s (shipped or on demand in %s)'):format(runtime, apiname, M.ONDEMAND) end
+    if not (base and base._build and base_api) then return nil, ('the base profile %s cannot build'):format(r.base) end
+    local function same(a, b)
+        for k, v in pairs(a or {}) do if (b or {})[k] ~= v then return false end end
+        for k in pairs(b or {}) do if (a or {})[k] == nil then return false end end
+        return true
+    end
+    local fa, fb = {}, {}
+    for k in pairs(api.free or {}) do fa[k] = true end
+    for k in pairs(base_api.free or {}) do fb[k] = true end
+    if not (same(api.global2class, base_api.global2class) and same(fa, fb)) then
+        return nil, ('%s (%s) declares other global objects or functions than %s (%s): the hand environment is not its own — it needs a hand delta, as lua-factorio-11 is'):format(
+            apiname, tostring(api.version), r.base_api, tostring(base_api.version))
+    end
+    local prof = base._build(apiname, runtime)
+    prof.ecosystem, prof.derived = r.ecosystem, { from = apiname, base = r.base }
+    prof.stamp = ('derived: %s over %s'):format(r.base, apiname)
+    return prof
+end
 
 --- Load the profile for a runtime (e.g. 'zig-std', 'lua-factorio'). Returns the
 --- profile table or nil. Memoized. Two artifact forms: a HAND-AUTHORED `.lua`
@@ -52,6 +128,7 @@ M.load = validity.memo {
             if ok and type(dec) == 'table' and dec.schema == 1 then prof = dec end
         end
     end
+    if not prof and not own_artifact(runtime) and M.derive_rule(runtime) then prof = M.derive(runtime) end
     return prof
 end,
 }
@@ -146,6 +223,14 @@ end)
 --- profile that internally loads ANOTHER runtime's .mpack (ruby-rails → ruby-core)
 --- is not transitively covered — only its direct artifact; documented limit.
 function M.stamp_of(runtime)
+    -- a DERIVED profile is a function of its builder module and its api artifact: both stamps, or none
+    if not own_artifact(runtime) then
+        local r, apiname = M.derive_rule(runtime)
+        if r then
+            local a, b = M.stamp_of(apiname), M.stamp_of(r.base)
+            return (a and b) and ('derived:' .. b .. '|' .. a) or nil
+        end
+    end
     local parts = {}
     for _, ext in ipairs({ 'lua', 'mpack' }) do
         local st = vim.uv.fs_stat(DIR .. '/' .. runtime .. '.' .. ext)
@@ -206,6 +291,10 @@ function M.env_usable(runtime)
     if not prof then
         return nil, ('no profile named %q (profiles ship under spec/profile/)')
             :format(runtime)
+    end
+    if prof.derived then
+        return nil, ('%s is DERIVED (%s over %s) for comparing versions, not an extraction environment — extract under %s'):format(
+            runtime, prof.derived.base, prof.derived.from, prof.derived.base)
     end
     if prof.ingredient then
         return nil, ('%s is an INGREDIENT, not an environment — it is an input to a'

@@ -157,79 +157,89 @@ for T, t in pairs(TYPES) do
     for m in pairs(t.members) do vocab[m] = true end
 end
 
--- RUNTIME-API ENRICHMENT ([[cartograph-stdlib-profile]] input adapter): load the
--- distilled runtime-api.json artifact (tools/factoriodistill.lua, version-keyed +
--- checked in → deterministic). It supplies the OWNER-PRECISE minting map for the 9
--- GLOBAL objects (game.print → LuaGameScript::print) + hover sigs. Missing artifact
--- → the profile stays disposition-only (graceful, gate-neutral like before).
-local api = require('cartograph.spec.profile').load('lua-factorio-api')
-local mint, mint_path, sigs, sig_kind, api_version
-local api_g2c, api_members, api_complete, api_templates
-if api and api.global2class and api.members then
-    local g2c, members, free_fns = api.global2class, api.members, api.free or {}
-    mint, sig_kind, api_version = true, 'factorio', api.version
-    -- EXPOSED, not just closed over: a consumer that must decide whether a miss is
-    -- EVIDENCE needs the enumerated surface and the completeness claim, not only the
-    -- minting closure. Without this the portability report could not tell "the API
-    -- lacks this name" from "the artifact never held that kind of name".
-    api_g2c, api_members, api_complete = g2c, members, api.complete
-    -- the environment's REGISTRY IDIOMS, derived from the declared signatures
-    -- (CART-0226). Republished like api_members, because the artifact is an
-    -- INGREDIENT and this module is what the consumers read.
-    api_templates = api.templates
-    sigs = {} -- one hover table: method sigs (Class::method) + free-fn sigs (name)
-    for k, v in pairs(api.sigs or {}) do sigs[k] = v end
-    for k, v in pairs(api.free_sigs or {}) do sigs[k] = v end
-    -- receiver-namespace-aware mint mapper (the factorio minting shape, distinct
-    -- from ruby's member-only canon): a profile-disposed `<global>.<method>` call
-    -- resolves to the documented class's method (owner-precise, `Class::method`);
-    -- a bare free fn resolves to its own name; anything else (receiver-typed method,
-    -- deep chain) → nil = honest frontier (no receiver typing for dynamic langs).
-    mint_path = function (callee, full, why)
-        if why ~= 'stdlib' then return nil end
-        if full then -- a dotted `<global>.<method>` call → the documented class method
-            local recv, m = full:match('^([%w_]+)%.([%w_]+)$')
-            if recv and g2c[recv] and members[g2c[recv] .. '::' .. m] then
-                return g2c[recv] .. '::' .. m
+-- ★ A BUILDER OVER AN API ARTIFACT (CART-1938): everything above is the ENVIRONMENT (Lua 5.2, Factorio's globals and
+-- stages), everything below is read from ONE distilled runtime-api.json artifact. `lua-factorio` is this builder over
+-- the shipped `lua-factorio-api`; spec/profile/init.lua DERIVES `lua-factorio-<v>` over `lua-factorio-api-<v>` (an
+-- on-demand 2.1 one included) through `_build`, fenced to versions whose global objects are these.
+local function build(api_name, runtime)
+    -- RUNTIME-API ENRICHMENT ([[cartograph-stdlib-profile]] input adapter): load the
+    -- distilled runtime-api.json artifact (tools/factoriodistill.lua, version-keyed +
+    -- checked in → deterministic). It supplies the OWNER-PRECISE minting map for the 9
+    -- GLOBAL objects (game.print → LuaGameScript::print) + hover sigs. Missing artifact
+    -- → the profile stays disposition-only (graceful, gate-neutral like before).
+    local api = require('cartograph.spec.profile').load(api_name)
+    local mint, mint_path, sigs, sig_kind, api_version
+    local api_g2c, api_members, api_complete, api_templates
+    if api and api.global2class and api.members then
+        local g2c, members, free_fns = api.global2class, api.members, api.free or {}
+        mint, sig_kind, api_version = true, 'factorio', api.version
+        -- EXPOSED, not just closed over: a consumer that must decide whether a miss is
+        -- EVIDENCE needs the enumerated surface and the completeness claim, not only the
+        -- minting closure. Without this the portability report could not tell "the API
+        -- lacks this name" from "the artifact never held that kind of name".
+        api_g2c, api_members, api_complete = g2c, members, api.complete
+        -- the environment's REGISTRY IDIOMS, derived from the declared signatures
+        -- (CART-0226). Republished like api_members, because the artifact is an
+        -- INGREDIENT and this module is what the consumers read.
+        api_templates = api.templates
+        sigs = {} -- one hover table: method sigs (Class::method) + free-fn sigs (name)
+        for k, v in pairs(api.sigs or {}) do sigs[k] = v end
+        for k, v in pairs(api.free_sigs or {}) do sigs[k] = v end
+        -- receiver-namespace-aware mint mapper (the factorio minting shape, distinct
+        -- from ruby's member-only canon): a profile-disposed `<global>.<method>` call
+        -- resolves to the documented class's method (owner-precise, `Class::method`);
+        -- a bare free fn resolves to its own name; anything else (receiver-typed method,
+        -- deep chain) → nil = honest frontier (no receiver typing for dynamic langs).
+        mint_path = function (callee, full, why)
+            if why ~= 'stdlib' then return nil end
+            if full then -- a dotted `<global>.<method>` call → the documented class method
+                local recv, m = full:match('^([%w_]+)%.([%w_]+)$')
+                if recv and g2c[recv] and members[g2c[recv] .. '::' .. m] then
+                    return g2c[recv] .. '::' .. m
+                end
+                if full:find('%.') then return nil end -- other dotted (receiver-typed / deep) = frontier
             end
-            if full:find('%.') then return nil end -- other dotted (receiver-typed / deep) = frontier
+            -- a bare free function (log / table_size / localised_print; full is nil)
+            if free_fns[callee] then return callee end
+            return nil
         end
-        -- a bare free function (log / table_size / localised_print; full is nil)
-        if free_fns[callee] then return callee end
-        return nil
     end
+
+    return {
+        schema = 1, runtime = runtime, lang = 'lua',
+        -- (the LANGUAGE version Factorio embeds — its semantics differ from 5.1 / LuaJIT's: an ordering comparison runs either
+        -- operand's __lt / __le, CART-1802)
+        lua_version = '5.2',
+        -- (the RUNTIME, as a dump states it — `_VERSION` of Factorio's embedded interpreter, a PUC 5.2 derivative: a
+        -- finalizer's error is not caught the way LuaJIT 2.1's is, CART-1971 / flowpath FLOW-0152)
+        lua_runtime = 'Lua 5.2',
+        version = api_version or '2.0', stamp = 'hand-authored',
+        types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
+        vocab = vocab,
+        -- THE STAGE PARTITION (CART-0216). A profile with no `stages` behaves exactly
+        -- as before — one implicit partition covering everything — so no other profile
+        -- needs touching and nothing regresses.
+        stages = stages, stage_owners = stage_owners,
+        -- exported so the 1.1 delta can rebuild the partition after renaming a global,
+        -- rather than restating it (a second copy would drift, and the drift would look
+        -- like a version difference — the same reasoning as the TYPES delta)
+        _stagedefs = STAGES, _shared = SHARED, _build_stages = build_stages,
+        -- minting + nav-time enrichment (present only when the api artifact loaded)
+        mint = mint, mint_path = mint_path, sigs = sigs, sig_kind = sig_kind,
+        -- the ADJUDICABLE surface: global -> documented class, the flat
+        -- `Class::member` set (methods AND attributes since 2026-07-26), and which
+        -- classes are FULLY enumerated. A miss inside a complete class is evidence.
+        global2class = api_g2c, api_members = api_members, api_complete = api_complete,
+        -- REGISTRY TEMPLATES: what a registry idiom LOOKS LIKE in this environment, so a
+        -- suggestion that matches one is correct platform usage and an ad-hoc
+        -- reimplementation of one is a real finding ([[greenspun-is-suggestive]]).
+        templates = api_templates,
+        -- the `defines` VALUE NAMESPACES, enumerated (CART-0651): path -> { member = true }. A chain through them is
+        -- statically followable (no receiver), so portability adjudicates `defines.x.y` instead of hedging at the root.
+        enums = api and api.enums or nil,
+    }
 end
 
-return {
-    schema = 1, runtime = 'lua-factorio', lang = 'lua',
-    -- (the LANGUAGE version Factorio embeds — its semantics differ from 5.1 / LuaJIT's: an ordering comparison runs either
-    -- operand's __lt / __le, CART-1802)
-    lua_version = '5.2',
-    -- (the RUNTIME, as a dump states it — `_VERSION` of Factorio's embedded interpreter, a PUC 5.2 derivative: a
-    -- finalizer's error is not caught the way LuaJIT 2.1's is, CART-1971 / flowpath FLOW-0152)
-    lua_runtime = 'Lua 5.2',
-    version = api_version or '2.0', stamp = 'hand-authored',
-    types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
-    vocab = vocab,
-    -- THE STAGE PARTITION (CART-0216). A profile with no `stages` behaves exactly
-    -- as before — one implicit partition covering everything — so no other profile
-    -- needs touching and nothing regresses.
-    stages = stages, stage_owners = stage_owners,
-    -- exported so the 1.1 delta can rebuild the partition after renaming a global,
-    -- rather than restating it (a second copy would drift, and the drift would look
-    -- like a version difference — the same reasoning as the TYPES delta)
-    _stagedefs = STAGES, _shared = SHARED, _build_stages = build_stages,
-    -- minting + nav-time enrichment (present only when the api artifact loaded)
-    mint = mint, mint_path = mint_path, sigs = sigs, sig_kind = sig_kind,
-    -- the ADJUDICABLE surface: global -> documented class, the flat
-    -- `Class::member` set (methods AND attributes since 2026-07-26), and which
-    -- classes are FULLY enumerated. A miss inside a complete class is evidence.
-    global2class = api_g2c, api_members = api_members, api_complete = api_complete,
-    -- REGISTRY TEMPLATES: what a registry idiom LOOKS LIKE in this environment, so a
-    -- suggestion that matches one is correct platform usage and an ad-hoc
-    -- reimplementation of one is a real finding ([[greenspun-is-suggestive]]).
-    templates = api_templates,
-    -- the `defines` VALUE NAMESPACES, enumerated (CART-0651): path -> { member = true }. A chain through them is
-    -- statically followable (no receiver), so portability adjudicates `defines.x.y` instead of hedging at the root.
-    enums = api and api.enums or nil,
-}
+local P = build('lua-factorio-api', 'lua-factorio')
+P._build = build
+return P

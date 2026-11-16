@@ -121,6 +121,7 @@ test('factoriodistill: parameters are emitted in CALL order (v6 `order`), not th
     local p = art.params['LuaThing::set_slot']
     eq({ 'index', 'filter' }, { p.p[1].n, p.p[2].n })
     eq(true, art.params['LuaThing::build'].tt, 'v6 `format.takes_table`')
+    eq('(index: uint, filter: string)', art.sigs['LuaThing::set_slot'].sig, 'the hover rendering in call order too (CART-2104)')
     vim.fn.delete(dir, 'rf')
 end)
 
@@ -143,4 +144,18 @@ test('portability_sites: a name a PROFILE kept whose root is no api global is ne
     local row = a.result[1]
     eq('string.find', row.name); eq('kept', row.verdict); eq(vim.NIL, row.signature)
     vim.fn.delete(root, 'rf')
+end)
+
+test('factoriodistill: the shipped hover sigs read in CALL order — script.on_event is (event, handler, filters?) (CART-2104)', function ()
+    local pm = require 'cartograph.spec.profile'
+    for _, n in ipairs { 'lua-factorio-api-20', 'lua-factorio-api-11' } do
+        local a = pm.load(n)
+        local sig = a and a.sigs and a.sigs['LuaBootstrap::on_event']
+        if not sig then skip(n .. ' carries no on_event sig') end
+        local names = {}
+        for nm in sig.sig:gmatch('([%w_]+)%??:') do names[#names + 1] = nm end
+        eq({ 'event', 'handler', 'filters' }, names, n .. ': ' .. sig.sig)
+        local rs = a.sigs['LuaBootstrap::raise_event'].sig
+        ok(rs:match('^%(event:'), n .. ' raise_event: ' .. rs)
+    end
 end)

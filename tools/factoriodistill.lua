@@ -63,16 +63,27 @@ local function render_type(t, depth)
     return ct or '?'
 end
 
+-- ★ IN CALL ORDER (CART-2104): v6 lists `parameters` ALPHABETICALLY and gives the position in `order`, so walking the
+-- array rendered script.on_event as (event, filters?, handler) — 12 of 19 multi-parameter 2.0 sigs were misordered.
+local function in_order(params)
+    local ps = {}
+    for i, p in ipairs(params or {}) do ps[#ps + 1] = { p = p, k = p.order or (i - 1) } end
+    table.sort(ps, function (a, b) return a.k < b.k end)
+    local out = {}
+    for _, x in ipairs(ps) do out[#out + 1] = x.p end
+    return out
+end
+
 local function method_sig(m)
     local ps = {}
     if m.takes_table then                        -- a single-table argument: {f1=T1, f2?=T2}
         local fields = {}
-        for _, p in ipairs(m.parameters or {}) do
+        for _, p in ipairs(in_order(m.parameters)) do
             fields[#fields + 1] = p.name .. (p.optional and '?' or '') .. '=' .. render_type(p.type)
         end
         ps[1] = '{' .. table.concat(fields, ', ') .. '}'
     else
-        for _, p in ipairs(m.parameters or {}) do
+        for _, p in ipairs(in_order(m.parameters)) do
             ps[#ps + 1] = p.name .. (p.optional and '?' or '') .. ': ' .. render_type(p.type)
         end
     end

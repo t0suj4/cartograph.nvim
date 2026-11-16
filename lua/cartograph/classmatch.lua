@@ -73,7 +73,38 @@ assert(require('cartograph.tier').RANK[M.TIER],
 --- the unsuffixed and `-20` builds BOTH carry the 148-class table (2.0.72, api v6)
 --- and `-11` carries NONE — so the live 2.0 profile and this query agree on the
 --- environment, and no 1.1 class table exists for anything to diff against.
-M.ARTIFACTS = { 'lua-factorio-api', 'lua-factorio-api-20', 'lua-factorio-api-11' }
+--- ★ DERIVED, NOT LISTED (CART-1938): the api artifacts of the family, as the profile loader can reach them — the
+--- shipped profile directory first, then the ON-DEMAND one (spec/profile/init.lua M.ONDEMAND), so an api distilled
+--- for a version the release does not ship (2.1, for a port) is found by portability.artifact_for like a shipped one.
+--- It was a fixed { lua-factorio-api, -20, -11 }, so a distilled 2.1 api answered nothing. Order: the unsuffixed
+--- (live) name first — M.table(nil) and the first entry depend on it — then shipped by name, then on-demand.
+M.FAMILY = 'lua-factorio-api'
+function M.artifacts()
+    local pm = require 'cartograph.spec.profile'
+    local dir = pm.DIR
+    local out, seen = {}, {}
+    local function scan(d)
+        local names = {}
+        local it = d and vim.uv.fs_scandir(d)
+        while it do
+            local n = vim.uv.fs_scandir_next(it)
+            if not n then break end
+            local base = n:match('^(.+)%.mpack$') or n:match('^(.+)%.lua$')
+            if base and (base == M.FAMILY or base:sub(1, #M.FAMILY + 1) == M.FAMILY .. '-') and not seen[base] then
+                seen[base] = true; names[#names + 1] = base
+            end
+        end
+        table.sort(names, function (a, b)
+            if (a == M.FAMILY) ~= (b == M.FAMILY) then return a == M.FAMILY end
+            return a > b
+        end)
+        for _, n in ipairs(names) do out[#out + 1] = n end
+    end
+    scan(dir); scan(pm.ONDEMAND)
+    return out
+end
+-- (the shipped set, as it reads at load — for a reader that wants the list; consumers call M.artifacts())
+M.ARTIFACTS = M.artifacts()
 
 -- closure cache, keyed by the artifact TABLE identity (weak, so a reloaded
 -- profile does not pin the old one). The profile loader is itself stamp-keyed, so
@@ -163,7 +194,7 @@ function M.table(source)
         return hit
     end
     local prof = require 'cartograph.spec.profile'
-    local names = type(source) == 'string' and { source } or M.ARTIFACTS
+    local names = type(source) == 'string' and { source } or M.artifacts()
     local tried = {}
     for _, name in ipairs(names) do
         local art = prof.load(name)
@@ -400,7 +431,7 @@ function M.answer_key(ct, g2c, shapes)
     if not ct then return nil, why end
     if not g2c then
         local art = require('cartograph.spec.profile').load(
-            (ct.meta or {}).artifact or M.ARTIFACTS[1])
+            (ct.meta or {}).artifact or M.artifacts()[1])
         g2c = art and art.global2class
     end
     if not g2c or next(g2c) == nil then return nil, 'no global2class in the artifact' end

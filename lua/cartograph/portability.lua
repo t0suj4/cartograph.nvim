@@ -164,6 +164,16 @@ function M.runtimes()
             end
         end
     end
+    -- (CART-1938) the ON-DEMAND artifacts and the profiles DERIVED over api artifacts: a version distilled for a port
+    -- is a target like a shipped one
+    local pm = require 'cartograph.spec.profile'
+    for _, f in ipairs(vim.fn.globpath(pm.ONDEMAND, '*.mpack', false, true)) do
+        local name = vim.fn.fnamemodify(f, ':t:r')
+        if not seen[name] then seen[name] = true; out[#out + 1] = name end
+    end
+    for _, name in ipairs(pm.derivable()) do
+        if not seen[name] then seen[name] = true; out[#out + 1] = name end
+    end
     table.sort(out)
     return out
 end
@@ -883,7 +893,7 @@ function M.artifact_for(version)
         return nil, ('%q is not major.minor'):format(tostring(version))
     end
     local tried = {}
-    for _, name in ipairs(cm.ARTIFACTS or {}) do
+    for _, name in ipairs(cm.artifacts()) do
         local art = pm.load(name)
         if art and tostring(art.version):match('^' .. vim.pesc(minor) .. '%.') then
             local ct = cm.table(name)
@@ -2277,7 +2287,7 @@ function M.origin_for(store, runtime)
     local cm = require 'cartograph.classmatch'
     local prof = require 'cartograph.spec.profile'
     local tried = {}
-    for _, name in ipairs(cm.ARTIFACTS or {}) do
+    for _, name in ipairs(cm.artifacts()) do
         local art = prof.load(name)
         if art and tostring(art.version):match('^' .. vim.pesc(minor) .. '%.') then
             local ct = cm.table(name)

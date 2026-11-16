@@ -2,6 +2,21 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-16 — profiles on demand: a version cartograph does not ship (Factorio 2.1)
+
+- `lua-factorio-<v>` is DERIVED wherever `lua-factorio-api-<v>` loads, shipped or in the on-demand directory
+  (`stdpath('data')/cartograph/profile`, `CARTOGRAPH_PROFILE_ONDEMAND`). It is fenced to versions whose global
+  objects and functions match the hand environment, and is never an extraction environment. `lua-factorio-20` now
+  exists too (CART-1938).
+- The api class tables are found the same way (`classmatch.artifacts()`); it was a fixed three-name list.
+  `portability_targets` lists on-demand and derived profiles.
+- A move to a version not distilled answers `unavailable` with `absence_why.evidence.offers`: the apifetch and
+  local factoriodistill commands. Nothing is fetched by a verb.
+- `tools/apifetch.lua` writes into the on-demand directory, not the checkout's `spec/profile/` (CART-1950), and lists
+  both. `factoriodistill.lua` / `prototypedistill.lua` take an output directory as arg[4].
+- Hover signatures of the Factorio api are in CALL order: the documents list parameters alphabetically, so
+  `script.on_event` read `(event, filters?, handler)` (CART-2104; 32 sigs per 2.0 artifact, 45 in 1.1).
+
 ## 2026-11-16 — `portability_sites`: signature changes are port sites (agent surface, additive)
 
 - New site verdict `signature-changed`: a kept method whose parameters changed between the two versions' api

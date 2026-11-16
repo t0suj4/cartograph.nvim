@@ -2260,12 +2260,28 @@ local function version_pair(args)
     end
     if #missing > 0 then
         local roster = port.runtimes()
+        -- ★ ON DEMAND (CART-1938): a missing version of a DERIVABLE family is not a dead end — its api artifact can be
+        -- distilled from the vendor's own description, into the on-demand directory, and the profile then exists. The
+        -- answer OFFERS that, with the command; it never fetches (network is never implicit: tools/apifetch.lua)
+        local offers = {}
+        for _, m in ipairs(missing) do
+            local r, apiname = pm.derive_rule(m)
+            if r then
+                local sfx = apiname:match('(%w+)$')
+                offers[#offers + 1] = { profile = m, api = apiname, ondemand = pm.ONDEMAND,
+                    fetch = ('nvim --headless -u NONE -l tools/apifetch.lua <version %s.x, e.g. %s>'):format(
+                        sfx:sub(1, 1), sfx:sub(1, 1) .. '.' .. sfx:sub(2)),
+                    from_file = ('nvim --headless -u NONE -l tools/factoriodistill.lua <runtime-api.json> %s \'\' %s'):format(sfx, pm.ONDEMAND) }
+            end
+        end
         return nil, { result = {}, absence = 'unavailable', absence_why = {
             premise = 'no-such-profile',
-            why = ('no environment profile named %s ships in this tree, so the move cannot be scored — this is a gap in the INSTRUMENT, not a statement that the port is clean. %d profile(s) ship: %s'):format(
+            why = ('no environment profile named %s ships in this tree, so the move cannot be scored — this is a gap in the INSTRUMENT, not a statement that the port is clean. %d profile(s) ship: %s%s'):format(
                 table.concat(vim.tbl_map(function (m) return ('%q'):format(m) end, missing), ' or '),
-                #roster, table.concat(roster, ', ')),
-            evidence = { missing = missing, shipped = roster } },
+                #roster, table.concat(roster, ', '),
+                #offers > 0 and ('. It can be made ON DEMAND: distil its api artifact (%s) — `offers` has the commands; the fetch contacts the vendor, the local one reads a runtime-api.json you have'):format(
+                    table.concat(vim.tbl_map(function (o) return o.api end, offers), ', ')) or ''),
+            evidence = { missing = missing, shipped = roster, offers = #offers > 0 and offers or NUL } },
             notes = { { kind = 'ask-the-roster', premise = 'discovery',
                 why = 'portability_targets lists every shipped profile with its language, its size and — for the ones that can be no target — WHY, so a from/to pair never has to be guessed at',
                 evidence = NUL } } }
