@@ -629,8 +629,11 @@ local function gen_java_module(k, exports, fname, ans)
         indent = indent + 1
         w(('return M%d.helper%d(n) + new M%d().run%d(n);'):format(j, j, j, j))
         if exports[j] and exports[j].overloaded then
-            expect(('helper%d'):format(j),
-                { want = 'refused', rule = 'ambiguous' })
+            -- ★ UPGRADED, a reviewed claim (CART-2106): this was the honest rung `refused ambiguous` until java ARITY
+            -- OVERLOADS (CART-0676, c6cc7efb) — a 1-argument call among helper(int) and helper(int, int) is the
+            -- 1-PARAMETER overload, as javac decides it. `nparams` pins WHICH overload: both share the name
+            expect(('helper%d'):format(j), { want = 'to',
+                target = ('M%d::helper%d'):format(j, j), tier = 'plain', nparams = 1 })
         else
             expect(('helper%d'):format(j), { want = 'to',
                 target = ('M%d::helper%d'):format(j, j), tier = 'plain' })

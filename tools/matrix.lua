@@ -599,6 +599,10 @@ local function run_row(name)
                     elseif a.tier and tier ~= a.tier then
                         why = ('right target, tier %s ≠ expected %s')
                             :format(tier, a.tier)
+                    elseif a.nparams and #((nidx[cc.to] or {}).params or {}) ~= a.nparams then
+                        -- (WHICH overload, where overloads share the name: CART-2106)
+                        why = ('right name, but the %d-parameter overload — expected the %d-parameter one')
+                            :format(#((nidx[cc.to] or {}).params or {}), a.nparams)
                     end
                 elseif a.want == 'silent' then
                     -- a DOCUMENTED honesty gap, encoded as the current rung
