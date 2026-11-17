@@ -125,3 +125,29 @@ test('java path: a same-file candidate the spec did not place blocks the pick (C
     eq(nil, ts._path_pick({ a, b, u }, 'F.a.K', 'F.java', {}), 'it may be the one on the path')
     eq(nil, ts._path_pick({ a, b }, nil, 'F.java', {}))
 end)
+
+test('java path: a QUALIFIED spelling and an anonymous class body decline — B.K is not the K the lookup finds (CART-1077)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = tree({ ['Q.java'] = table.concat({
+        'package p;',                                                                            -- 0
+        'public class Q {',                                                                      -- 1
+        '  static class A { static class K { K() {} static int f() { return 1; } }',             -- 2
+        '    Object g() { return new B.K(); }',                                                  -- 3
+        '    int h() { return B.K.f(); }',                                                       -- 4
+        '    int i() { return K.f(); }',                                                         -- 5
+        '    Runnable j() { return new Runnable() { public void run() { K.f(); } }; } }',        -- 6
+        '  static class B { static class K { K() {} static int f() { return 2; } } }',           -- 7
+        '  static class C { int m() { return 1; } Runnable r() { return new Runnable() { public void run() { m(); } }; } }', -- 8
+        '}',
+    }, '\n') .. '\n' })
+    local data = ts.extract(root); data.root = root
+    local c = calls_at(data, 'Q.java')
+    eq('Q.java::K::f@2', c[5].to, 'bare K inside A: A.K')
+    eq(nil, c[3].cpath, 'new B.K(): qualified, no lexical lookup')
+    eq(nil, c[3].to and c[3].to:find('@2') and c[3].to or nil, 'never A\'s K: ' .. tostring(c[3].to))
+    eq(nil, c[4].cpath, 'B.K.f(): qualified')
+    eq(nil, c[4].to and c[4].to:find('@2') and c[4].to or nil, 'never A\'s f: ' .. tostring(c[4].to))
+    eq(nil, c[6].cpath, 'inside an anonymous class body the lookup declines')
+    eq(nil, c[8].cpath, 'implicit this inside an anonymous class body: the anonymous class may inherit m')
+    vim.fn.delete(root, 'rf')
+end)

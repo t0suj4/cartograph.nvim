@@ -183,21 +183,48 @@ local function java_has_supertypes(c)
     end
     return false
 end
+-- an ANONYMOUS class body (`new Foo() { ... }`) between `node` and the class declaration `stop`? java_enclosing_class
+-- walks past it, yet it is a class with a supertype: a method or member type it inherits shadows the named class's
+local function java_anon_between(node, stop)
+    local sid, p = stop:id(), node:parent()
+    while p and p:id() ~= sid do
+        if p:type() == 'class_body' then
+            local pp = p:parent()
+            if pp and pp:type() == 'object_creation_expression' then return true end
+        end
+        p = p:parent()
+    end
+    return false
+end
+-- was the class a `written` key names spelled BARE at the call? `new B.K()` and `B.K.f()` key `K` as well, and B's K
+-- is not the K a lexical lookup finds
+local function java_written_bare(calln)
+    if calln:type() == 'object_creation_expression' then
+        local ty = calln:field('type')[1]
+        if ty and ty:type() == 'generic_type' then ty = ty:named_child(0) end
+        return ty ~= nil and ty:type() == 'type_identifier'
+    end
+    local obj = calln:field('object')[1]
+    return obj ~= nil and obj:type() == 'identifier'
+end
 -- the path of the class a call's key names -> path | nil. `self` (implicit this / this.m()): the enclosing class.
--- `written` (`_Fields.m()`, a simple class name): the member type of the innermost enclosing class that declares it.
--- ⚠ Declines (nil) when a class passed on the way out has a supertype clause: an INHERITED member type would shadow
--- the outer one, and which classes the supertype declares is not visible here.
+-- `written` (`_Fields.m()`, `new X()`, a BARE simple class name): the member type of the innermost enclosing class that
+-- declares it. Declines (nil): a class passed on the way out with a supertype clause, or an anonymous class body on
+-- the way (either may inherit a member that shadows the outer one, and what a supertype declares is not visible
+-- here); a qualified spelling (`new B.K()`).
 local function java_call_path(calln, src, how, key)
     if how == 'self' then
         local _, c = java_enclosing_class(calln, src)
-        return c and java_class_path(c, src) or nil
+        if not c or java_anon_between(calln, c) then return nil end
+        return java_class_path(c, src)
     end
-    if how ~= 'written' then return nil end
+    if how ~= 'written' or not java_written_bare(calln) then return nil end
     local x = key and key:match('^([%w_$]+)::[%w_$]+$')
     if not x then return nil end
     local _, c = java_enclosing_class(calln, src)
     while c do
         if java_declares_member(c, x, src) then
+            if java_anon_between(calln, c) then return nil end
             local base = java_class_path(c, src)
             if not base then
                 local n = c:field('name')[1]
