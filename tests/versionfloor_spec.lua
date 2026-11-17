@@ -784,7 +784,8 @@ test('versionfloor lua: the report names the PUC ruler, the guessed version and 
         'the inexact version is disclosed: ' .. text)
     ok(text:find('LuaJIT (a sibling dialect, not on this ruler) REFUSES 1 site(s) above, first // floor division at a.lua:2',
         1, true), 'LuaJIT is answered beside the ruler, not on it: ' .. text)
-    ok(text:find('removals are not modelled', 1, true), 'no ceiling table, said plainly')
+    -- (Lua's removals ARE modelled since CART-2038 — the string escapes 5.2 refuses — and none is used here)
+    ok(text:find('no ceiling in evidence — %d+ known removals were checked for'), 'the removals checked, said plainly: ' .. text)
     ok(not text:find('ECMAScript does not remove', 1, true), 'and not ECMAScript\'s sentence')
     vim.fn.delete(root, 'rf')
 end)
@@ -830,4 +831,79 @@ test('versionfloor lua: LuaJIT-only syntax is reported beside the floor, and the
     t = report({ ['a.lua'] = { 'local M = {}', 'function M.f() goto done ::done:: end', 'return M' },
         ['.luarc.json'] = { '{ "runtime.version": "Lua 5.4" }' } })
     ok(t:find('.luarc.json declares Lua 5.4; no detected feature needs past 5.2', 1, true), t)
+end)
+
+
+-- ★ STRING ESCAPES BY WHAT THEY MEAN (CART-2038). 5.1 reads an escape it does not know as the bare letter: `"\\."`
+-- loads on 5.1 and is refused from 5.2 on (a REMOVAL), `"\\x41"` loads everywhere and means "x41" on 5.1, "A" from
+-- 5.2 (a SPLIT). The escape's meaning per interpreter is distilled (spec/luafloor.lua `escapes`); a LEXER finds the
+-- escapes, because the one 5.2+ refuses tears tree-sitter-lua's tree. Joined against lua5.1 / lua5.4 on wow_addons:
+-- the 26 files 5.4 refuses for an escape are exactly the lexer's, at its lines.
+test('versionfloor lua: the escapes\' meanings are the interpreters\' answers (CART-2038)', function ()
+    local E = require('cartograph.spec.luafloor').escapes
+    for _, k in ipairs { '.', '%', '|', 'H', '[', ' ', 'x', 'u', 'ctl', 'high' } do
+        eq('gone', E[k] and E[k].class, k .. ': accepted by 5.1, refused from 5.2')
+        eq('5.2', E[k].v, k)
+        eq('refuses', E[k].luajit, k .. ': LuaJIT refuses it too')
+    end
+    for _, k in ipairs { 'x-hex', 'u-brace', 'z' } do
+        eq('split', E[k] and E[k].class, k .. ': loads on 5.1 with another meaning')
+        eq('5.2', E[k].v, k)
+        eq('new', E[k].luajit, k .. ': LuaJIT reads the new meaning')
+    end
+    eq('floor', E['z-nl'] and E['z-nl'].class, '\\z then a line break: 5.1 refuses it')
+    for _, k in ipairs { 'n', 't', '\\', '"', '0', 'a' } do eq(nil, E[k], k .. ': the same everywhere — no entry') end
+end)
+
+test('versionfloor lua: the escape lexer — strings only, never comments, long brackets, an escaped backslash (CART-2038)', function ()
+    local function keys(src)
+        local out = {}
+        for _, e in ipairs(vf.lua_escapes(src)) do out[#out + 1] = e.line .. ':' .. e.key end
+        return table.concat(out, ' ')
+    end
+    eq('0:.', keys('local s = "a\\.b"'))
+    eq('0:x-hex 0:u-brace 0:z', keys('local s = "\\x41" .. "\\u{48}" .. "\\zb"'))
+    eq('0:x 1:z-nl', keys("local s = 'x\\xZZ' local t = \"\\z\n  b\""), 'a malformed \\x; \\z with a line break')
+    eq('0:high', keys('local s = "\\' .. string.char(208, 159) .. '"'), 'a backslash before a UTF-8 lead byte')
+    eq('', keys("-- it's a \\. in a comment\nlocal s = 1"), 'a quote in a comment opens no string')
+    eq('', keys('--[[ a "long \\. comment" ]]\nlocal s = 1'))
+    eq('', keys('local s = [[a "\\." b]]'), 'nor in a long string')
+    eq('', keys('local s = "\\065\\9"'))
+    eq('', keys('#!/usr/bin/lua \\.\nlocal s = 1'))
+    eq('0:\\', keys('local s = "a\\\\.b"'), 'an escaped backslash: its own key, the same everywhere, so no fact')
+    eq('2:H', keys('local a = "x"\r\nlocal b = 1\r\nlocal c = "\\H"'), 'editor lines, CRLF')
+end)
+
+test('versionfloor lua: a removed escape is a CEILING, a changed one a SPLIT, and LuaJIT refuses the removed (CART-2038)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- minimised from wow_addons Misspelled.lua:344 and a localization file's `\\x` (5.1: "x41")
+    write(root, 'a.lua', { 'local M = {}', 'M.p = "[ \\(%a+"', 'return M' })
+    write(root, '.luarc.json', { '{ "runtime.version": "LuaJIT" }' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('CEILING 5.2', 1, true), 'the ceiling: ' .. text)
+    ok(text:find('unknown string escape (5.1 reads the bare letter)', 1, true), text)
+    ok(text:find('a.lua:2', 1, true), 'at its line: ' .. text)
+    ok(not text:find('name-matched like the tier above', 1, true), 'a lexed escape is certain, not name-matched')
+    ok(text:find('BROKEN PROMISE', 1, true) and text:find('declares LuaJIT', 1, true), 'LuaJIT refuses the removed escape: ' .. text)
+    vim.fn.delete(root, 'rf')
+    -- a SPLIT alone: no floor, no ceiling, so the range [?, unbounded) straddles 5.2 (with the removal above the range
+    -- would end AT 5.2, and a split at 5.2 is then outside it)
+    local root2 = vim.fn.tempname(); vim.fn.mkdir(root2, 'p')
+    write(root2, 'b.lua', { 'local M = {}', 'M.c = "\\x41"', 'return M' })
+    local data2 = ts.extract(root2); data2.root = root2
+    store.ingest(data2)
+    local text2 = table.concat(vf.report(store), '\n')
+    ok(text2:find('BEHAVIOUR SPLITS INSIDE THE RANGE', 1, true) and text2:find('b.lua:2', 1, true), 'the \\x split: ' .. text2)
+    vim.fn.delete(root2, 'rf')
+end)
+
+test('versionfloor lua: \\z is a floor only with a line break after it (CART-2038)', function ()
+    if not lua_ready() then skip('no lua parser') end
+    eq(true, ids(vf.scan('lua', 'local s = "a\\z\n   b"'))['escape-z'] or false, '\\z then a line break: 5.1 refuses it')
+    eq(false, ids(vf.scan('lua', 'local s = "a\\zb"'))['escape-z'] or false, '\\zb loads on 5.1: no floor')
 end)

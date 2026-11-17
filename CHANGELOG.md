@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — versionfloor: Lua's string escapes are a ceiling and a behaviour split (report)
+
+- An escape 5.1 reads as the bare letter and 5.2+ refuse (`"\."`, `"\%"`, a backslash before a UTF-8 byte, a
+  malformed `\x` / `\u`) is a REMOVAL: the report shows a CEILING 5.2, and a LuaJIT declaration is a broken promise
+  (LuaJIT refuses them too). wow_addons: the 26 files 5.4 refuses for an escape, each at the reported line.
+- `\xXX`, `\u{XXX}` and `\z` without a line break load on 5.1 with another meaning: a BEHAVIOUR SPLIT at 5.2, shown
+  when the supported range straddles it. `\z` is a 5.2 floor only with a line break after it.
+- What each escape means is asked of lua5.1 / 5.2 / 5.4 / LuaJIT by tools/luafloor.lua (the `escapes` section of
+  spec/luafloor.lua); the escapes are found by Lua's string lexing, since an escape 5.2 refuses tears the tree.
+
 ## 2026-11-17 — Java: a variable of a nested class type names its lexical class (graph; cache v333)
 
 - A call through a local, parameter or loop variable declared with a simple nested class name resolves on that

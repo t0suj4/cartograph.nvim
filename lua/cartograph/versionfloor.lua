@@ -236,7 +236,8 @@ M.FEATURES.javascript, M.FEATURES.typescript, M.FEATURES.tsx = ES, ES, ES
 --     M.FEATURES.lua: undistilled is not floor-free. The spec pins which entries have
 --     no version and why. One does on 2026-11-13: `\u{..}` — 5.1 ACCEPTS it (an unknown
 --     escape reads as the bare letter, so the string means something else), 5.2 refuses
---     it, 5.4 accepts it. Loading is not the question there; meaning is.
+--     it, 5.4 accepts it. Loading is not the question there; meaning is — answered since
+--     CART-2038 by the distilled `escapes` and M.lua_escape_facts (a split at 5.2).
 local function lua_text(n, src) return vim.treesitter.get_node_text(n, src) or '' end
 -- the neighbouring STATEMENT: comments and a shebang line are not statements
 local LUA_NONSTMT = { comment = true, hash_bang_line = true }
@@ -270,8 +271,11 @@ M.LUA_SYNTAX = {
             return p == nil or p:type() == 'empty_statement'
         end,
         snippets = { ';', 'local x = 1;;', 'do ; end', '-- a comment is not a statement\n;' } },
+    -- (only `\z` with a LINE BREAK in the whitespace it skips: 5.1 then meets a raw newline in the string and refuses;
+    -- `\zb` / `\z  b` LOAD on 5.1 with the `z` kept — a behaviour split, not a floor, CART-2038 / M.lua_escape_facts)
     { id = 'escape-z', desc = '\\z string escape', node = 'escape_sequence',
-        test = lua_escape('\\z'), snippets = { 'local s = "a\\z\n   b"' } },
+        test = function (n, src) local t = lua_text(n, src); return t:sub(1, 2) == '\\z' and t:find('[\r\n]') ~= nil end,
+        snippets = { 'local s = "a\\z\n   b"' } },
     { id = 'escape-u', desc = '\\u{XXX} string escape', node = 'escape_sequence',
         test = lua_escape('\\u'), snippets = { 'local s = "\\u{48}"' } },
     -- a hex numeral with a fraction or a SIGNED binary exponent (5.1 hands an unsigned
@@ -858,6 +862,7 @@ function M.change_facts(store)
     for _, f in ipairs(M.syntax_facts(store, M.CHANGED_SYNTAX, 'changed:')) do
         out[#out + 1] = f
     end
+    for _, f in ipairs(M.lua_escape_facts(store, 'split')) do out[#out + 1] = f end -- (CART-2038)
     return out
 end
 
@@ -947,9 +952,128 @@ function M.syntax_facts(store, which, prefix)
     return out
 end
 
---- Tree-detected REMOVALS (the ceiling's second mechanism).
+-- ★ LUA STRING ESCAPES BY WHAT THEY MEAN (CART-2038). 5.1 reads an escape it does not know as the bare letter, so
+-- `"\."` LOADS on 5.1 and is refused from 5.2 on (a REMOVAL: the ceiling), and `"\x41"` loads everywhere but means
+-- "x41" on 5.1 and "A" from 5.2 (a BEHAVIOUR SPLIT). wow_addons (WoW = 5.1) holds 26 files that load on 5.1 only.
+-- Not from the tree: an escape 5.2+ refuses TEARS tree-sitter-lua's parse (the grammar follows 5.2+, TSGAP-0003), and
+-- a torn Lua tree is never read (M.scan). An escape is LEXICAL, so Lua's own string lexing finds it: comments, long
+-- brackets and quoted strings, each escape's KEY — the character after the backslash, or the FORM of x / u / z (two hex
+-- digits, `{hex}`, a line break in the whitespace \z skips). What a key MEANS — gone / split / floor, at which version,
+-- and LuaJIT's answer — is the interpreters', distilled into spec/luafloor.lua's `escapes`; this lexer holds no set.
+-- -> { { line = 0-based, key = string }, ... }
+function M.lua_escapes(src)
+    local out, i, n, line = {}, 1, #src, 0
+    local function hex(c) return c ~= '' and c:match('^%x$') ~= nil end
+    local function longbracket(at) -- `[` `=`* `[` at `at` -> its level, or nil
+        local eq = src:match('^%[(=*)%[', at)
+        return eq and #eq or nil
+    end
+    local function skip_long(at, level) -- past the matching close, counting lines
+        local close = ']' .. string.rep('=', level) .. ']'
+        local e = src:find(close, at, true)
+        local stop = e and (e + #close) or (n + 1)
+        local _, nl = src:sub(at, stop - 1):gsub('\n', '')
+        line = line + nl
+        return stop
+    end
+    if src:sub(1, 1) == '#' then -- a shebang line
+        local e = src:find('\n', 1, true)
+        i = e or n + 1
+    end
+    while i <= n do
+        local c = src:sub(i, i)
+        if c == '\n' then line = line + 1; i = i + 1
+        elseif c == '-' and src:sub(i + 1, i + 1) == '-' then
+            local lv = longbracket(i + 2)
+            if lv then i = skip_long(i + 2, lv)
+            else local e = src:find('\n', i, true); i = e or n + 1 end
+        elseif c == '[' and longbracket(i) then
+            i = skip_long(i, longbracket(i))
+        elseif c == '"' or c == "'" then
+            local q = c
+            i = i + 1
+            while i <= n do
+                local d = src:sub(i, i)
+                if d == q then i = i + 1; break
+                elseif d == '\n' then break -- (an unfinished string: every version refuses it; the lexer moves on)
+                elseif d == '\\' then
+                    local e = src:sub(i + 1, i + 1)
+                    local key, len = e, 2
+                    local b = e:byte() or 0
+                    -- (a byte no printable key names: its distilled CLASS key — a control character, or above 127)
+                    if e == '' then key = nil -- (a backslash at the end of the file: an unfinished string)
+                    elseif b >= 128 then key = 'high' elseif b < 32 and e ~= '\n' and e ~= '\r' or b == 127 then key = 'ctl' end
+                    if e == '\n' or e == '\r' then key = nil; line = line + 1
+                    elseif e:match('%d') then key = nil
+                    elseif e == 'x' then
+                        if hex(src:sub(i + 2, i + 2)) and hex(src:sub(i + 3, i + 3)) then key, len = 'x-hex', 4 end
+                    elseif e == 'u' then
+                        local body = src:match('^{(%x+)}', i + 2)
+                        if body then key, len = 'u-brace', 4 + #body end
+                    elseif e == 'z' then
+                        local ws = src:match('^[ \t\r\n\f\v]*', i + 2)
+                        key = ws:find('[\r\n]') and 'z-nl' or 'z'
+                        local _, nl = ws:gsub('\n', '')
+                        line = line + nl
+                        len = 2 + #ws
+                    end
+                    if key then out[#out + 1] = { line = line, key = key } end
+                    i = i + len
+                else i = i + 1 end
+            end
+        else i = i + 1 end
+    end
+    return out
+end
+
+-- what an escape key MEANS, from the distilled artifact; the groups the report names
+M.LUA_ESCAPE_DESC = {
+    gone = 'unknown string escape (5.1 reads the bare letter)',
+    ['x-hex'] = '\\xXX escape (5.1 reads "x" and the digits)',
+    ['u-brace'] = '\\u{XXX} escape (5.1 reads "u{..}", 5.2 refuses)',
+    z = '\\z without a line break (5.1 keeps the "z")',
+}
+function M.lua_escape_table()
+    local okd, dist = pcall(require, 'cartograph.spec.luafloor')
+    return okd and dist and dist.escapes or {}
+end
+--- Lua escape facts: `class` = 'gone' (removals, the ceiling) or 'split' (behaviour changes). Each fact carries
+--- `jit` (does LuaJIT accept it) for the report's LuaJIT column and a LuaJIT declaration.
+function M.lua_escape_facts(store, class)
+    local ts = require 'cartograph.providers.treesitter'
+    local exts = {}
+    for _, e in ipairs((ts.spec.lua and ts.spec.lua.exts) or {}) do exts[e] = true end
+    local E = M.lua_escape_table()
+    local out, seen = {}, {}
+    for _, nd in ipairs((store.data or {}).nodes or {}) do
+        local f = nd.file
+        local ext = f and f:match('%.([%w]+)$')
+        if f and not seen[f] and ext and exts[ext:lower()] then
+            seen[f] = true
+            local lines = store.content(nd)
+            if lines then
+                for _, esc in ipairs(M.lua_escapes(table.concat(lines, '\n'))) do
+                    local e = E[esc.key]
+                    if e and e.class == class then
+                        local id = class == 'gone' and 'escape-unknown' or ('escape-' .. esc.key)
+                        out[#out + 1] = { id = (class == 'gone' and 'gone:' or 'changed:') .. id, v = e.v,
+                            desc = M.LUA_ESCAPE_DESC[class == 'gone' and 'gone' or esc.key] or id,
+                            tier = 'certain', file = f, lang = 'lua', line = esc.line,
+                            jit = e.luajit ~= 'refuses' }
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out, function (a, b) if a.file ~= b.file then return a.file < b.file end return a.line < b.line end)
+    return out
+end
+
+--- Tree-detected REMOVALS (the ceiling's second mechanism), and Lua's escape removals (lexed, CART-2038).
 function M.removed_syntax_facts(store)
-    return M.syntax_facts(store, M.REMOVED_SYNTAX, 'gone:')
+    local out = M.syntax_facts(store, M.REMOVED_SYNTAX, 'gone:')
+    for _, f in ipairs(M.lua_escape_facts(store, 'gone')) do out[#out + 1] = f end
+    return out
 end
 
 --- The gate a CALL matches. The qualified form comes first and it matters: the
@@ -1031,6 +1155,19 @@ end
 --- downgrade ladder, the declared-vs-computed invariant, then the hedged tier.
 --- One section per scale, never one number across scales: ruby 3.1, python 3.8
 --- and ECMAScript 2022 are three different rulers.
+--- How many REMOVALS are modelled for a language: the call table, the tree table, and (Lua) the escape keys the
+--- interpreters say a newer version refuses (CART-2038)
+function M.removals_modelled(lang)
+    local n = 0
+    for _, t in ipairs({ M.REMOVED, M.REMOVED_SYNTAX }) do
+        for _ in pairs(t[lang] or {}) do n = n + 1 end
+    end
+    if lang == 'lua' then
+        for _, e in pairs(M.lua_escape_table()) do if e.class == 'gone' then n = n + 1 end end
+    end
+    return n
+end
+
 function M.report(store)
     local facts, stats = M.facts(store)
     local langs = {}
@@ -1189,6 +1326,19 @@ function M.report(store)
             elseif #ids > 0 then
                 L[#L + 1] = '  LuaJIT (a sibling dialect, not on this ruler) accepts every site above'
             end
+            -- (the REMOVED string escapes LuaJIT refuses too — listed under the ceiling below, counted here for a LuaJIT
+            -- declaration, CART-2038)
+            local jg = 0
+            for _, f in ipairs(gone[k] or {}) do
+                if f.lang == 'lua' and f.jit == false then
+                    jg = jg + 1
+                    jfirst = jfirst or ('%s at %s:%d'):format(f.desc, f.file, (f.line or 0) + 1)
+                end
+            end
+            if jg > 0 then
+                L[#L + 1] = ('  LuaJIT refuses %d removed-escape site(s) too (see the ceiling)'):format(jg)
+                jn = jn + jg
+            end
             -- (LuaJIT-ONLY syntax, CART-2039: no PUC version accepts these at all)
             local jby, jids = M.group(stats.jitonly or {})
             if #jids > 0 then
@@ -1257,13 +1407,18 @@ function M.report(store)
             else
                 L[#L + 1] = ('    supported range: [%s, %s)'):format(floor or '?', ceiling)
             end
-            L[#L + 1] = '    ~ name-matched like the tier above. A wrong removal makes the'
-            L[#L + 1] = '    ceiling too LOW, never too high, so the range errs narrow.'
-        elseif M.REMOVED[scalelangs[k][1]] == nil and k == 'ECMAScript' then
+            -- (the hedge belongs to NAME-MATCHED removals; a lexed escape or a tree token is certain, CART-2038)
+            local hedged_gone = false
+            for _, f in ipairs(gone[k] or {}) do if f.tier ~= 'certain' then hedged_gone = true end end
+            if hedged_gone then
+                L[#L + 1] = '    ~ name-matched like the tier above. A wrong removal makes the'
+                L[#L + 1] = '    ceiling too LOW, never too high, so the range errs narrow.'
+            end
+        elseif M.REMOVED[scalelangs[k][1]] == nil and M.removals_modelled(scalelangs[k][1]) == 0 and k == 'ECMAScript' then
             L[#L + 1] = '  no ceiling table for this scale — ECMAScript does not remove'
             L[#L + 1] = '  features, so there is no upper bound to compute — which is'
             L[#L + 1] = '  not the same claim as "unbounded"'
-        elseif M.REMOVED[scalelangs[k][1]] == nil then
+        elseif M.REMOVED[scalelangs[k][1]] == nil and M.removals_modelled(scalelangs[k][1]) == 0 then
             -- (this branch printed the ECMAScript sentence for every scale without a table — Lua's first, CART-0782 —
             -- and Lua DOES remove: 5.2 refuses the unknown string escapes 5.1 reads as the bare letter)
             L[#L + 1] = '  no ceiling table for this scale — removals are not modelled,'
@@ -1272,11 +1427,7 @@ function M.report(store)
         else
             -- silence would be ambiguous: "we looked and found nothing" reads the
             -- same as "we never looked". Say which.
-            local n = 0
-            for _, t in ipairs({ M.REMOVED, M.REMOVED_SYNTAX }) do
-                for _ in pairs(t[scalelangs[k][1]] or {}) do n = n + 1 end
-            end
-            L[#L + 1] = ('  no ceiling in evidence — %d known removals were checked for'):format(n)
+            L[#L + 1] = ('  no ceiling in evidence — %d known removals were checked for'):format(M.removals_modelled(scalelangs[k][1]))
         end
         -- BEHAVIOUR CHANGES: only those the supported range actually straddles.
         -- A change at C matters when you can run BOTH below and at/above it.
