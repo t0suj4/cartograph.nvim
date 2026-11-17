@@ -5267,16 +5267,28 @@ function M._resolve_arity(cv, node_index, addref)
     for i = 1, cv.n do
         local r = cget(i, 'refused')
         local full = cget(i, 'full')
-        if type(r) == 'table' and r.rule == 'ambiguous' and full and tsutil.complete(r) then
+        -- (a SAMEFILE refusal is the same question when its candidates are overloads of ONE class: the full list rides
+        -- beside the refusal, and same-named nested classes in one file are told apart by their path, CART-2121)
+        local sf = type(r) == 'table' and r.rule == 'samefile'
+        local cands = type(r) == 'table' and ((sf and SAMEALL[r]) or (tsutil.complete(r) and r.cands)) or nil
+        if type(r) == 'table' and (r.rule == 'ambiguous' or sf) and full and cands then
             local _, sp = elang_for(cget(i, 'file'))
             local argv = sp and sp.arity_overloads and full:match('^[%w_$]+::[%w_$]+$') and cget(i, 'argv')
             if argv then
                 local argc, spread = #argv, false
                 for _, a in ipairs(argv) do if a.k == 'spread' then spread = true end end
                 local fixed, var, same = {}, {}, not spread
-                for _, id in ipairs(r.cands) do
-                    local nd = node_index[id]
+                local path = sf and cget(i, 'cpath') or nil
+                for _, id in ipairs(cands) do
+                    local nd = type(id) == 'table' and id or node_index[id]
                     if not (nd and nd.name == full) then same = false; break end
+                    -- (a synthesized member with no parameter list has no count to compare: unknown, refuse)
+                    if nd.synth and nd.params == nil then same = false; break end
+                    if sf then
+                        -- one class: every candidate on one path, and on the call's own when it names one
+                        if nd.cpath == nil or (path and nd.cpath ~= path) then same = false; break end
+                        path = path or nd.cpath
+                    end
                     local np = #(nd.params or {})
                     if nd.variadic then
                         if argc >= np then var[#var + 1] = nd end
@@ -9794,7 +9806,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local id = uid(('%s::%s@%d'):format(file, sd.name, sp.start.line))
                 local node = { id = id, name = sd.name, kind = 'method',
                     file = file, range = sp, order = sp.start.line, synth = true, ovl = sd.ovl or nil,
-                    cpath = sd.cpath } -- (a synthesized member's nested-class path, CART-1077)
+                    cpath = sd.cpath, -- (a synthesized member's nested-class path, CART-1077)
+                    params = sd.params, variadic = sd.variadic } -- (its parameter list when the spec knows it: the arity pass, CART-2121)
                 nodes[#nodes + 1] = node
                 exact[sd.name] = exact[sd.name] or {}
                 table.insert(exact[sd.name], node)

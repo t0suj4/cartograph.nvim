@@ -1220,7 +1220,7 @@ local function java_synth_defs(tsroot, src)
                     if p:type() == 'formal_parameter' then
                         local pn = p:field('name')[1]
                         local comp = pn and node_text(pn, src)
-                        if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn, cpath = cp } end
+                        if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn, cpath = cp, params = {} } end
                     end
                 end
                 -- ★ AND ITS CANONICAL CONSTRUCTOR, unless the body declares it (CART-2070): `record UTF8Bytes(byte[] b, int o,
@@ -1246,8 +1246,20 @@ local function java_synth_defs(tsroot, src)
                     end
                 end
                 -- (`ovl`: another overload of the name, so a declared constructor does not shadow it — the call is then
-                -- ambiguous by name and refused, the honest answer until arity is consulted, CART-1385)
-                if not canonical then out[#out + 1] = { name = rec .. '::' .. rec, node = nm, ovl = true, cpath = cp } end
+                -- ambiguous by name, and the ARITY pass decides it by the components' count, CART-1385 / CART-2121)
+                if not canonical then
+                    -- (its PARAMETERS are the components: the arity pass reads the count, CART-2121)
+                    -- (a VARARGS last component makes it variadic: params are then the fixed prefix, as variadic_def's are)
+                    local comps, va = {}, nil
+                    for _, q in inext, ps, -1 do
+                        if q:type() == 'spread_parameter' then va = true
+                        elseif q:type() == 'formal_parameter' then
+                            local qn = q:field('name')[1]
+                            comps[#comps + 1] = qn and node_text(qn, src) or '?'
+                        end
+                    end
+                    out[#out + 1] = { name = rec .. '::' .. rec, node = nm, ovl = true, cpath = cp, params = comps, variadic = va }
+                end
             end
         end
         for _, c in inext, n, -1 do if c:named() then walk(c) end end

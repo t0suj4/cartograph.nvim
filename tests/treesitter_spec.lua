@@ -7181,7 +7181,14 @@ test('java: new T() calls T::T — plain, generic, nested and compact; none with
     eq(false, to['java.util.ArrayList::ArrayList'], 'an imported JDK class: its full name, no target')
     eq('Plain::Plain', to['Plain::Plain'], 'a record with no constructor: its implicit canonical one')
     eq('Canon::Canon', to['Canon::Canon'], 'a declared canonical constructor')
-    eq(false, to['UB::UB'], 'a declared one-arg constructor beside the implicit canonical one: two overloads, refused by name')
+    -- (two overloads by name; the implicit canonical one carries its three components as parameters, so the ARITY pass
+    -- decides `new UB(b, 0, 1)` — it was refused while the minted constructor had no parameter list, CART-2121)
+    eq('UB::UB', to['UB::UB'], 'a declared one-arg constructor beside the implicit canonical one: the count decides')
+    local ubto
+    for _, c in ipairs(data.calls) do if c.full == 'UB::UB' then ubto = c.to end end
+    local ubn
+    for _, n in ipairs(data.nodes) do if n.id == ubto then ubn = n end end
+    ok(ubn and ubn.synth and #ubn.params == 3, 'the three-argument call reaches the canonical (minted) constructor')
     local synth = {}
     for _, n in ipairs(data.nodes) do if n.synth and n.name and n.name:match('^(%w+)::%1$') then synth[n.name] = true end end
     eq({ ['Plain::Plain'] = true, ['UB::UB'] = true }, synth, 'only the records that do not declare it get one')

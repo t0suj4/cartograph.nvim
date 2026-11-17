@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — Java: overloads in the caller's own file are decided by argument count (graph; cache v327)
+
+- The arity pass now also reads a same-file refusal whose candidates are overloads of one class: `new x_result()`
+  beside `x_result(int)` and a copy constructor reaches the no-argument one. Overloads that share a count (they
+  differ by parameter type) stay refused, as do overloads spread over two same-named nested classes.
+- A record's implicit canonical constructor carries its components as parameters. It had none, so the pass read it
+  as taking no argument: `new E(Set.of(..))` linked to a declared `E(List)` constructor, and now it is refused (both
+  take one argument).
+- hive standalone-metastore: 3,913 calls resolved; elasticsearch server 9,996 (plus 59 record constructor calls, 7
+  wrong record picks withdrawn), libs 1,026 (plus 30, 10 withdrawn).
+
 ## 2026-11-17 — Java: a call into one of many same-named nested classes resolves by lexical class (graph; cache v326)
 
 - A Java method node carries `cpath`, the dotted path of its class (`ThriftHiveMetastore.a_args._Fields`), and a call
