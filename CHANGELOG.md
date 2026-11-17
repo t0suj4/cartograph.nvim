@@ -10,8 +10,13 @@ Breaking or client-visible changes to cartograph's surfaces. Internal changes ar
 - A record's implicit canonical constructor carries its components as parameters. It had none, so the pass read it
   as taking no argument: `new E(Set.of(..))` linked to a declared `E(List)` constructor, and now it is refused (both
   take one argument).
-- hive standalone-metastore: 3,913 calls resolved; elasticsearch server 9,996 (plus 59 record constructor calls, 7
-  wrong record picks withdrawn), libs 1,026 (plus 30, 10 withdrawn).
+- A method inside an anonymous or enum-constant body is no candidate of a call outside that body, and a call inside
+  one is not decided by either same-file pick (the anonymous class may inherit the name).
+- A class spelled qualified, `new B.K()` or a variable declared `B.K<..>`, is decided by its head: an enclosing
+  class or its member gives the path; a head no enclosing scope names is another file's class, and the call is not
+  matched to this file's `K` (`settings.build()` on a `Settings.Builder` had linked to the file's own `Builder`).
+- hive standalone-metastore: 3,910 calls resolved; elasticsearch server 10,151 (plus 59 record constructor calls, 7
+  wrong record picks withdrawn), libs 1,039 (plus 30, 10 withdrawn).
 
 ## 2026-11-17 — Java: a call into one of many same-named nested classes resolves by lexical class (graph; cache v326)
 

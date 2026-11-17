@@ -190,53 +190,90 @@ local function java_anon_between(node, stop)
     while p and p:id() ~= sid do
         if p:type() == 'class_body' then
             local pp = p:parent()
-            if pp and pp:type() == 'object_creation_expression' then return true end
+            -- (an enum constant's body `A { … }` is the same shape: an anonymous subclass of the enum, CART-2121)
+            if pp and (pp:type() == 'object_creation_expression' or pp:type() == 'enum_constant') then return true end
         end
         p = p:parent()
     end
     return false
 end
--- was the class a `written` key names spelled BARE at the call? `new B.K()` and `B.K.f()` key `K` as well, and B's K
--- is not the K a lexical lookup finds
-local function java_written_bare(calln)
+-- the class a `written` key names AS SPELLED at the call: { 'B', 'K' } for `new B.K()` / `B.K.f()`, { 'K' } for a bare
+-- K, nil when the spelling is not a chain of plain names
+local function java_written_chain(calln, src)
+    local t
     if calln:type() == 'object_creation_expression' then
-        local ty = calln:field('type')[1]
-        if ty and ty:type() == 'generic_type' then ty = ty:named_child(0) end
-        return ty ~= nil and ty:type() == 'type_identifier'
+        t = calln:field('type')[1]
+        if t and t:type() == 'generic_type' then t = t:named_child(0) end
+        if not (t and (t:type() == 'type_identifier' or t:type() == 'scoped_type_identifier')) then return nil end
+    else
+        t = calln:field('object')[1]
+        if not (t and (t:type() == 'identifier' or t:type() == 'field_access')) then return nil end
     end
-    local obj = calln:field('object')[1]
-    return obj ~= nil and obj:type() == 'identifier'
+    local txt = node_text(t, src):gsub('%b<>', ''):gsub('%s+', '')
+    if not txt:match('^[%w_$]+[%w_$.]*$') then return nil end
+    return vim.split(txt, '.', { plain = true })
 end
--- the path of the class a call's key names -> path | nil. `self` (implicit this / this.m()): the enclosing class.
--- `written` (`_Fields.m()`, `new X()`, a BARE simple class name): the member type of the innermost enclosing class that
--- declares it. Declines (nil): a class passed on the way out with a supertype clause, or an anonymous class body on
--- the way (either may inherit a member that shadows the outer one, and what a supertype declares is not visible
--- here); a qualified spelling (`new B.K()`).
-local function java_call_path(calln, src, how, key)
-    if how == 'self' then
-        local _, c = java_enclosing_class(calln, src)
-        if not c or java_anon_between(calln, c) then return nil end
-        return java_class_path(c, src)
-    end
-    if how ~= 'written' or not java_written_bare(calln) then return nil end
-    local x = key and key:match('^([%w_$]+)::[%w_$]+$')
-    if not x then return nil end
-    local _, c = java_enclosing_class(calln, src)
+-- the path a SIMPLE class name `x` means at `node` -> path | '' | nil: the member type of the innermost enclosing class
+-- that declares it, or an enclosing class of that name itself. false = no enclosing scope names it (a top-level class
+-- of this package, an import: another file's, as far as a lexical lookup knows); nil = not decided (the walk passed a
+-- class with a supertype clause, whose inherited member types are not visible here); '' = undecidable (an anonymous /
+-- enum-constant body on the way).
+local function java_lex_path(node, src, x, through)
+    local _, c = java_enclosing_class(node, src)
     while c do
+        local nm = c:field('name')[1]
         if java_declares_member(c, x, src) then
-            if java_anon_between(calln, c) then return nil end
-            local base = java_class_path(c, src)
-            if not base then
-                local n = c:field('name')[1]
-                base = n and node_text(n, src)
-            end
+            if java_anon_between(node, c) then return '' end
+            local base = java_class_path(c, src, true)
             return base and (base .. '.' .. x) or nil
         end
-        if java_has_supertypes(c) then return nil end
+        if nm and node_text(nm, src) == x then
+            if java_anon_between(node, c) then return '' end
+            return java_class_path(c, src, true)
+        end
+        -- (a supertype clause: an INHERITED member type may shadow an outer one — not decided here, and not refused:
+        -- '' here withdrew 3,091 of hive's 3,913 checked arity picks, thrift's `new x_result()` in a ProcessFunction)
+        -- (`through`: a qualified HEAD walks on — a name an enclosing scope declares is the confident reading, and only
+        -- a head NO scope names is another file's; stopping here re-opened `Z.K.f()` landing on this file's K)
+        if java_has_supertypes(c) and not through then return nil end
         local _, outer = java_enclosing_class(c, src)
         c = outer
     end
-    return nil
+    return false
+end
+-- the path of the class a call's key names -> path | '' | nil. `self` (implicit this / this.m()): the enclosing class.
+-- `written` (`_Fields.m()`, `new X()`, `new Outer.K()`): the chain's HEAD as a simple name (java_lex_path), then its
+-- segments. nil = not decided here (the resolver's same-file reading stands). '' = UNDECIDABLE, and every same-file
+-- pick (the path pick, the arity pass, CART-2121) must refuse: an anonymous / enum-constant body on the way (a subclass
+-- of something, whose own members are keyed to the named class around it), or a QUALIFIED spelling whose head no
+-- enclosing scope names — `new StreamingGeometrySimplifier.LineSimplifier()` is another file's class, not this file's
+-- LineSimplifier.
+local function java_call_path(calln, src, how, key, qcls)
+    -- (a receiver typed through a VARIABLE whose declared type is spelled QUALIFIED — `ImmutableOpenMap.Builder<..>
+    -- indices` — is keyed by its last segment, `Builder::get`, as this file's own Builder is: the head decides, as for a
+    -- written `new B.K()`. A simple declared type is not decided here, CART-2123)
+    if how == 'binder' then
+        local chain = qcls and qcls:find('.', 1, true) and vim.split(qcls, '.', { plain = true }) or nil
+        if not chain then return nil end
+        local hp = java_lex_path(calln, src, chain[1], true)
+        if not hp or hp == '' then return '' end
+        return hp .. '.' .. table.concat(chain, '.', 2)
+    end
+    if how == 'self' then
+        local _, c = java_enclosing_class(calln, src)
+        if not c then return nil end
+        if java_anon_between(calln, c) then return '' end
+        return java_class_path(c, src) -- (nil at the top level: nothing to decide)
+    end
+    if how ~= 'written' then return nil end
+    local x = key and key:match('^([%w_$]+)::[%w_$]+$')
+    local chain = java_written_chain(calln, src)
+    if not (x and chain and chain[#chain] == x) then return nil end
+    if #chain == 1 then return java_lex_path(calln, src, x) or nil end
+    -- (a qualified head no enclosing scope names is another file's class: undecidable here)
+    local hp = java_lex_path(calln, src, chain[1], true)
+    if not hp or hp == '' then return '' end
+    return hp .. '.' .. table.concat(chain, '.', 2)
 end
 
 -- Spring stereotype annotations: a class carrying one is a DI-managed BEAN.
@@ -1463,9 +1500,14 @@ return {
     -- the NESTED-CLASS PATH of a method's class / of the class a call's key names (CART-1077; see java_call_path)
     -- (a DEF's path is written at every depth, top level included: the pick reads a candidate WITHOUT one as a node it
     -- cannot place, and declines)
+    -- (a def inside an ANONYMOUS or enum-constant body is keyed to the named class around it, but it is another class's
+    -- member: its path is '' — on no named class's path, so no same-file pick reads it as the named class's overload,
+    -- and a call that names no path refuses over it, CART-2121)
     def_path = function (defn, src)
         local _, c = java_enclosing_class(defn, src)
-        return c and java_class_path(c, src, true) or nil
+        if not c then return nil end
+        if java_anon_between(defn, c) then return '' end
+        return java_class_path(c, src, true)
     end,
     call_path = java_call_path, -- the class names each field's type refers to: data.typerefs (CART-0697)
     qualify_call = function (calln, name, src, model)

@@ -4746,7 +4746,8 @@ function M._samefile_all(r) return SAMEALL[r] or r.cands end
 -- path are overloads — arity's question, not scope's — and stay refused. A same-file candidate WITHOUT a path is a node
 -- the spec did not place (a mint that never learned cpath): it may be the one on the path, so the pick declines.
 function M._path_pick(cands, cpath, file, node_index)
-    if not cpath then return nil end
+    -- ('' on the call: undecidable; '' on a def: an anonymous body's member, on no named path — never equal to a call's)
+    if not cpath or cpath == '' then return nil end
     local one
     for _, cid in ipairs(cands or {}) do
         local n = type(cid) == 'table' and cid or node_index[cid]
@@ -5278,21 +5279,32 @@ function M._resolve_arity(cv, node_index, addref)
                 local argc, spread = #argv, false
                 for _, a in ipairs(argv) do if a.k == 'spread' then spread = true end end
                 local fixed, var, same = {}, {}, not spread
-                local path = sf and cget(i, 'cpath') or nil
-                for _, id in ipairs(cands) do
+                -- (one class: the call's own path when it names one — candidates on ANOTHER path are another class's, not
+                -- its overloads; without one, every candidate must share a path. A candidate with NO path (nil) is a
+                -- member the spec could not place, and refuses the call)
+                local cpath = sf and cget(i, 'cpath') or nil
+                if cpath == '' then same = false end -- (the call is UNDECIDABLE: an anonymous body, a foreign qualifier)
+                local path = cpath
+                for _, id in ipairs(same and cands or {}) do
                     local nd = type(id) == 'table' and id or node_index[id]
                     if not (nd and nd.name == full) then same = false; break end
-                    -- (a synthesized member with no parameter list has no count to compare: unknown, refuse)
-                    if nd.synth and nd.params == nil then same = false; break end
-                    if sf then
-                        -- one class: every candidate on one path, and on the call's own when it names one
-                        if nd.cpath == nil or (path and nd.cpath ~= path) then same = false; break end
-                        path = path or nd.cpath
+                    if sf and nd.cpath == nil then same = false; break end -- (a member the spec could not place)
+                    -- (in a samefile refusal: an anonymous body's member, path '', is no candidate of a call outside that
+                    -- body — an anonymous class's members are reachable only from inside it; a call naming its path takes
+                    -- that path's candidates; one naming none needs every candidate on one path)
+                    local take = not sf or (cpath and nd.cpath == cpath) or (not cpath and nd.cpath ~= '')
+                    if take and sf and not cpath then
+                        if path and nd.cpath ~= path then same = false; break end
+                        path = nd.cpath
                     end
-                    local np = #(nd.params or {})
-                    if nd.variadic then
-                        if argc >= np then var[#var + 1] = nd end
-                    elseif argc == np then fixed[#fixed + 1] = nd end
+                    -- (a synthesized member with no parameter list has no count to compare: unknown, refuse)
+                    if take and nd.synth and nd.params == nil then same = false; break end
+                    if take then
+                        local np = #(nd.params or {})
+                        if nd.variadic then
+                            if argc >= np then var[#var + 1] = nd end
+                        elseif argc == np then fixed[#fixed + 1] = nd end
+                    end
                 end
                 local pick = same and ((#fixed == 1 and #var == 0 and fixed[1])
                     or (#fixed == 0 and #var == 1 and var[1])) or nil
@@ -10618,7 +10630,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
                         rcls = rcls, -- the receiver's class (cpp spec.recv_class): the `recv` pass's key (CART-2111)
                         -- the NESTED-CLASS PATH of the class the key names (java, CART-1077): the same-file path pick
-                        cpath = qhow and spec.call_path and spec.call_path(calln, src, qhow, full) or nil,
+                        cpath = qhow and spec.call_path and spec.call_path(calln, src, qhow, full, qcls) or nil,
                         rfld = rfld, -- a FIELD receiver: owner class \31 field \31 operator, typed via data.fieldtypes (CART-2112)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
@@ -12010,6 +12022,8 @@ local function build_symtab(nodes)
             -- `override` rides along or the monkey-patch fence dies in the copy
             -- and the parallel graph disagrees with the inline one (CART-0616)
             override = n.override,
+            -- (the arity pass reads a varargs mark and a synthesized member's mark; resolve's synth filter reads ovl, CART-2121)
+            variadic = n.variadic, synth = n.synth, ovl = n.ovl,
             params = n.params, locals = n.locals, dfdef = dfdef }
         node_index[n.id] = stub
         if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl
