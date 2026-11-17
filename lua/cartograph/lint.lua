@@ -9,6 +9,14 @@
 -- the checks are structural — they surface smells, they don't prove bugs.
 
 local M = {}
+
+-- ★ A RULE CAN SAY IT DID NOT APPLY (CART-0228). run() returns its findings, and MAY return a second value made by
+-- M.not_applicable(why): a precondition is unmet (no Lua file, no manifest, no seam declared, not an ansible tree),
+-- so its empty list is not "nothing found here". Without it the silence of a rule that never looked and the silence
+-- of a rule that looked and found nothing were the same `{}` — the absence-rendered-as-silence class, on the last
+-- surface that still had it. lint.run hands these back as its THIRD return, keyed by rule name.
+function M.not_applicable(why) return { status = 'not-applicable', why = why } end
+local na = M.not_applicable
 local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
@@ -92,7 +100,7 @@ M.listener_config = {
 
 local function listener_findings(store)
     local cfg, calls = M.listener_config, store.data.calls
-    if not calls or #calls == 0 then return {} end
+    if not calls or #calls == 0 then return {}, na('the graph has no calls') end
     local function abs(c) return store.abs(callrec.file(c)) end
     local function keyname(c, spec)
         local a = argv.str(c, spec.at + (callrec.method(c) and 1 or 0))
@@ -117,7 +125,9 @@ local function listener_findings(store)
             if n then unsubL[n] = true else unsubDyn = true end
         end
     end
-    if not next(reg) then return out end -- no register_listener anywhere: not a listener project
+    if not next(reg) then -- no register_listener anywhere: not a listener project
+        return out, na(('no %s call anywhere: not a listener project'):format(cfg.register.verb))
+    end
 
     -- subscribe/unsubscribe to a name that's never registered -> runtime error
     for _, c in ipairs(calls) do
@@ -218,7 +228,7 @@ end
 
 local function swallowed_findings(store)
     local calls = store.data.calls
-    if not calls or #calls == 0 then return {} end
+    if not calls or #calls == 0 then return {}, na('the graph has no calls') end
     -- the FIX this rule offers is a lua-ls annotation (---@return /
     -- ---@type): on other languages every name-matched call would fire
     -- it with no repair to offer — noise, not findings
@@ -226,7 +236,7 @@ local function swallowed_findings(store)
     for _, f in ipairs(store.files) do
         if f:match('%.lua$') then any_lua = true break end
     end
-    if not any_lua then return {} end
+    if not any_lua then return {}, na('no Lua file: the repair this rule offers is a lua-ls annotation') end
 
     -- vm-resolved calls by file:line, to find the getter behind a def site
     local resolved_at = {}
@@ -312,7 +322,7 @@ end
 -- load) and listed files that don't exist.
 local function load_order_findings(store)
     local t = store.toc
-    if not t then return {} end
+    if not t then return {}, na('no load-order manifest (a WoW .toc) in this tree') end
     local out = {}
     for _, c in callrec.each(store.data) do
         if c.top and callrec.to(c) then
@@ -575,7 +585,7 @@ end
 -- any time, and a raw read is a latent break. Line-tier scan (~).
 local function seam_findings(store)
     local seams = require('cartograph.config').seams
-    if not seams or #seams == 0 then return {} end
+    if not seams or #seams == 0 then return {}, na('no representation seam is declared (config.seams)') end
     local out = {}
     for _, file in ipairs(store.files) do
         if file:match('%.lua$') then
@@ -985,7 +995,7 @@ end
 
 local function silent_drop_findings(store)
     local calls = store.data.calls
-    if not calls or #calls == 0 then return {} end
+    if not calls or #calls == 0 then return {}, na('the graph has no calls') end
     local df = require 'cartograph.df'
     local at = require 'cartograph.at'
     local locals, seen, out = {}, {}, {}
@@ -2172,7 +2182,7 @@ M.rules = {
 
         run = function (store)
             local d = store.data.dblink
-            if not d then return {} end
+            if not d then return {}, na('no database schema is linked (config.db)') end
             local out = {}
             for _, m in ipairs(d.missing) do
                 local n = store.node('sql::table:' .. m.name)
@@ -2243,7 +2253,7 @@ M.rules = {
         name = 'ansible-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
-            if not a then return {} end
+            if not a then return {}, na('not an ansible tree') end
             local out = {}
             for _, u in ipairs(a.noop) do
                 out[#out + 1] = { file = store.abs(u.file),
@@ -2272,7 +2282,7 @@ M.rules = {
         name = 'ansible-vars', severity = 'info', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
-            if not a then return {} end
+            if not a then return {}, na('not an ansible tree') end
             local out = {}
             for _, name in ipairs(a.unused_vars or {}) do
                 out[#out + 1] = { file = '', line = 1, severity = 'info',
@@ -2582,11 +2592,13 @@ end
 --- @return table findings
 --- @return table refused  { { rule, quantifier, why } } — the rules a SCOPE made
 ---   illegal. Second return, so every existing caller is untouched.
+--- @return table inapplicable  { [rule] = { status = 'not-applicable', why } } — the rules that ran and said a
+---   precondition was unmet, so their empty answer is not a clean one (CART-0228)
 function M.run(store, opts)
     local only = opts and opts.only
     local sc = opts and opts.scope
     local cut = sc and require 'cartograph.cut'
-    local findings, refused = {}, {}
+    local findings, refused, inapplicable = {}, {}, {}
     local rules, bad = M.all_rules()
     for _, b in ipairs(bad) do
         if not only or only[b.rule] then refused[#refused + 1] = b end
@@ -2616,10 +2628,11 @@ function M.run(store, opts)
                     why = ('asserts an absence over %s — this %s cut cannot hold it')
                         :format(rule.closed_over or 'an unstated space', sc.grain) }
             else
-                local got = walked[rule]
+                local got, cov = walked[rule], nil
                 if not got and rule.user then
                     -- (a user rule that raises, or answers something other than a list, is refused and SAID)
-                    local okr, res = pcall(rule.run, store)
+                    local okr, res, ucov = pcall(rule.run, store)
+                    cov = okr and ucov or nil
                     if not okr then
                         refused[#refused + 1] = { rule = rule.name, user = true, quantifier = rule.quantifier,
                             closed_over = rule.closed_over, why = 'config.lints: ' .. rule.name .. ' raised: ' .. tostring(res) }
@@ -2646,8 +2659,14 @@ function M.run(store, opts)
                                 :format(rule.name, dropped) }
                     end
                     got = kept
+                elseif not got then
+                    got, cov = rule.run(store)
                 end
-                for _, f in ipairs(got or rule.run(store)) do
+                -- (only a marked value counts: a run() that forwards a helper's extra returns says nothing by it)
+                if type(cov) == 'table' and cov.status == 'not-applicable' and #got == 0 then
+                    inapplicable[rule.name] = { status = cov.status, why = tostring(cov.why or '') }
+                end
+                for _, f in ipairs(got) do
                     -- `not sc` FIRST: the unscoped path must not touch `cut` at
                     -- all, and it is the path every existing caller takes
                     if not sc or cut.contains(store, sc, f.file, f.line) then
@@ -2675,7 +2694,7 @@ function M.run(store, opts)
         if (a.col or 0) ~= (b.col or 0) then return (a.col or 0) < (b.col or 0) end
         return tostring(a.message or a.msg) < tostring(b.message or b.msg)
     end)
-    return findings, refused
+    return findings, refused, inapplicable
 end
 
 return M

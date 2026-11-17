@@ -1606,7 +1606,8 @@ local function v_lint_run(store, args)
         if not f then return unknown_file(store, args.file, why, hits, 'file') end
         file = f
     end
-    local findings, declined = lint.run(store, only and { only = only } or nil)
+    local findings, declined, inapplicable = lint.run(store, only and { only = only } or nil)
+    inapplicable = inapplicable or {}
     local rows = {}
     local bounded, bproj = 0, nil -- (findings over a partial index root, CART-0678)
     for _, f in ipairs(findings) do
@@ -1650,8 +1651,21 @@ local function v_lint_run(store, args)
         notes[#notes + 1] = { kind = 'rule-refused', premise = d.rule, why = d.why,
             evidence = { quantifier = nn(d.quantifier), closed_over = nn(d.closed_over), user = d.user or nil } }
     end
+    -- ★ A RULE THAT DID NOT APPLY IS NOT A RULE THAT FOUND NOTHING (CART-0228): one note names them with their reasons,
+    -- and `ran` counts only the rules that looked
+    local napp, nanames = {}, {}
+    for name, c in pairs(inapplicable) do napp[name] = c.why; nanames[#nanames + 1] = name end
+    table.sort(nanames)
+    if #nanames > 0 then
+        notes[#notes + 1] = { kind = 'rules-not-applicable', premise = 'rule-preconditions',
+            why = ('%d rule(s) did not apply to this graph, so their silence says nothing about it: %s'):format(
+                #nanames, table.concat(nanames, ', ')),
+            evidence = { rules = napp } }
+    end
     local ran = 0
-    for _, r in ipairs(rules) do if not only or only[r.name] then ran = ran + 1 end end
+    for _, r in ipairs(rules) do
+        if (not only or only[r.name]) and not inapplicable[r.name] then ran = ran + 1 end
+    end
     if #rows > 0 then return { result = rows, notes = notes } end
 
     local g = M.graph(store)
@@ -1660,6 +1674,13 @@ local function v_lint_run(store, args)
             premise = 'rules-declined',
             why = ('no finding, and %d rule(s) DECLINED to run (over a scope they cannot support, or an invalid config.lints rule) — an empty report is not a clean bill of health'):format(#declined),
             evidence = { declined = #declined } }, notes = notes }
+    end
+    if ran == 0 and #nanames > 0 then
+        return { result = {}, absence = 'unavailable', absence_why = {
+            premise = 'rules-not-applicable',
+            why = ('no selected rule applies to this graph: %s'):format(table.concat(vim.tbl_map(function (n)
+                return n .. ' (' .. napp[n] .. ')' end, nanames), '; ')),
+            evidence = { rules = napp } }, notes = notes }
     end
     if g.frontier.unparsed_files > 0 then
         return { result = {}, absence = 'frontier', absence_why = {
@@ -1670,9 +1691,11 @@ local function v_lint_run(store, args)
     end
     return { result = {}, absence = 'absent', absence_why = {
         premise = 'no-rule-fired',
-        why = ('%d rule(s) ran over %d parsed file(s) and none fired%s'):format(
-            ran, g.counts.files, file and (' in ' .. file) or ''),
-        evidence = { rules = ran, files = g.counts.files, file = nn(file) } }, notes = notes }
+        why = ('%d rule(s) ran over %d parsed file(s) and none fired%s%s'):format(
+            ran, g.counts.files, file and (' in ' .. file) or '',
+            #nanames > 0 and (' (%d more did not apply)'):format(#nanames) or ''),
+        evidence = { rules = ran, files = g.counts.files, file = nn(file),
+            not_applicable = #nanames > 0 and #nanames or nil } }, notes = notes }
 end
 
 -- ════ THE ANALYSIS CATALOGUE (CART-0145 half B) ═════════════════════════════

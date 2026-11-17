@@ -2111,6 +2111,16 @@ raises an error, and one that returns findings with no position. Each is
 rules still run. A rule that silently did not run would read like a rule that
 found nothing.
 
+**A rule can say it did not apply.** `run()` may return
+`lint.not_applicable(why)` as a second value beside an empty list, for
+example when this graph has no Lua file, no load manifest, no declared seam,
+no linked schema, or is not an ansible tree. The built-in rules with such a
+precondition do this. `lint.run` returns them as its third value. The
+agent's `lint_run` names them in one `rules-not-applicable` note and counts
+only the rules that looked; a selection where none applies answers
+`unavailable`, not "nothing found". `:CartographLint` adds them to its "no
+findings" message, and the dogfood report lists them in their own group.
+
 ## Escalation (confirm the `~` hotspots against lua-ls)
 
 `:CartographEscalate` spends the expensive oracle *only where the cheap

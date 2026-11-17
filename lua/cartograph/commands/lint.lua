@@ -43,8 +43,13 @@ function M.register(H)
             end
             title = 'cartograph lint — ' .. scope.label
         end
-        local findings, refused =
+        local findings, refused, inapplicable =
             require('cartograph.lint').run(store, { scope = scope })
+        -- (a rule whose precondition is unmet did not look: named with the count, so "no findings" is not overread)
+        local nap = {}
+        for r in pairs(inapplicable or {}) do nap[#nap + 1] = r end
+        table.sort(nap)
+        local napnote = #nap > 0 and (' (%d rule(s) did not apply here: %s)'):format(#nap, table.concat(nap, ', ')) or ''
         say_user_refusals(refused)
         local scoped = {}
         for _, r in ipairs(refused) do if not r.user then scoped[#scoped + 1] = r end end
@@ -59,8 +64,8 @@ function M.register(H)
                     #refused > 4 and ', …' or ''), vim.log.levels.INFO)
         end
         if #findings == 0 then
-            return vim.notify(('cartograph: no lint findings%s')
-                :format(scope and (' in ' .. scope.label) or ''), vim.log.levels.INFO)
+            return vim.notify(('cartograph: no lint findings%s%s')
+                :format(scope and (' in ' .. scope.label) or '', napnote), vim.log.levels.INFO)
         end
         local qf = {}
         for _, f in ipairs(findings) do

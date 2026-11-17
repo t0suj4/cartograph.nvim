@@ -95,7 +95,7 @@ function M.report(store)
     for _, m in ipairs(mis) do line('    ~ ' .. m) end
     line('')
 
-    local findings = lint.run(store)
+    local findings, _, inapplicable = lint.run(store)
     local by_rule, seam_sites = {}, {}
     for _, f in ipairs(findings) do
         by_rule[f.rule] = (by_rule[f.rule] or 0) + 1
@@ -138,6 +138,14 @@ function M.report(store)
         if g == 'authoritative' then
             for _, r in ipairs(rules) do auth_n = auth_n + by_rule[r] end
         end
+    end
+    -- a rule whose precondition is unmet is not a zero (CART-0228): its own group, with the reason it gave
+    local nap = {}
+    for r in pairs(inapplicable or {}) do nap[#nap + 1] = r end
+    table.sort(nap)
+    if #nap > 0 then
+        line('  NOT APPLICABLE — the rule did not look; its silence is not a zero:')
+        for _, r in ipairs(nap) do line(('    %-18s %s'):format(r, inapplicable[r].why)) end
     end
 
     -- `authoritative` counts seam-guard TOO: it is the original gated rule and is

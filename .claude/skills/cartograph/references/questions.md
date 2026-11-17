@@ -168,6 +168,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 | Which entry point owns each node; commons, core and the borders between them | MCP `territory` |
 | Which functions are dead / possibly dead, and why is this one alive? | lint `dead-confined`, `dead-function` (MCP `lint_run`, `:CartographLint`); a corpus-closed finding over a root that sits INSIDE a larger repository (a `.git` above it; HOME's own excluded) carries `boundary` = that project, and `lint_run` adds an `index-root-is-partial` note — a caller outside the root is indistinguishable from none (CART-0678); the alibi verb (`lint.alibi(store)`, MCP `why`) — inheritance contract both ways since CART-0714; erlang `-behaviour` callbacks (the tree's `-callback` + the otp-api profile's `behaviours`, alibi kind `behaviour-callback`) since CART-1117; `dead-function` skips a function whose VALUE is read (`escapes`: returned, passed, stored) since CART-1655 |
 | Which records does an erlang tree declare and never use; which fields are never named? | `tools/erlrecordcensus.lua --unused` |
+| A lint rule returned nothing: did it LOOK, or does it not apply to this graph (no Lua file, no manifest, no seam declared, not an ansible tree, no linked schema)? | MCP `lint_run`: a `rules-not-applicable` note names each with its reason, the `absent` answer counts only the rules that looked, and a selection where none applies is `unavailable`; in-process the THIRD return of `lint.run(store)`, `{ [rule] = { status, why } }`; dogfood prints a NOT APPLICABLE group (CART-0228) |
 
 ## Across the wire: the XMPP triple (ejabberd × payload spec × converse.js)
 
@@ -257,6 +258,7 @@ Every verb here PROPOSES: it writes nothing and returns a plan handle for the ne
 
 | Question | How |
 |---|---|
+| How does a project add its OWN lint rule (a convention of this codebase)? | `setup{ lints = { { name, run = function (store) return { {file, line (1-based), message} } end, quantifier?, severity?, closed_over?, disposition? } } }`. It runs beside the built-ins in `lint_run` / `:CartographLint`. An undeclared quantifier is a promise, so a scoped run refuses it. An invalid or raising rule comes back as a `rule-refused` note (`evidence.user`), and run() may return `lint.not_applicable(why)` second (CART-0127) |
 | How do I override a DERIVED answer for one tree only? | `setup{ scoped = { [path prefix] = { key = value } } }`, read by `config.for_root(root, key)` (longest prefix wins, global fallback). User rule: derivation over hand-maintained lists; exceptions only through scoped configuration. Keys today: `behaviour_suppliers = 'derived' \| 'otp'` |
 
 ## In-process: library calls that answer a question
