@@ -497,7 +497,6 @@ local function build(store, opts)
     -- processed in the same relative order whatever else the tree holds. (`opts.order` = 'asc' / 'lifo' / 'fifo':
     -- other orders, an INSTRUMENT — how much an answer depends on the schedule)
     local order = opts.order
-    local pinfo = nil -- (recomputed, see less; R.pinfo answers per port)
     local LATE = { math.huge, '' } -- (a port made after the walk other than a field port: last, by number)
     local less
     less = function (a, b)
@@ -604,11 +603,11 @@ local function build(store, opts)
     local EMPTY = {}
     local function one(st, ctl) if ctl == nil then return st end end
     -- (a delta's objects, a number or a list, without a table for the one-object case)
-    local function one_i(n, i) if i == 0 then return 1, n end end
-    local function dit(d) if type(d) == 'number' then return one_i, d, 0 end return ipairs(d) end
+    G7.one_i = function (n, i) if i == 0 then return 1, n end end -- (on G7: the builder is at Lua's 200-local limit, CART-2042)
+    local function dit(d) if type(d) == 'number' then return G7.one_i, d, 0 end return ipairs(d) end
     -- (a port's successors, a number or a set, as pairs would give them)
-    local function one_k(n, k) if k == nil then return n end end
-    local function sit(s) if type(s) == 'number' then return one_k, s, nil end return next, s or NOTHING, nil end
+    G7.one_k = function (n, k) if k == nil then return n end end
+    local function sit(s) if type(s) == 'number' then return G7.one_k, s, nil end return next, s or NOTHING, nil end
     local function each(p)
         local s = pts[p]
         if s == nil then return next, EMPTY, nil end
@@ -622,7 +621,6 @@ local function build(store, opts)
         if s and s.bs then return bs_test(s, o) end
         return s ~= nil and s[o] == true
     end
-    local BIG = M.BIG
     local function tobits(p) -- p's set as a bitset
         local s = pts[p]
         if type(s) == 'table' and s.bs then return s end
@@ -654,7 +652,7 @@ local function build(store, opts)
             if s[o] then return end
             s[o] = true
             n = cnt[p] + 1; cnt[p] = n
-            if n > BIG then tobits(p) end
+            if n > M.BIG then tobits(p) end
         end
         if G7.TR and G7.TSRC then G7.trbump(G7.TSRC, p, G7.TKIND) end
         if G7.XARR then local xr = G7.XARR[o]; if xr and xr[p] == nil then xr[p] = G7.ESRC or false end end
@@ -667,7 +665,7 @@ local function build(store, opts)
         elseif d.bs then bs_set(d, o)
         else
             d[#d + 1] = o
-            if #d > BIG then dbits(p) end
+            if #d > M.BIG then dbits(p) end
         end
         push(p)
     end
@@ -916,7 +914,7 @@ local function build(store, opts)
     -- `vim.split` -> string[], `TSNode:field()` -> TSNode[], `LanguageTree:parse()` -> table<integer, TSTree> — and a
     -- value read out of one (`lines[i]`, `node:field('name')[1]`) is its element type. On lua/cartograph most
     -- ambiguous calls with nothing at the receiver held values from outside: tree-sitter nodes and strings.
-    local function elemtype(tn)
+    G7.elemtype = function (tn)
         if tn:match('^%(?fun%(') then return nil end -- (`fun(): T[]` returns a list; it is none)
         local e = tn:match('^(.-)%[%]$')
         if e then return e end
@@ -994,7 +992,7 @@ local function build(store, opts)
                 local k = f .. '\0' .. dst
                 if not m[k] then m[k] = { f, dst, strict } end
             end
-            local e = (f == '#' or f == '[]' or not strict) and elemtype(tn)
+            local e = (f == '#' or f == '[]' or not strict) and G7.elemtype(tn)
             if e and e ~= '' then addobj(dst, typeobj((e:gsub('%?$', '')))) end
             -- (a host RECORD's declared field, CART-1827: `debug.getinfo(1, 'S').source` is a string — the profile's
             -- class_fields. Only a PRIMITIVE type is believed: debuginfo's `func: function` is the function asked about,
@@ -3129,10 +3127,12 @@ local function build(store, opts)
     -- inside it — is instantiable: walked again from its own text with ports of its own. A generic for binds its
     -- iterator to an instance per loop, so one loop's values no longer pour into every other's: tsutil.inext's node
     -- parameter took a node from every loop in the tree and saturated, and every inext loop variable was partial
-    local CLONE, CLONE_MAX = {}, 600 -- fn object -> { file, id, src, l, c }: the function's own position
+    local CLONE = {}
+    G7.CLONE_MAX = 600 -- fn object -> { file, id, src, l, c }: the function's own position
     -- (CART-1687: a loop site minted INSIDE an instance walk takes no instance of its own — the shared function answers
     -- there, which instances only refine. Postal's IterateModules loop instantiated itself 230k times on WoW w3)
-    local NOCLONE, INST, INSTN = {}, 0, 0 -- (INSTN: instances walked — stats.instances)
+    G7.NOCLONE = {}
+    local INST, INSTN = 0, 0 -- (INSTN: instances walked — stats.instances)
     -- ★ SELECTIVE CONTEXT SENSITIVITY (CART-1653; client-driven refinement, Guyer & Lin SAS'03, Zipper OOPSLA'18): the
     -- functions a first solve found with a SATURATED parameter upstream of an unknown answer (opts.ctxfns) get an
     -- instance per resolved call site — re-walked from their own node inside a snapshot of the scopes they were defined
@@ -3145,7 +3145,7 @@ local function build(store, opts)
     -- the ALLOCATION SITES that reach it. A representation change (renamefield's family mode) rewrites exactly the
     -- accesses one family of tables reaches
     local ACC = opts.accesses and {} or nil
-    local ARRAYFN = { ['table.concat'] = true, ['table.sort'] = true, ['table.remove'] = true, ['table.unpack'] = true,
+    G7.ARRAYFN = { ['table.concat'] = true, ['table.sort'] = true, ['table.remove'] = true, ['table.unpack'] = true,
         unpack = true, ['vim.list_extend'] = true, ['vim.tbl_islist'] = true, ['vim.islist'] = true }
     local CTXFNS = opts.ctxfns
     -- (ARGUMENT PROBES, opts.argprobes — CART-1670: the ports of every resolved-or-not call's arguments, by call record
@@ -3752,7 +3752,7 @@ local function build(store, opts)
             fnbase[#fnbase] = nil
             fnmeta[#fnmeta] = nil
             scopes[#scopes] = nil
-            if not clone and not meta.upv and not meta.nested and body and #txt(n) <= CLONE_MAX then
+            if not clone and not meta.upv and not meta.nested and body and #txt(n) <= G7.CLONE_MAX then
                 CLONE[o] = { file = file, id = id, src = src, l = l, c = c }
                 -- (its KEY PARAMETERS — `t[p]` in its body, p never assigned in the file: a call passing a literal there
                 -- binds to the instance for that value, opts.litkeys, CART-1729)
@@ -4451,7 +4451,7 @@ local function build(store, opts)
                 for j = recvp and 2 or 1, #aps do puse(aps[j], 'arg', { to = to0, j = j }) end
             end
             -- (the array as a whole: a library function that reads or writes every position)
-            if ACC and ARRAYFN[fname] and argn[1] then acc('array', argn[1], nil, aps[recvp and 2 or 1]) end
+            if ACC and G7.ARRAYFN[fname] and argn[1] then acc('array', argn[1], nil, aps[recvp and 2 or 1]) end
             local r = c and c.refused
             if type(r) == 'table' and r.rule == 'ambiguous' and r.cands then
                 local member = f:type() == 'method_index_expression' and f:field('method')[1] or f:field('field')[1]
@@ -5305,7 +5305,7 @@ local function build(store, opts)
                     end
                     if trip and trip[1] then
                         local ctl = new()
-                        if INST > 0 then NOCLONE[ctl] = true end
+                        if INST > 0 then G7.NOCLONE[ctl] = true end
                         if trip[3] then edge(trip[3], ctl) end
                         if V[1] then edge(V[1], ctl) end
                         -- (the site: each loop binds a small closed iterator to an instance of its own — CLONE)
@@ -5486,7 +5486,7 @@ local function build(store, opts)
             return x or nil
         end
         local cl = CLONE[o]
-        if not cl or NOCLONE[site] then return nil end
+        if not cl or G7.NOCLONE[site] then return nil end
         local per = instances[site]
         if not per then per = {}; instances[site] = per end
         local x = per[o]
