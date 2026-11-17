@@ -145,6 +145,7 @@ M.SLOTS = {
     bare_calls_bind_bare = 'SCOPE&KEY', -- no implicit receiver: a bare call never tail-matches `T.f` (CART-1487)
     colon_calls_pass_self = 'SCOPE&KEY', -- `x:f()` reaches a method only, never a plain `M.f` (CART-1491)
     bound_names_shadow = 'SCOPE&KEY', -- a bare call through a PARAMETER is that binding, never a def by name (CART-1651)
+    free_names_skip_locals = 'SCOPE&KEY', -- a bare call FREE at its site never reaches an `exported == false` def: that is a lexical local (CART-2128)
     df_binds = 'SCOPE&KEY',
     class_by_package = 'SCOPE&KEY', -- java: Class::m between same-named classes decided by import, then package (CART-2074)
     function_vars_reach_file = 'SCOPE&KEY', -- php: a bound function variable keeps its same-file link (CART-2076) -- false: a df DEF is a write, not a declaration — the binding gate reads fn_locals alone (go, CART-1896)

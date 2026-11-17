@@ -1611,9 +1611,29 @@ function M._class_veto(target, qcls, file, data, spec)
     end
     return tsutil.refusal('blocked', { target })
 end
-function M._callee_veto(target, cb, cbe, full, file)
+function M._callee_veto(target, cb, cbe, full, file, cfree)
+    -- (a name FREE at its site — the scope model found no binder, cfree — never reaches a lexical local OF ITS OWN FILE,
+    -- CART-2128. NOT `cb == nil`: a forward declaration's binder is `byname`, cb nil, and `local walk; walk = function`
+    -- IS bound. Another file's local is CART-0230's confinement question — an ESCAPING one may have left by value —
+    -- and is not decided here)
+    if target and cfree and not full and target.exported == false and target.file == file and M._free_skips_locals(file) then
+        return tsutil.refusal('blocked', { target })
+    end
     if not (target and cb and not full) or not M._bound_veto(cb, cbe, target, file) then return nil end
     return tsutil.refusal('fn-value', { target })
+end
+-- (memo per file on M: this chunk is at Lua's 200-local limit)
+M._free_skips_memo = {}
+function M._free_skips_locals(file)
+    if not file then return false end
+    local v = M._free_skips_memo[file]
+    if v == nil then
+        local lang = M.lang_of(file)
+        local sp = lang and M.spec[lang]
+        v = (sp and sp.free_names_skip_locals) == true
+        M._free_skips_memo[file] = v
+    end
+    return v
 end
 --- the callback upgrade's veto for a bound argument (above): every target but a same-file def that STARTS inside the
 --- binder's declaration — an annotation, a wrapped `KEY =⏎ v -> …` keep the lambda off the declaration's first row
@@ -10845,11 +10865,13 @@ local MATCH_OPTS = { match_limit = 65536 }
                     -- go through a local — the languages declaring fn_locals; ruby / java / php call a method or a
                     -- function by name; and lua, whose forward declaration IS the later def — CART-1602 — once its
                     -- binders said which are no value of their own, `byname`: CART-1651)
-                    local cb, cbe, cba
+                    local cb, cbe, cba, cfree
                     if (spec.fn_locals or spec.bound_names_shadow) and not method and (full == nil or full == callee) and namen then
                         cb, cbe, cba = M._bound_value(callee, namen)
+                        -- (FREE: no binder at all in any enclosing scope — true or absent, a flag; CART-2128)
+                        if cb == nil and spec.free_names_skip_locals and M._binder(callee, namen) == -1 then cfree = true end
                     end
-                    local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe, cba = cba,
+                    local c = { callee = callee, args = args, argv = argv, cb = cb, cbe = cbe, cba = cba, cfree = cfree,
                         crk = (full and full ~= callee and namen) and M._root_key(calln:field('name')[1]) or nil,
                         -- (a flag is true or absent, never false: the cache's segment stores flags as bits, so a false
                         -- came back absent and a warm call was another record than the cold one, CART-1844)
@@ -11940,7 +11962,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
                     or M._anon_veto(target, p.file, p.at) -- (an anonymous body's member, from outside it: CART-2124)
-                    or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
+                    or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file, p.call.cfree) -- (CART-1602, CART-2128)
                     or (p.call.qcls and M._class_veto(target, p.call.qcls, p.file, data, select(2, elang_for(p.file)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if not target and p.call.qcls then -- (the class-chain pick, CART-2069: fills an empty slot only)
@@ -12853,7 +12875,7 @@ function M._relink(data, touched, opts)
                 end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
                     or M._anon_veto(target, cfile, cget(i, 'at')) -- (an anonymous body's member, from outside it: CART-2124)
-                    or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
+                    or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile, cget(i, 'cfree')) -- (CART-1602, CART-2128)
                     or (cget(i, 'qcls') and M._class_veto(target, cget(i, 'qcls'), cfile, data, select(2, elang_for(cfile)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if not target and cget(i, 'qcls') then -- (the class-chain pick, CART-2069: fills an empty slot only)

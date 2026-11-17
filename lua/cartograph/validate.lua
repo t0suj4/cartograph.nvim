@@ -235,6 +235,7 @@ M.CALL_FIELDS = {
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
     cb = true, cbe = true, -- a bare callee's BOUND value: its binder's declaration rows (CART-1602)
     cba = true, -- a bare callee bound to a same-name FIELD alias: its by-name edge is inferred (CART-1715)
+    cfree = true, -- a bare callee with NO binder in any enclosing scope: never a lexical local (CART-2128)
     crk = true, -- a dotted callee's ROOT binder key: matched against the def's drk (CART-1715)
     gp = true, -- the call runs only under a param predicate (±param index): effects discharge it per call site
                -- (CART-1567, registered by CART-0717)

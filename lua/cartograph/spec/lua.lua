@@ -1826,6 +1826,13 @@ return {
     -- kind`). The scope model names the binder; one marked `byname` (a forward declaration, a same-name field alias)
     -- still resolves by name
     bound_names_shadow = true,
+    -- and the converse (CART-2128): a bare name FREE at its site — no binder in any enclosing scope — is a global, so it
+    -- never reaches a def whose syntax made it a LOCAL (exported_def -> false: `local function f`, `local f = function`).
+    -- The function-level picks could not see blocks: a call after `if … local function h … end` reached that h, as did
+    -- `later()` called before its `local function later` and `lv()` inside `local lv = function () return lv() end`.
+    -- Needs the scope model (a cb on every bare call, which bound_names_shadow's spec computes) and exported_def's
+    -- meaning here; go's `exported = false` is a lowercase name, visible package-wide, so go does not declare it.
+    free_names_skip_locals = true,
     -- a statement directly in a `return function (…) … end` wrapper: an INSTALLER part's body, which is its module scope
     -- (CART-1497 — its `local key = SHARED.key` aliases are recorded like a file's own)
     installer_scope = function (defn)
