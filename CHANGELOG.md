@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — Java: a call into one of many same-named nested classes resolves by lexical class (graph; cache v326)
+
+- A Java method node carries `cpath`, the dotted path of its class (`ThriftHiveMetastore.a_args._Fields`), and a call
+  that names a class through `this`, implicit this, a written class name or `new X()` carries the path of the class
+  it means: the member type of the innermost enclosing class that declares it. A same-file refusal takes the one
+  candidate on that path.
+- It still refuses overloads on one path, a lookup that passes a class with a supertype clause, and a candidate with no
+  path. hive standalone-metastore: 1,722 calls resolved (1,148 `_Fields.findByThriftId`, 574 `new X()` in the thrift
+  Processor / AsyncProcessor); elasticsearch server 28, libs 0. Every one was checked against an independent scan of
+  the source's class nesting; nothing else moved.
+
 ## 2026-11-16 — Java: library supertypes no longer stand in for project classes (graph; cache v325)
 
 - A supertype imported from the JDK (`import java.util.Map.Entry; class E implements Entry`) keeps its row but is

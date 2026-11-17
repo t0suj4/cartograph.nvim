@@ -4741,6 +4741,25 @@ M._lexical_pick = lexical_pick
 local SAMEALL = setmetatable({}, { __mode = 'k' })
 function M._samefile_refusal(list) local r = refusal('samefile', list); SAMEALL[r] = list; return r end
 function M._samefile_all(r) return SAMEALL[r] or r.cands end
+-- the NESTED-CLASS PATH pick for a same-file refusal (CART-1077): a call whose spec named the lexical class its key
+-- means (call.cpath, java_call_path) takes the ONE same-file candidate declared in that class (node.cpath). Two on the
+-- path are overloads — arity's question, not scope's — and stay refused. A same-file candidate WITHOUT a path is a node
+-- the spec did not place (a mint that never learned cpath): it may be the one on the path, so the pick declines.
+function M._path_pick(cands, cpath, file, node_index)
+    if not cpath then return nil end
+    local one
+    for _, cid in ipairs(cands or {}) do
+        local n = type(cid) == 'table' and cid or node_index[cid]
+        if n and n.file == file then
+            if n.cpath == nil then return nil end
+            if n.cpath == cpath then
+                if one then return nil end
+                one = n
+            end
+        end
+    end
+    return one
+end
 
 -- can definition `n` RECEIVE a `x:f()` call (CART-1491)? The colon passes x as the first argument, so in a language
 -- whose spec sets `colon_calls_pass_self` (Lua) the target is a method — `T:f`, or a first parameter `self`. A plain
@@ -9300,6 +9319,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     retclass = dretclass,
                     -- a type-variable return's RETURN FLOW: terms the rounds evaluate (java_ret_flow, CART-1077)
                     retflow = dretflow,
+                    -- the NESTED-CLASS PATH of its class (java `Outer.a_args._Fields`): a same-file pick by lexical class (CART-1077)
+                    cpath = spec.def_path and spec.def_path(defn, src) or nil,
                     -- declared inside `extern "C"` (C/C++ join bridge, CART-1079)
                     clink = spec.clink and spec.clink(defn, src) or nil,
                     -- file-local by linkage (C `static`, a macro in a source file): confined (CART-1081)
@@ -9772,7 +9793,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                 local sp = pos_of(sd.node)
                 local id = uid(('%s::%s@%d'):format(file, sd.name, sp.start.line))
                 local node = { id = id, name = sd.name, kind = 'method',
-                    file = file, range = sp, order = sp.start.line, synth = true, ovl = sd.ovl or nil }
+                    file = file, range = sp, order = sp.start.line, synth = true, ovl = sd.ovl or nil,
+                    cpath = sd.cpath } -- (a synthesized member's nested-class path, CART-1077)
                 nodes[#nodes + 1] = node
                 exact[sd.name] = exact[sd.name] or {}
                 table.insert(exact[sd.name], node)
@@ -10582,6 +10604,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qcls = qcls, -- the class AS WRITTEN that the key names (php, CART-0735: the class veto)
                         qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
                         rcls = rcls, -- the receiver's class (cpp spec.recv_class): the `recv` pass's key (CART-2111)
+                        -- the NESTED-CLASS PATH of the class the key names (java, CART-1077): the same-file path pick
+                        cpath = qhow and spec.call_path and spec.call_path(calln, src, qhow, full) or nil,
                         rfld = rfld, -- a FIELD receiver: owner class \31 field \31 operator, typed via data.fieldtypes (CART-2112)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
@@ -11641,6 +11665,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
                 if refused and refused.rule == 'samefile' then
                     local pick = M._lexical_pick(M._samefile_all(refused), p.file, from and node_index[from], p.at, parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                        or M._path_pick(M._samefile_all(refused), p.call.cpath, p.file, node_index) -- (the nested-class path, CART-1077)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
@@ -11966,7 +11991,7 @@ local function build_symtab(nodes)
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab, drk = n.drk,
-            ret = n.ret, retclass = n.retclass, retflow = n.retflow, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
+            ret = n.ret, retclass = n.retclass, retflow = n.retflow, cpath = n.cpath, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             vfn = n.vfn, -- (the callback upgrade's target test in a language without bare method values, CART-1969)
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
@@ -12541,6 +12566,10 @@ function M._relink(data, touched, opts)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
                 if refused and refused.rule == 'samefile' and not cfull then
                     local pick = M._lexical_pick(M._samefile_all(refused), cfile, cfn and node_index[cfn], cget(i, 'at'), parent_fn, node_index) -- (via M: this function is at the 60-upvalue limit)
+                    if pick then target, inferred, refused = pick, false, nil end
+                end
+                if refused and refused.rule == 'samefile' and cget(i, 'cpath') then -- (the nested-class path, CART-1077: a keyed call)
+                    local pick = M._path_pick(M._samefile_all(refused), cget(i, 'cpath'), cfile, node_index)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)

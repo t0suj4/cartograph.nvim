@@ -137,6 +137,81 @@ local function java_enclosing_class(node, src)
     end
 end
 
+-- ★ THE NESTED-CLASS PATH (CART-1077): thrift nests a `_Fields` enum in EVERY struct — 574 in ThriftHiveMetastore.java
+-- alone — so `_Fields::findByThriftId` names 574 same-file methods and the same-file tier refused all 1,722 such calls.
+-- Java scopes a simple class name LEXICALLY: the member type of the innermost enclosing class that declares it. A
+-- method node carries its class's dotted path (`ThriftHiveMetastore.a_args._Fields`) and a call the class the key
+-- names; the resolver picks the one same-file candidate on that path. A CALL's path is nil for a top-level class (no
+-- nesting to decide); a def's is written at every depth (def_path).
+local JAVA_CLASS_DECL = { class_declaration = true, interface_declaration = true, enum_declaration = true,
+    record_declaration = true }
+local function java_class_path(cnode, src, any)
+    local parts, p = {}, cnode
+    while p do
+        if JAVA_CLASS_DECL[p:type()] then
+            local n = p:field('name')[1]
+            if not n then return nil end
+            table.insert(parts, 1, node_text(n, src))
+        end
+        p = p:parent()
+    end
+    return (#parts > 1 or (any and #parts == 1)) and table.concat(parts, '.') or nil
+end
+-- does class declaration `c` DECLARE a member type named `x` (directly in its body; an enum's members sit in its
+-- enum_body_declarations)?
+local function java_declares_member(c, x, src)
+    local body = c:field('body')[1]
+    if not body then return false end
+    local function scan(b)
+        for _, ch in inext, b, -1 do
+            if ch:named() then
+                if JAVA_CLASS_DECL[ch:type()] then
+                    local n = ch:field('name')[1]
+                    if n and node_text(n, src) == x then return true end
+                elseif ch:type() == 'enum_body_declarations' and scan(ch) then return true end
+            end
+        end
+        return false
+    end
+    return scan(body)
+end
+-- a class with ANY supertype clause may INHERIT a member type, which shadows an outer class's member of that name
+local function java_has_supertypes(c)
+    for _, ch in inext, c, -1 do
+        local t = ch:type()
+        if t == 'superclass' or t == 'super_interfaces' or t == 'extends_interfaces' then return true end
+    end
+    return false
+end
+-- the path of the class a call's key names -> path | nil. `self` (implicit this / this.m()): the enclosing class.
+-- `written` (`_Fields.m()`, a simple class name): the member type of the innermost enclosing class that declares it.
+-- ⚠ Declines (nil) when a class passed on the way out has a supertype clause: an INHERITED member type would shadow
+-- the outer one, and which classes the supertype declares is not visible here.
+local function java_call_path(calln, src, how, key)
+    if how == 'self' then
+        local _, c = java_enclosing_class(calln, src)
+        return c and java_class_path(c, src) or nil
+    end
+    if how ~= 'written' then return nil end
+    local x = key and key:match('^([%w_$]+)::[%w_$]+$')
+    if not x then return nil end
+    local _, c = java_enclosing_class(calln, src)
+    while c do
+        if java_declares_member(c, x, src) then
+            local base = java_class_path(c, src)
+            if not base then
+                local n = c:field('name')[1]
+                base = n and node_text(n, src)
+            end
+            return base and (base .. '.' .. x) or nil
+        end
+        if java_has_supertypes(c) then return nil end
+        local _, outer = java_enclosing_class(c, src)
+        c = outer
+    end
+    return nil
+end
+
 -- Spring stereotype annotations: a class carrying one is a DI-managed BEAN.
 -- Only beans count as interface→impl candidates in resolve_interface — an
 -- unannotated implementor is never wired, so it must not inflate the candidate
@@ -1111,11 +1186,14 @@ local function java_synth_defs(tsroot, src)
                     end
                 end
                 local rec = node_text(nm, src)
+                -- (the record's nested-class path rides on every member it mints: the same-file path pick must see the
+                -- implicit canonical constructor beside a declared one, or `new R(9 args)` took the 1-arg one, CART-1077)
+                local cp = java_class_path(n, src, true)
                 for _, p in inext, ps, -1 do
                     if p:type() == 'formal_parameter' then
                         local pn = p:field('name')[1]
                         local comp = pn and node_text(pn, src)
-                        if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn } end
+                        if comp and not declared[comp] then out[#out + 1] = { name = rec .. '::' .. comp, node = pn, cpath = cp } end
                     end
                 end
                 -- ★ AND ITS CANONICAL CONSTRUCTOR, unless the body declares it (CART-2070): `record UTF8Bytes(byte[] b, int o,
@@ -1142,7 +1220,7 @@ local function java_synth_defs(tsroot, src)
                 end
                 -- (`ovl`: another overload of the name, so a declared constructor does not shadow it — the call is then
                 -- ambiguous by name and refused, the honest answer until arity is consulted, CART-1385)
-                if not canonical then out[#out + 1] = { name = rec .. '::' .. rec, node = nm, ovl = true } end
+                if not canonical then out[#out + 1] = { name = rec .. '::' .. rec, node = nm, ovl = true, cpath = cp } end
             end
         end
         for _, c in inext, n, -1 do if c:named() then walk(c) end end
@@ -1342,7 +1420,15 @@ return {
     nested_file = function (qcls)
         local head = qcls and qcls:match('^([%w_$]+)%.')
         return head and (head .. '.java') or nil
-    end, -- the class names each field's type refers to: data.typerefs (CART-0697)
+    end,
+    -- the NESTED-CLASS PATH of a method's class / of the class a call's key names (CART-1077; see java_call_path)
+    -- (a DEF's path is written at every depth, top level included: the pick reads a candidate WITHOUT one as a node it
+    -- cannot place, and declines)
+    def_path = function (defn, src)
+        local _, c = java_enclosing_class(defn, src)
+        return c and java_class_path(c, src, true) or nil
+    end,
+    call_path = java_call_path, -- the class names each field's type refers to: data.typerefs (CART-0697)
     qualify_call = function (calln, name, src, model)
         -- ★ `new T(…)` CALLS T's CONSTRUCTOR (CART-2070): the row carried the bare class name and the constructor node
         -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /
