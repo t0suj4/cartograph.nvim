@@ -2,6 +2,16 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — Java: receivers the expression itself types — JDK final-method chains, ternaries, casts (graph; cache v332)
+
+- `getClass().getName().compareTo(..)` is the JDK's String.compareTo (getClass is final, Class is final): external,
+  no longer a name join over every project compareTo (908 calls on hive's thrift api).
+- A parenthesized, ternary or cast receiver is typed by its terms — `(std ? STANDARD_FACTORY : TUPLE_FACTORY)
+  .getScheme()`, `((IndexRequest) r).indexSource()`, `(new Client(p)).recv_x()`: one target resolves, several are
+  refused over exactly the dispatch set (hive: 908 getScheme calls refused over 2 candidates, not 1,816).
+  elasticsearch server: 43 calls resolved; 2 wrong same-file picks withdrawn (`((BytesStream) s).bytes()` had linked to
+  an unrelated static bytes(XContentBuilder)).
+
 ## 2026-11-17 — Java: a method inside an anonymous class body is reached only from inside it (graph; cache v331)
 
 - A call outside an anonymous or enum-constant body no longer resolves to a method declared in it (such a method is

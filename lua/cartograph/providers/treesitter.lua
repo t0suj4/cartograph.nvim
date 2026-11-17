@@ -4396,7 +4396,7 @@ local function resolve_returns(cv, node_index, exact, addref, data)
             local settled = false
             do
                 local crt = cget(ci, 'rt')
-                local dci = not crt.fld and callidx[cget(ci, 'file') .. '\31' .. crt.r .. '\31' .. crt.c] or nil
+                local dci = not crt.fld and not crt.flow and callidx[cget(ci, 'file') .. '\31' .. crt.r .. '\31' .. crt.c] or nil
                 local dto = dci and cget(dci, 'to')
                 local dnode = dto and node_index[dto]
                 local ret = dnode and dnode.ret
@@ -4525,9 +4525,12 @@ local function resolve_returns(cv, node_index, exact, addref, data)
                         settled = true
                     end
                 end
-                -- the head's declared return is its own type variable and says nothing; its RETURN FLOW may
-                if not settled and dnode and dnode.retflow and ret == dnode.ret and not crt.fld then
-                    local tg = flow_targets(dnode.retflow, dnode.file, ccallee, elang_for(cget(ci, 'file')))
+                -- the head's declared return is its own type variable and says nothing; its RETURN FLOW may — and a receiver
+                -- whose own expression carries the flow (a ternary of final fields, CART-2122) is evaluated the same way
+                local rflow = (crt.flow and not settled) and crt.flow
+                    or (not settled and dnode and dnode.retflow and ret == dnode.ret and not crt.fld and dnode.retflow) or nil
+                if rflow then
+                    local tg = flow_targets(rflow, crt.flow and cget(ci, 'file') or dnode.file, ccallee, elang_for(cget(ci, 'file')))
                     if tg and #tg == 1 then
                         local fit = tg[1]
                         cset(ci, 'to', fit.id)
@@ -5480,7 +5483,7 @@ local RESOLVE_PASSES = {
         local n = 0
         for i = 1, x.cv.n do
             local rt = cget(i, 'rt')
-            if rt and (rt.fld or rt.tv) and not cget(i, 'to') and not cget(i, 'refused') and not cget(i, 'ext') then
+            if rt and (rt.fld or rt.tv or rt.flow) and not cget(i, 'to') and not cget(i, 'refused') and not cget(i, 'ext') then
                 local file = cget(i, 'file')
                 local target, inferred, refused, ext = x.resolve(cget(i, 'full') or cget(i, 'callee'), file)
                 if target then
@@ -11768,7 +11771,7 @@ local MATCH_OPTS = { match_limit = 65536 }
             -- ★ A FIELD-DEFERRED CALL SKIPS THE NAME JOIN HERE (CART-1077): its receiver's type is settled by the
             -- return-type rounds once every file is in; the join runs afterwards ONLY if they cannot (field_fallback).
             -- (and a TYPE-VARIABLE head with a return flow, rt.tv, the same way)
-            local fdef = p.call.rt and (p.call.rt.fld or p.call.rt.tv)
+            local fdef = p.call.rt and (p.call.rt.fld or p.call.rt.tv or p.call.rt.flow) -- (a receiver flow: CART-2122)
             if not shadowed and not fdef then
                 target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
                 if refused and refused.rule == 'samefile' then
@@ -12678,7 +12681,7 @@ function M._relink(data, touched, opts)
                 -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below
-            elseif not (cget(i, 'rt') and (cget(i, 'rt').fld or cget(i, 'rt').tv)) then -- a field or type-variable
+            elseif not (cget(i, 'rt') and (cget(i, 'rt').fld or cget(i, 'rt').tv or cget(i, 'rt').flow)) then -- a field, type-variable or receiver-flow
                 -- deferral waits for the rounds (see extract)
                 target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
                 if refused and refused.rule == 'samefile' and not cfull then

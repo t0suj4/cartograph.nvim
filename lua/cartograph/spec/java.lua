@@ -248,6 +248,36 @@ end
 -- of something, whose own members are keyed to the named class around it), or a QUALIFIED spelling whose head no
 -- enclosing scope names — `new StreamingGeometrySimplifier.LineSimplifier()` is another file's class, not this file's
 -- LineSimplifier.
+-- ★ A JDK RECEIVER DERIVED FROM FINAL METHODS ALONE (CART-2122). `getClass()` is FINAL on Object and returns
+-- java.lang.Class; Class is a FINAL class, so its name getters return java.lang.String — no override, no library
+-- hierarchy needed. thrift's generated `getClass().getName().compareTo(other.getClass().getName())` (908 calls on hive's
+-- api) joined every project compareTo by name. -> the JDK class of a receiver expression, or nil
+-- the java stdlib VOCABULARY (the spec's stdlib_names; a local so qualify_call reads the same table)
+local JAVA_STDLIB_NAMES = { get = true, set = true, add = true, size = true,
+        isEmpty = true, toString = true, equals = true, hashCode = true,
+        valueOf = true, of = true, build = true, builder = true,
+        stream = true, collect = true, map = true, filter = true,
+        forEach = true, format = true, println = true, append = true,
+        put = true, remove = true, contains = true, length = true,
+        charAt = true, substring = true, split = true, trim = true,
+        parse = true, close = true, run = true, apply = true,
+        accept = true, test = true, compare = true, next = true,
+        iterator = true, getName = true, getId = true, getValue = true,
+        setValue = true, orElse = true, orElseThrow = true }
+local JAVA_CLASS_NAME_GETTERS = { getName = true, getSimpleName = true, getCanonicalName = true, getTypeName = true,
+    getPackageName = true }
+local function java_jdk_chain(e, src)
+    if not (e and e:type() == 'method_invocation') then return nil end
+    local nm, args = e:field('name')[1], e:field('arguments')[1]
+    if not (nm and args) then return nil end
+    local m, argc = node_text(nm, src), args:named_child_count()
+    if m == 'getClass' and argc == 0 then return 'java.lang.Class' end
+    if JAVA_CLASS_NAME_GETTERS[m] and argc == 0 and java_jdk_chain(e:field('object')[1], src) == 'java.lang.Class' then
+        return 'java.lang.String'
+    end
+    return nil
+end
+
 local function java_call_path(calln, src, how, key, qcls)
     -- (a receiver typed through a VARIABLE whose declared type is spelled QUALIFIED — `ImmutableOpenMap.Builder<..>
     -- indices` — is keyed by its last segment, `Builder::get`, as this file's own Builder is: the head decides, as for a
@@ -733,7 +763,9 @@ local function java_body_fields(body, src)
     flowfields[key] = out
     return out
 end
-local function java_ret_flow(defn, src, tvars)
+-- the TERM builder of a method's flow (shared by its return flow and a receiver's, CART-1077 / CART-2122): `defn` is the
+-- method (its params and locals shadow fields), `tvars` the type variables in scope -> terms(expr, depth) | nil
+local function java_flow_terms(defn, src, tvars)
     local _, cnode = java_enclosing_class(defn, src)
     local cname = cnode and cnode:field('name')[1]
     local body = cnode and cnode:field('body')[1]
@@ -807,6 +839,11 @@ local function java_ret_flow(defn, src, tvars)
         end
         return nil
     end
+    return terms
+end
+local function java_ret_flow(defn, src, tvars)
+    local terms = java_flow_terms(defn, src, tvars)
+    if not terms then return nil end
     local all, seen = {}, {}
     local ok = true
     local function walk(n)
@@ -871,6 +908,26 @@ local function java_tvar_class(node, name, src, depth)
         p = p:parent()
     end
     return name
+end
+-- ★ A RECEIVER WHOSE CLASS ITS OWN EXPRESSION DECIDES (CART-2122): `(cond ? STANDARD_SCHEME_FACTORY :
+-- TUPLE_SCHEME_FACTORY).getScheme()` — thrift's scheme() in every struct, 908 calls on hive's api — joined every project
+-- getScheme by name. The receiver is a parenthesized / ternary expression whose terms the return-flow builder reads
+-- (final fields with `new` initializers, `new X()`, casts): the flow string the return rounds evaluate, exactly as a
+-- type-variable head's return flow is. Inside a method or constructor only (its params and locals shadow fields).
+local function java_recv_flow(calln, obj, src)
+    local m = calln:parent()
+    while m and m:type() ~= 'method_declaration' and m:type() ~= 'constructor_declaration' do
+        if JAVA_CLASSLIKE[m:type()] or m:type() == 'lambda_expression' then return nil end
+        m = m:parent()
+    end
+    if not m then return nil end
+    local tvars = setmetatable({}, { __index = function (_, nm) return java_tvar_class(calln, nm, src) ~= nm end })
+    local terms = java_flow_terms(m, src, tvars)
+    local ts_ = terms and terms(obj, 0)
+    if not ts_ or #ts_ == 0 then return nil end
+    local seen, all = {}, {}
+    for _, x in ipairs(ts_) do if not seen[x] then seen[x] = true; all[#all + 1] = x end end
+    return table.concat(all, '|')
 end
 
 -- the type variables a method declares (`<S extends X, T>` -> { S = true, T = true })
@@ -1588,6 +1645,16 @@ return {
                     -- determining static call resolves, its ret flows.
                     cls = objname
                 end
+            elseif ot == 'parenthesized_expression' or ot == 'ternary_expression' then
+                -- (a receiver whose own terms decide its class: deferred to the return rounds, CART-2122)
+                local f = java_recv_flow(calln, obj, src)
+                if f then defer = { flow = f } end
+            elseif ot == 'method_invocation' and not JAVA_STDLIB_NAMES[name] and java_jdk_chain(obj, src) == 'java.lang.String' then
+                -- (a receiver whose JDK class final methods decide: keyed by the FULL name, which no project def
+                -- matches and the typed-receiver rule reads as external, CART-2122. A java.lang.Class receiver, and a
+                -- stdlib-vocabulary name (equals, hashCode), are left bare: a full key would meet the vocabulary gate
+                -- first — refused, where the bare name was external)
+                return 'java.lang.String::' .. name, nil, nil, nil, nil, 'binder'
             elseif ot == 'method_invocation' then
                 -- CHAINED receiver f().g(): g's class is f's return type,
                 -- knowable only after f resolves — defer to the return-type
@@ -1818,17 +1885,7 @@ return {
     -- is a method_reference (`Foo::m`), another node (CART-1969)
     arg_fn_values = false,
     fn_value_types = { lambda_expression = true },
-    stdlib_names = { get = true, set = true, add = true, size = true,
-        isEmpty = true, toString = true, equals = true, hashCode = true,
-        valueOf = true, of = true, build = true, builder = true,
-        stream = true, collect = true, map = true, filter = true,
-        forEach = true, format = true, println = true, append = true,
-        put = true, remove = true, contains = true, length = true,
-        charAt = true, substring = true, split = true, trim = true,
-        parse = true, close = true, run = true, apply = true,
-        accept = true, test = true, compare = true, next = true,
-        iterator = true, getName = true, getId = true, getValue = true,
-        setValue = true, orElse = true, orElseThrow = true },
+    stdlib_names = JAVA_STDLIB_NAMES,
     stdlib_prefixes = { 'System.', 'String.', 'Objects.', 'List.',
         'Map.', 'Set.', 'Collections.', 'Arrays.', 'Optional.',
         'Stream.', 'Integer.', 'Long.', 'Math.', 'Files.', 'Paths.' },
