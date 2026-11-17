@@ -832,10 +832,12 @@ function M.mention_coverage(data)
             local entry = names[f]
             local tail = nm:match('([^%.:#>]+)$')
             local why
-            if not entry then why = tsm._names_indexed(f) and 'unexplained' or 'off'
+            -- (the RULES first: a file of an indexed language may hold no entry because every name in it is short or
+            -- stdlib — hugo's closer.go: Close, Add, Lock — and that is the rules' doing, not a gap)
+            if not entry and not tsm._names_indexed(f) then why = 'off'
             elseif not (tail and tail:match('^[%a_$][%w_$]*[?!=]?$')) then why = 'shape'
             elseif #tail < 3 then why = 'short'
-            elseif not entry:find('\31' .. tail .. '\31', 1, true) then
+            elseif not (entry or ''):find('\31' .. tail .. '\31', 1, true) then
                 local sp = tsm.spec[lang]
                 why = (sp and sp.stdlib_names and sp.stdlib_names[tail]) and 'stdlib' or 'unexplained'
             end

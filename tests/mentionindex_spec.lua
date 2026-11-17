@@ -140,3 +140,15 @@ test('mention index: a REFRESH of a file with no function body updates its entry
     ok(entry(store.data, 'Details.java', 'deviceType'), 'the refreshed entry: ' .. tostring(store.data.names['Details.java']))
     vim.fn.delete(root, 'rf')
 end)
+
+test('mention index: a file whose every name is short or stdlib has no entry, and that is the rules\' doing — not unexplained (CART-1008)', function ()
+    if not parser_available('go') then skip 'no go parser' end
+    local sp = ts.spec.go
+    if not (sp.stdlib_names and sp.stdlib_names.Close and sp.stdlib_names.Add) then skip 'go vocabulary without Close / Add' end
+    -- minimised from hugo common/types/closer.go
+    local root = tree({ ['closer.go'] = 'package types\n\ntype Closers struct{}\n\nfunc (cs *Closers) Add(c int) {}\n\nfunc (cs *Closers) Close() error {\n\treturn nil\n}\n' })
+    local data = ts.extract(root); data.root = root
+    local r = agent.mention_coverage(data).go
+    ok(r and r.stdlib >= 2 and r.unexplained == 0 and r.off == 0, vim.inspect(r))
+    vim.fn.delete(root, 'rf')
+end)
