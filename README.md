@@ -2078,6 +2078,39 @@ Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in
 `lint.lua` and are pure/testable.
 
+**Your own rules** go in `setup { lints = { … } }`. Each is a table in the
+built-in shape: a `name`, and a `run(store)` that returns
+`{ { file, line, message }, … }`, with `line` 1-based (a call record's `line`
+is 0-based, hence the `+ 1` below). They run beside the built-in rules in
+`:CartographLint`, `:CartographLintSigns` and the agent's `lint_run`:
+
+```lua
+require('cartograph').setup { lints = { {
+  name = 'no-raw-db', quantifier = 'witness', severity = 'warn',
+  run = function (store)
+    local out = {}
+    for _, c in ipairs(store.data.calls) do
+      if c.callee == 'raw_query' then
+        out[#out + 1] = { file = c.file, line = c.line + 1, message = 'use the query builder' }
+      end
+    end
+    return out
+  end,
+} } }
+```
+
+The optional fields are `severity` (error / warn / info / hint, default
+warn), `quantifier`, `closed_over` and `disposition`. They mean what they
+mean in the tables above, and the defaults are the cautious ones. Without a
+declared quantifier, a rule is treated as asserting an **absence** (`promise`)
+over an unstated space, so `:CartographLint!` refuses it rather than clipping
+it. Declare `witness` if it should run under a scope. Some rules are rejected:
+one with no name or `run`, one that reuses a built-in rule's name, one that
+raises an error, and one that returns findings with no position. Each is
+**reported** (a warning, or the agent's `rule-refused` note), and the other
+rules still run. A rule that silently did not run would read like a rule that
+found nothing.
+
 ## Escalation (confirm the `~` hotspots against lua-ls)
 
 `:CartographEscalate` spends the expensive oracle *only where the cheap

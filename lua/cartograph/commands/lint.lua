@@ -13,7 +13,13 @@ function M.register(H)
     -- not every group uses every helper; keep the binding uniform
     local _ = cmd and live and whole_graph and mat_df and scratch
 
-    local SEV = { warn = 'W', info = 'I' }
+    local SEV = { error = 'E', warn = 'W', info = 'I', hint = 'N' }
+    -- a config.lints rule that is invalid or raised (CART-0127): SAID, whether or not the run was scoped
+    local function say_user_refusals(refused)
+        for _, r in ipairs(refused or {}) do
+            if r.user then vim.notify('cartograph: ' .. r.why, vim.log.levels.WARN) end
+        end
+    end
 
     -- `!` SCOPES THE RUN TO WHERE YOU ARE STANDING (CART-0514). The browser's
     -- current frame already IS a node set -- the altitude stage of the
@@ -39,6 +45,10 @@ function M.register(H)
         end
         local findings, refused =
             require('cartograph.lint').run(store, { scope = scope })
+        say_user_refusals(refused)
+        local scoped = {}
+        for _, r in ipairs(refused) do if not r.user then scoped[#scoped + 1] = r end end
+        refused = scoped
         -- the refusals are the design working, so they are SAID, not swallowed
         if scope and #refused > 0 then
             local names = {}
@@ -87,7 +97,8 @@ function M.register(H)
     -- require, seam-guard, …) lands where the code is, not only in quickfix.
     cmd('CartographLintSigns', function ()
         local store = live() if not store then return end
-        local findings = require('cartograph.lint').run(store)
+        local findings, refused = require('cartograph.lint').run(store)
+        say_user_refusals(refused)
         local pub = {}
         for _, f in ipairs(findings) do
             local file = f.file

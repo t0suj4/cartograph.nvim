@@ -1301,7 +1301,7 @@ end
 --- answer: the witness rules only.
 function M.clippable(grain)
     local out = {}
-    for _, r in ipairs(M.rules) do
+    for _, r in ipairs((M.all_rules())) do
         if M.policies(r, grain).clip then out[#out + 1] = r.name end
     end
     table.sort(out)
@@ -2479,6 +2479,77 @@ for _, r in ipairs(M.rules) do
     if r.walk and not r.run then r.run = function (store) return walk_rules(store, { r })[r] end end
 end
 
+-- ── USER RULES: config.lints (CART-0127) ────────────────────────────────────
+-- A project's OWN conventions are where a graph-aware lint pays, and a rule the user cannot add is a core change.
+-- `config.lints` is a list of rules in the built-in shape, run beside them by :CartographLint, the signs and the agent:
+--   { name = 'no-raw-db', run = function (store) return { { file =, line =, message = }, … } end,
+--     severity = 'warn',          error | warn | info | hint                     (default warn)
+--     quantifier = 'witness',     witness: a finding says something EXISTS       (default promise: an absence)
+--     closed_over = 'file',       what a promise searched: fn | file | corpus    (default: unstated)
+--     disposition = 'suggestive' } authoritative | suggestive | calibration | annotation (default suggestive)
+-- ★ THE DEFAULTS ARE THE CONSERVATIVE ONES: an undeclared quantifier is a PROMISE over an unstated space, so a
+--   scoped run (:CartographLint!) refuses the rule rather than clipping an absence it cannot support. Declare
+--   `witness` to have it run under a scope.
+-- ★ A BAD RULE IS SAID, NEVER SKIPPED AND NEVER FATAL: a malformed entry, a name a built-in already owns (its findings
+--   could not be told apart), or a run() that raises comes back in run()'s second return beside the scope
+--   refusals, and every other rule still runs. A rule that silently did not run reads as a rule that found nothing.
+local SEVS = { error = true, warn = true, info = true, hint = true }
+local QUANTS = { witness = true, promise = true }
+local DISPS = { authoritative = true, suggestive = true, calibration = true, annotation = true }
+
+--- The valid rules of config.lints, normalised, and the refusals for the invalid ones.
+--- @return table rules, table refused  { { rule, user = true, why } }
+function M.user_rules()
+    local cfg = require('cartograph.config').lints
+    local ok, bad = {}, {}
+    if cfg == nil then return ok, bad end
+    if type(cfg) ~= 'table' then
+        bad[1] = { rule = 'config.lints', user = true, why = 'config.lints must be a list of rules, not a ' .. type(cfg) }
+        return ok, bad
+    end
+    local builtin, seen = {}, {}
+    for _, r in ipairs(M.rules) do builtin[r.name] = true end
+    for i, r in ipairs(cfg) do
+        local name = type(r) == 'table' and r.name or nil
+        local label = (type(name) == 'string' and name ~= '') and name or ('config.lints[' .. i .. ']')
+        local why
+        if type(r) ~= 'table' then why = 'is not a table'
+        elseif type(name) ~= 'string' or name == '' then why = 'has no name'
+        elseif builtin[name] then why = 'has the name of a built-in rule, so their findings could not be told apart'
+        elseif seen[name] then why = 'is declared twice'
+        elseif type(r.run) ~= 'function' then why = 'has no run(store) function'
+        elseif r.severity ~= nil and not SEVS[r.severity] then
+            why = ('has severity %q: one of error, warn, info, hint'):format(tostring(r.severity))
+        elseif r.quantifier ~= nil and not QUANTS[r.quantifier] then
+            why = ('has quantifier %q: witness or promise'):format(tostring(r.quantifier))
+        elseif r.closed_over ~= nil and not M.CLOSURE[r.closed_over] then
+            why = ('has closed_over %q: fn, file or corpus'):format(tostring(r.closed_over))
+        elseif r.disposition ~= nil and not DISPS[r.disposition] then
+            why = ('has disposition %q: authoritative, suggestive, calibration or annotation'):format(tostring(r.disposition))
+        end
+        if why then
+            bad[#bad + 1] = { rule = label, user = true, why = 'config.lints: ' .. label .. ' ' .. why }
+        else
+            seen[name] = true
+            ok[#ok + 1] = { name = name, user = true, run = r.run, severity = r.severity or 'warn',
+                quantifier = r.quantifier or 'promise', closed_over = r.closed_over,
+                disposition = r.disposition or 'suggestive' }
+        end
+    end
+    return ok, bad
+end
+
+--- The built-in rules followed by the valid user rules: what a lint run runs.
+--- @return table rules, table refused (the invalid user rules)
+function M.all_rules()
+    local user, bad = M.user_rules()
+    if #user == 0 then return M.rules, bad end
+    local out = {}
+    for _, r in ipairs(M.rules) do out[#out + 1] = r end
+    for _, r in ipairs(user) do out[#out + 1] = r end
+    return out, bad
+end
+
 --- ★ THE INDEX ROOT IS A PREMISE OF EVERY ABSENCE VERDICT (CART-0678). A rule closed over the CORPUS (dead-function:
 --- "nothing in the graph calls this") is only as wide as the root: indexing one Maven module of an 8k-file repo alone
 --- gave 1,958 dead-function findings where the whole-repo index gave 741 for the same files, and nothing in the output
@@ -2516,9 +2587,13 @@ function M.run(store, opts)
     local sc = opts and opts.scope
     local cut = sc and require 'cartograph.cut'
     local findings, refused = {}, {}
+    local rules, bad = M.all_rules()
+    for _, b in ipairs(bad) do
+        if not only or only[b.rule] then refused[#refused + 1] = b end
+    end
     -- the walking rules this run selects, all in one walk per file (a refused rule is not walked)
     local walking = {}
-    for _, rule in ipairs(M.rules) do
+    for _, rule in ipairs(rules) do
         if rule.walk and (not only or only[rule.name]) and not (sc and not M.policies(rule, sc.grain).clip) then
             walking[#walking + 1] = rule
         end
@@ -2526,7 +2601,7 @@ function M.run(store, opts)
     local walked = #walking > 0 and walk_rules(store, walking) or {}
     -- (a corpus-closed absence over a root inside a larger project carries that boundary, CART-0678)
     local boundary = M.root_boundary(store.data and store.data.root)
-    for _, rule in ipairs(M.rules) do
+    for _, rule in ipairs(rules) do
         if not only or only[rule.name] then
             if sc and not M.policies(rule, sc.grain).clip then
                 -- ★ THE ILLEGAL CELL IS UNREACHABLE, NOT DISCOURAGED. A promise
@@ -2541,7 +2616,38 @@ function M.run(store, opts)
                     why = ('asserts an absence over %s — this %s cut cannot hold it')
                         :format(rule.closed_over or 'an unstated space', sc.grain) }
             else
-                for _, f in ipairs(walked[rule] or rule.run(store)) do
+                local got = walked[rule]
+                if not got and rule.user then
+                    -- (a user rule that raises, or answers something other than a list, is refused and SAID)
+                    local okr, res = pcall(rule.run, store)
+                    if not okr then
+                        refused[#refused + 1] = { rule = rule.name, user = true, quantifier = rule.quantifier,
+                            closed_over = rule.closed_over, why = 'config.lints: ' .. rule.name .. ' raised: ' .. tostring(res) }
+                        res = {}
+                    elseif type(res) ~= 'table' then
+                        refused[#refused + 1] = { rule = rule.name, user = true, quantifier = rule.quantifier,
+                            closed_over = rule.closed_over,
+                            why = ('config.lints: %s returned a %s, not a list of findings'):format(rule.name, type(res)) }
+                        res = {}
+                    end
+                    -- (a finding with no position cannot be placed or sorted: dropped, and the count said)
+                    local kept, dropped = {}, 0
+                    for _, f in ipairs(res) do
+                        if type(f) == 'table' and type(f.file) == 'string' and type(f.line) == 'number' then
+                            kept[#kept + 1] = f
+                        else
+                            dropped = dropped + 1
+                        end
+                    end
+                    if dropped > 0 then
+                        refused[#refused + 1] = { rule = rule.name, user = true, quantifier = rule.quantifier,
+                            closed_over = rule.closed_over,
+                            why = ('config.lints: %s returned %d finding(s) without a file and a numeric line; they were dropped')
+                                :format(rule.name, dropped) }
+                    end
+                    got = kept
+                end
+                for _, f in ipairs(got or rule.run(store)) do
                     -- `not sc` FIRST: the unscoped path must not touch `cut` at
                     -- all, and it is the path every existing caller takes
                     if not sc or cut.contains(store, sc, f.file, f.line) then

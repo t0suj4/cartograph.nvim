@@ -1385,6 +1385,13 @@ comment per field.
   profile       environment profiles: distilled stdlib/RBS signatures
   mcp           graph servers, { name = { cmd = {...} } }
   db            link sql:: entities to live tables
+  lints         your own lint rules, run beside the built-in ones by
+                :CartographLint, :CartographLintSigns and the agent's
+                lint_run: a list of { name, run = function (store) return
+                { {file, line, message}, ... } end }, plus optional severity,
+                quantifier, closed_over and disposition (README.md, "Lint").
+                An invalid rule, or one that raises, is reported and the
+                others still run
   fsm           the state-machine adapter
   factorio      the Factorio projection surface
   ecosystem_roots

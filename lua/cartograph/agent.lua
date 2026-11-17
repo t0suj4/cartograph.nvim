@@ -1586,7 +1586,10 @@ end
 local function v_lint_run(store, args)
     local lint = require 'cartograph.lint'
     local meta = {}
-    for _, r in ipairs(lint.rules) do meta[r.name] = r end
+    local rules, bad = lint.all_rules()
+    for _, r in ipairs(rules) do meta[r.name] = r end
+    -- (an invalid user rule is a name you may ask for: the answer is its refusal, CART-0127)
+    for _, b in ipairs(bad) do meta[b.rule] = meta[b.rule] or { user = true } end
     local only
     if args.rules and #args.rules > 0 then
         only = {}
@@ -1645,17 +1648,17 @@ local function v_lint_run(store, args)
     end
     for _, d in ipairs(declined or {}) do
         notes[#notes + 1] = { kind = 'rule-refused', premise = d.rule, why = d.why,
-            evidence = { quantifier = nn(d.quantifier), closed_over = nn(d.closed_over) } }
+            evidence = { quantifier = nn(d.quantifier), closed_over = nn(d.closed_over), user = d.user or nil } }
     end
     local ran = 0
-    for _, r in ipairs(lint.rules) do if not only or only[r.name] then ran = ran + 1 end end
+    for _, r in ipairs(rules) do if not only or only[r.name] then ran = ran + 1 end end
     if #rows > 0 then return { result = rows, notes = notes } end
 
     local g = M.graph(store)
     if #(declined or {}) > 0 then
         return { result = {}, absence = 'refused', absence_why = {
             premise = 'rules-declined',
-            why = ('no finding, and %d rule(s) DECLINED to run over this scope — an empty report is not a clean bill of health'):format(#declined),
+            why = ('no finding, and %d rule(s) DECLINED to run (over a scope they cannot support, or an invalid config.lints rule) — an empty report is not a clean bill of health'):format(#declined),
             evidence = { declined = #declined } }, notes = notes }
     end
     if g.frontier.unparsed_files > 0 then

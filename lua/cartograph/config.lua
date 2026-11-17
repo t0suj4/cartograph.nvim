@@ -229,6 +229,12 @@ M.sync_on_ascend = true
 -- { source = '<mcp name>', prefix = 'wp_'? } (prefix auto-detects)
 M.db = nil
 
+-- YOUR OWN lint rules, run beside the built-in ones by :CartographLint, :CartographLintSigns and the agent's
+-- lint_run (CART-0127). A list of { name, run = function (store) -> { {file, line, message, col?}, … },
+-- severity?, quantifier?, closed_over?, disposition? } — the shape and the defaults are in cartograph/lint.lua.
+-- An invalid rule, or one whose run() raises, is reported and the others still run.
+M.lints = nil
+
 -- MCP graph sources: open 'mcp://name' to pull a neutral-schema graph
 -- from the named server's tool (default tool name: 'graph')
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }
