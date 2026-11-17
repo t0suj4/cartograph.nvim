@@ -54,7 +54,11 @@
 --     from outside.
 --   LINT RULES (proof) — lint.rules, the table :CartographLint runs, versus the
 --     rule names README.md mentions (CART-0252). Ratchet 0: a rule ships with its
---     README bullet.
+--     README bullet. And the disposition table's authoritative row must list
+--     exactly the rules whose disposition gates (both directions: CONFIRMED drift).
+--     doc/cartograph.txt is NOT checked for rule names, by decision: the helpdoc is
+--     the COMMAND reference and points at README's ## Lint for the per-rule prose.
+--     Do not "fix" the 0 of N rules it names.
 --   TOOLS (evidence) — the tools/*.lua files on disk, versus the file names
 --     README.md mentions at a word boundary (CART-0274). A ratchet that may only
 --     shrink: most of the bench predates the fence, a new tool may not join it.
@@ -545,14 +549,34 @@ end
 
 -- the LINT RULES and TOOLS populations, against README's text (a name must appear as a whole word / file name)
 local readme_txt = table.concat(READ.lines, '\n')
-local rulegap = {}
+local rulegap, dispdrift = {}, {}
 do
     local okl, lint = pcall(require, 'cartograph.lint')
+    local auth = {}
     for _, r in ipairs((okl and lint.rules) or {}) do
         local nm = type(r) == 'table' and r.name or nil
         if nm and not readme_txt:find('%f[%w%-]' .. vim.pesc(nm) .. '%f[^%w%-]') then rulegap[#rulegap + 1] = nm end
+        if nm and r.disposition == 'authoritative' then auth[nm] = true end
     end
     table.sort(rulegap)
+    -- README's disposition table names the GATED set in its authoritative row: a rule gating builds that the row
+    -- leaves out, or a name the row lists that does not gate, is the doc stating something false (dead-confined was
+    -- missing from the row the day it shipped — CART-0252)
+    local row
+    for _, line in ipairs(READ.lines) do if line:match('^| %*%*authoritative%*%* |') then row = line end end
+    if not row then
+        dispdrift[#dispdrift + 1] = 'README.md has no `| **authoritative** |` row in the disposition table'
+    else
+        local listed = {}
+        for nm in row:gmatch('`([%w%-]+)`') do listed[nm] = true end
+        for nm in pairs(auth) do
+            if not listed[nm] then dispdrift[#dispdrift + 1] = nm .. ' is authoritative but missing from the row' end
+        end
+        for nm in pairs(listed) do
+            if not auth[nm] then dispdrift[#dispdrift + 1] = nm .. ' is listed as authoritative but is not' end
+        end
+        table.sort(dispdrift)
+    end
 end
 local toolgap, ntools = {}, 0
 for name, t in vim.fs.dir(REPO .. '/tools') do
@@ -565,6 +589,8 @@ table.sort(toolgap)
 print('')
 print(('== LINT RULES: registered in lint.rules but never named in README.md (ratchet: %d) =='):format(RULES_FLOOR))
 print(#rulegap == 0 and '  (none)' or ('  ' .. table.concat(rulegap, ' ')))
+print('== LINT RULES: README disposition table, authoritative row versus the rules that gate ==')
+print(#dispdrift == 0 and '  (agrees)' or ('  ' .. table.concat(dispdrift, '\n  ')))
 print('')
 print(('== TOOLS: tools/*.lua never named in README.md — %d of %d (ratchet: %d) =='):format(#toolgap, ntools, TOOLS_FLOOR))
 if #toolgap > TOOLS_FLOOR then
@@ -575,6 +601,10 @@ end
 print('')
 if #confirmed > 0 then
     print(('docaudit: FAIL — %d confirmed drift(s)'):format(#confirmed))
+    os.exit(1)
+end
+if #dispdrift > 0 then
+    print(('docaudit: FAIL — README\'s authoritative row disagrees with lint.rules: %s'):format(table.concat(dispdrift, '; ')))
     os.exit(1)
 end
 if #rulegap > RULES_FLOOR then

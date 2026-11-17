@@ -417,6 +417,10 @@ LINT                                                      *cartograph-cmd-lint*
   :CartographLintSigns        publish lint findings as in-buffer signs
   :CartographLintClear        clear the in-buffer lint signs
 
+  The rules themselves, and what each kind of finding claims (its disposition:
+  authoritative, suggestive, calibration-bound, annotation), are described in
+  README.md under "Lint"; this help lists the commands.
+
 CLONES                                                  *cartograph-cmd-clones*
 
   :CartographClones [count]   exact-structural clone groups
