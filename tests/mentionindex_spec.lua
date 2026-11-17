@@ -69,3 +69,74 @@ test('mention index: a refresh of the file keeps its definitions in its entry; a
     ok(entry(store.data, 'a.js', 'loadAll') and entry(store.data, 'a.js', 'saveAll'), 'the refreshed entry: ' .. tostring(store.data.names['a.js']))
     vim.fn.delete(root, 'rf')
 end)
+
+test('mention index: graph_info reports, per language, the definitions the index skips and by which rule (CART-1008)', function ()
+    if not parser_available('javascript') then skip 'no javascript parser' end
+    local root = tree({ ['h.js'] = 'var hooks = {\n  go: function () {},\n  "x/y": function () {},\n  get: function (e) { return e; },\n  loadAll: function () { return 1; }\n};\nfunction ab() {}\n' })
+    local data = ts.extract(root); data.root = root
+    local cov = agent.mention_coverage(data)
+    local sp = ts.spec.javascript
+    if sp.stdlib_names and sp.stdlib_names.get then ok(cov.javascript.stdlib >= 1, 'get: the stdlib vocabulary — ' .. vim.inspect(cov.javascript)) end
+    local r = cov.javascript
+    ok(r and r.defs >= 3, vim.inspect(cov))
+    eq(0, r.unexplained, 'every skip is one of the index\'s rules')
+    ok(r.short >= 2, 'go and ab: under 3 characters — ' .. vim.inspect(r))
+    eq(r.skipped, r.short + r.stdlib + r.shape + r.off + r.unexplained, 'the rules partition the skips')
+    store.ingest(data)
+    local a = agent.answer(store, 'graph_info', {})
+    local note
+    for _, n in ipairs(a.notes or {}) do if n.kind == 'mention-index-coverage' then note = n end end
+    ok(note, 'graph_info carries the coverage note')
+    ok(note.why:find('javascript %d+ of %d+'), note.why)
+    eq(r.skipped, note.evidence.by_lang.javascript.skipped)
+    -- a definition the index lost by NO rule is counted apart: that is a bug in the index, not a rule
+    data.names['h.js'] = data.names['h.js']:gsub('\31loadAll\31', '\31')
+    eq(1, agent.mention_coverage(data).javascript.unexplained)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('mention index: a language whose mentions are off has no entry — its definitions count as OFF, not unexplained (CART-1008)', function ()
+    if not parser_available('erlang') then skip 'no erlang parser' end
+    local root = tree({ ['m.erl'] = '-module(m).\n-export([start_link/0]).\nstart_link() -> ok.\n' })
+    local data = ts.extract(root); data.root = root
+    local r = agent.mention_coverage(data).erlang
+    ok(r and r.off >= 1 and r.unexplained == 0, vim.inspect(r))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('mention index: a bracket-string member has no identifier tail — counted as SHAPE (CART-1008)', function ()
+    if not parser_available('lua') then skip 'no lua parser' end
+    local root = tree({ ['l.lua'] = "local M = { handlers = {} }\nM.handlers['textDocument/hover'] = function () return 1 end\nfunction M.loadAll() return 2 end\nreturn M\n" })
+    local data = ts.extract(root); data.root = root
+    local r = agent.mention_coverage(data).lua
+    ok(r and r.shape >= 1, vim.inspect(r))
+    eq(0, r.unexplained)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('mention index: a file the identifier pass gave no entry — a java record with no body — gets one for its definitions (CART-1008)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    -- minimised from elasticsearch libs user-agent-api Details.java: 7 definitions in no file's entry
+    local root = tree({ ['Details.java'] = 'package p;\npublic record Details(String name, String version, String deviceType) {}\n' })
+    local data = ts.extract(root); data.root = root
+    ok(data.names['Details.java'], 'an entry exists')
+    ok(entry(data, 'Details.java', 'deviceType'), 'the accessor\'s name: ' .. tostring(data.names['Details.java']))
+    eq(0, agent.mention_coverage(data).java.unexplained)
+    -- an indexed language's file with NO entry is no rule's doing: unexplained, never `off`
+    data.names['Details.java'] = nil
+    local r = agent.mention_coverage(data).java
+    ok(r.unexplained >= 1 and r.off == 0, vim.inspect(r))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('mention index: a REFRESH of a file with no function body updates its entry (CART-1008)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = tree({ ['Details.java'] = 'package p;\npublic record Details(String name) {}\n' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    vim.uv.sleep(1100)
+    local fd = assert(io.open(root .. '/Details.java', 'w')); fd:write('package p;\npublic record Details(String name, String deviceType) {}\n'); fd:close()
+    require('cartograph.refresh').file('Details.java')
+    ok(entry(store.data, 'Details.java', 'deviceType'), 'the refreshed entry: ' .. tostring(store.data.names['Details.java']))
+    vim.fn.delete(root, 'rf')
+end)

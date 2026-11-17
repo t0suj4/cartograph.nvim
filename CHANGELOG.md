@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — graph_info: how much of each language the mention index covers (agent surface, graph; cache v330)
+
+- `graph_info` carries a `mention-index-coverage` note: per language, the definitions whose name the mention index
+  skips, by rule — `short`, `stdlib`, `shape`, `off` (a language that opted out), `unexplained` (no rule; expected 0).
+  elasticsearch libs java 685 of 13,014 (157 short, 528 stdlib); hugo go 505 of 8,680; jquery/src 44 of 392.
+- A file with definitions but no function body (a java record with no methods) now has a mention-index entry for
+  their names; `mentions` lists it.
+
 ## 2026-11-17 — Java: overloads in the caller's own file are decided by argument count (graph; cache v329)
 
 - The arity pass now also reads a same-file refusal whose candidates are overloads of one class: `new x_result()`

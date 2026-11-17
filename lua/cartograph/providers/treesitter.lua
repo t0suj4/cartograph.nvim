@@ -8092,7 +8092,9 @@ function M.merge_idpass(data, out, touched)
     if out.names then
         data.names = data.names or {}
         for f, s in pairs(out.names) do data.names[f] = s end
-        M.index_definitions(data, out.names)
+        -- (the TOUCHED files, nil = every file: a file the identifier pass left without an entry — a record-only java file
+        -- has no function body — is not in out.names, and its definitions still belong in an entry, CART-1008)
+        M.index_definitions(data, touched)
     end
 end
 
@@ -8103,19 +8105,27 @@ end
 -- "0 files" about a name printed on the defining line. Each file's own definition tails are unioned in, under the
 -- index's own rule (3+ characters, the language's stdlib excluded, an identifier-shaped tail — a bracket string
 -- `M.handlers['x/y']` has none). NOT "a property key is a mention": a key that defines nothing (`{ type = 'x' }`) stays
--- out. Only files the index already holds — a language that opted out (spec.name_index = false, erlang's empty
--- mention_types) gains no entry. `files` = a set keyed by file (nil = every file).
+-- out. A file the identifier pass gave NO entry (it visits files with a function body or a module variable: a java
+-- `record Details(String name, …) {}` has neither, and 38 libs files held 7-9 definitions in no entry) gets one when
+-- its language indexes names; a language that opted out (spec.name_index = false, erlang's empty mention_types) gains
+-- no entry. `files` = a set keyed by file (nil = every file).
 M._DEF_NOINDEX = { module = true, region = true, external = true, file = true }
+--- does the mention index hold `file`'s language at all? (an opt-out is a decision: no entry is invented for it)
+function M._names_indexed(file)
+    local _, sp = lang_for(file)
+    return sp ~= nil and sp.name_index ~= false and not (sp.mention_types and next(sp.mention_types) == nil)
+end
 function M.index_definitions(data, files)
     local names = data.names
     if not names then return 0 end
     local add = {}
     for _, n in ipairs(data.nodes or {}) do
         local f, nm = n.file, n.name
-        if f and nm and names[f] and (not files or files[f]) and not M._DEF_NOINDEX[n.kind] and not n.anon then
+        if f and nm and (not files or files[f]) and not M._DEF_NOINDEX[n.kind] and not n.anon
+            and (names[f] or M._names_indexed(f)) then
             local tail = nm:match('([^%.:#>]+)$')
             if tail and #tail >= 3 and tail:match('^[%a_$][%w_$]*[?!=]?$')
-                and not names[f]:find('\31' .. tail .. '\31', 1, true) then
+                and not (names[f] or ''):find('\31' .. tail .. '\31', 1, true) then
                 local _, sp = lang_for(f)
                 if not (sp and sp.stdlib_names and sp.stdlib_names[tail]) then
                     local a = add[f]
@@ -8128,7 +8138,7 @@ function M.index_definitions(data, files)
     local n = 0
     for f, set in pairs(add) do
         local all = {}
-        for w in names[f]:gmatch('[^\31]+') do all[#all + 1] = w end
+        for w in (names[f] or ''):gmatch('[^\31]+') do all[#all + 1] = w end
         for w in pairs(set) do all[#all + 1] = w; n = n + 1 end
         table.sort(all)
         names[f] = '\31' .. table.concat(all, '\31') .. '\31'

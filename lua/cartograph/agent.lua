@@ -808,6 +808,43 @@ local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_ca
     'journal_list', 'journal_get',
     'txn_apply', 'txn_undo' }
 
+--- ★ THE MENTION INDEX'S COVERAGE, PER LANGUAGE (CART-1008 item 3). A name is written where it is DEFINED, so every
+--- nameable definition's name belongs to its own file's entry; one that is not was skipped by a RULE, and `mentions`
+--- reads "0 files" for it. Since 412d0900 a definition's name is unioned into its entry, so what is left is the index's
+--- documented rules: SHORT (under 3 characters), STDLIB (the language's vocabulary), SHAPE (no identifier tail — a
+--- bracket-string member), OFF (a language whose mentions are off by decision: no entry for the file at all, CART-0845).
+--- Anything else is UNEXPLAINED — a skip no rule accounts for (an indexed language's file with no entry, a defined name
+--- missing from its entry), which is a bug in the index, so it is counted apart.
+--- -> { [lang] = { defs, skipped, short, stdlib, shape, off, unexplained } } | nil (no index)
+function M.mention_coverage(data)
+    local names = data and data.names
+    if not names then return nil end
+    local tsm = require 'cartograph.providers.treesitter'
+    local noindex = tsm._DEF_NOINDEX or {}
+    local out = {}
+    for _, n in ipairs(data.nodes or {}) do
+        local nm, f = n.name, n.file
+        if nm and f and not noindex[n.kind] and not n.anon and not nm:find('#cb$') and not nm:find('#ret$') then
+            local lang = tsm.lang_of(f) or '?'
+            local r = out[lang]
+            if not r then r = { defs = 0, skipped = 0, short = 0, stdlib = 0, shape = 0, off = 0, unexplained = 0 }; out[lang] = r end
+            r.defs = r.defs + 1
+            local entry = names[f]
+            local tail = nm:match('([^%.:#>]+)$')
+            local why
+            if not entry then why = tsm._names_indexed(f) and 'unexplained' or 'off'
+            elseif not (tail and tail:match('^[%a_$][%w_$]*[?!=]?$')) then why = 'shape'
+            elseif #tail < 3 then why = 'short'
+            elseif not entry:find('\31' .. tail .. '\31', 1, true) then
+                local sp = tsm.spec[lang]
+                why = (sp and sp.stdlib_names and sp.stdlib_names[tail]) and 'stdlib' or 'unexplained'
+            end
+            if why then r.skipped = r.skipped + 1; r[why] = r[why] + 1 end
+        end
+    end
+    return out
+end
+
 local function v_graph_info(store)
     local rows = {}
     for _, name in ipairs(ORDER) do
@@ -920,6 +957,27 @@ local function v_graph_info(store)
             why = stale > 0 and ('%d of the %d files this graph read changed on disk since (or are gone): answers about them describe the old text'):format(stale, checked)
                 or ('all %d files this graph read are unchanged on disk'):format(checked),
             evidence = { checked = checked, stale = stale, examples = ex } }
+    end
+    -- ★ WHERE `mentions` CANNOT SEE (CART-1008): per language, the nameable definitions whose name the mention index
+    -- skipped and by which rule — so "0 files mention X" is read against how much of this language the index covers
+    local cov = M.mention_coverage(store.data)
+    if cov then
+        local langs, parts, any = {}, {}, false
+        for l, r in pairs(cov) do if r.skipped > 0 then langs[#langs + 1] = l; any = true end end
+        table.sort(langs)
+        for _, l in ipairs(langs) do
+            local r, rs = cov[l], {}
+            for _, k in ipairs { 'short', 'stdlib', 'shape', 'off', 'unexplained' } do
+                if r[k] > 0 then rs[#rs + 1] = ('%s %d'):format(k, r[k]) end
+            end
+            parts[#parts + 1] = ('%s %d of %d (%.1f%%: %s)'):format(l, r.skipped, r.defs, 100 * r.skipped / r.defs, table.concat(rs, ', '))
+        end
+        if any then
+            notes = notes or {}
+            notes[#notes + 1] = { kind = 'mention-index-coverage', premise = 'index-coverage',
+                why = ('the mention index skips some definitions\' names by its documented rules (short = under 3 characters, stdlib = the language\'s vocabulary, shape = no identifier tail, off = mentions off for the language), so `mentions` cannot list their files: %s'):format(table.concat(parts, ' · ')),
+                evidence = { by_lang = cov } }
+        end
     end
     -- graph_info's own rows are a description of the instrument, never empty.
     return { result = rows, notes = notes }
