@@ -4335,7 +4335,10 @@ nvim --headless -u NONE -l tools/clones.lua --rowdrift
 # second extraction (inline==parallel, in a pristine child process — the
 # previously unswept oracle: it found a real inline≠parallel divergence on
 # its first full run). Each corpus runs in a fresh process, so one row
-# crashing costs one row. Exit 1 on any FAIL, 2 on soft notes, 0 all green.
+# crashing costs one row. Exit 1 on any FAIL, 3 when no row FAILed but one DIED (killed by a
+# signal, past its deadline, never collected: INCONCLUSIVE, no verdict about the code), 2 on soft
+# notes, 0 all green. A row killed by a signal the sweep did not send (an OOM under contention) is
+# run ONCE more and the grid says `★ RETRIED` beside it; --no-retry turns that off (CART-0408).
 nvim --headless -u NONE -l tools/matrix.lua              # full sweep
 nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
 nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
@@ -4349,7 +4352,7 @@ nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
 # ran under it without one trip, against a largest measured row of 174.4s.
 nvim --headless -u NONE -l tools/matrix.lua --timeout 600   # tighter deadline
 nvim --headless -u NONE -l tools/matrix.lua --timeout 0     # no deadline at all
-#   zig  ERR
+#   zig  DIED
 #   zig: the row hit its 5s DEADLINE (--timeout) and was SIGKILLed 10s later, having
 #        ignored the TERM — it did not FAIL, it never finished (code 0, signal 9)
 # ★★ `vim.system{timeout=}` IS A REQUEST, NOT A DEADLINE, and the first cut of this shipped

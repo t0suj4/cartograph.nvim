@@ -2,7 +2,7 @@
 --
 --   nvim --headless -u NONE -l tools/matrix.lua [<corpus>...] [--quick]
 --        [--cols a,b,c] [--save] [--jobs N] [--mem-mb M] [--timeout S]
---        [--file <lua-pattern>]
+--        [--file <lua-pattern>] [--no-retry]
 --
 -- Every "these two computations must agree" claim the repo makes, swept
 -- across the corpus registry in ONE run — the push-time sweep that used to
@@ -35,8 +35,13 @@
 --
 -- Cell states: OK · FAIL · ~ (ran, report-only/uncalibrated) · -- (n/a)
 --   · SAVED (--save) · NOBASE (no baseline yet). Row states: SKIP (pinned
---   corpus moved/dirty — mirror of gate's exit-2) · ERR (row crashed).
--- Exit: 1 any FAIL/ERR · 2 clean but SKIP/NOBASE present · 0 all green.
+--   corpus moved/dirty — mirror of gate's exit-2) · ERR (row crashed) · DIED (the row never finished: killed
+--   by a signal, past its deadline, or never collected — no verdict about the code at all, CART-0408).
+-- Exit: 1 any FAIL/ERR · 3 no FAIL but a row DIED (INCONCLUSIVE) · 2 clean but SKIP/NOBASE present · 0 all green.
+-- ★ A ROW KILLED BY A SIGNAL WE DID NOT SEND IS RUN ONCE MORE, AND THE GRID SAYS SO (CART-0408): a row shot by the
+--   OOM killer under contention read `MATRIX: FAIL`, and the learned answer to a flaky FAIL is to re-run the sweep —
+--   which is how a real red gets waved through. The retry is the tool's, it is printed, and a row that died twice is
+--   DIED, never FAIL. --no-retry turns it off.
 --
 -- Each corpus runs in a FRESH child process (this file re-invoked with
 -- --row) — the same isolation discipline as one gate.lua run per corpus:
@@ -70,6 +75,7 @@ do
         local a = arg[i]
         if a == '--row' then opts.row = true
         elseif a == '--save' then opts.save = true
+        elseif a == '--no-retry' then opts.noretry = true
         elseif a == '--quick' then opts.quick = true
         elseif a == '--weights' then opts.weights = true
         elseif a == '--jobs' then
@@ -1026,6 +1032,15 @@ local procs = {} -- name -> raw vim.SystemCompleted (parsed after the pool drain
 -- Conflating those is what printed "no process was started" for a row that was running at
 -- that very moment. `launched` is the field that tells them apart.
 local launched, timedout, hardkill, timers = {}, {}, {}, {}
+local retried = {} -- name -> the FIRST death's signal, for a row run once more (CART-0408)
+-- the signal that KILLED a row, or nil: the runner's own field, or a shell-style 128+n for KILL / TERM only — a 134
+-- (an abort) is a crash of the code under test and stays an ERR
+local function KILLED(proc)
+    if not proc then return nil end
+    if type(proc.signal) == 'number' and proc.signal ~= 0 then return proc.signal end
+    if proc.code == 137 or proc.code == 143 then return proc.code - 128 end
+    return nil
+end
 local running, finished, inflight_mb = 0, 0, 0
 local function launch(name)
     running = running + 1
@@ -1034,14 +1049,22 @@ local function launch(name)
     -- on_exit runs in a fast context: only stash the raw result + a stderr tick
     -- (pure io/Lua, no vim API); all parsing/rendering happens after the wait
     local obj = vim.system(build_cmd(name), { text = true }, function (proc)
-        procs[name] = proc
         running = running - 1
         inflight_mb = inflight_mb - weight(name)
-        finished = finished + 1
         for _, t in ipairs(timers[name] or {}) do
             if not t:is_closing() then t:stop(); t:close() end
         end
         timers[name] = nil
+        -- (killed by a signal WE did not send — not our deadline — and not yet retried: once more, at the front)
+        local ksig = KILLED(proc)
+        if not opts.noretry and ksig and not timedout[name] and not retried[name] then
+            retried[name] = ksig
+            table.insert(pending, 1, name)
+            io.stderr:write(('  [retry] %s was killed by signal %d — running it once more\n'):format(name, proc.signal))
+            return
+        end
+        procs[name] = proc
+        finished = finished + 1
         io.stderr:write(('  [%d/%d] %s\n'):format(finished, #names, name))
     end)
     if TIMEOUT <= 0 then return end
@@ -1093,7 +1116,7 @@ vim.wait(POOL_WAIT, function ()
     return finished >= #names
 end, 25)
 
-local anyfail, anysoft = false, false
+local anyfail, anysoft, anydied = false, false, false
 local details = {}
 local parselines = {} -- the folded census log (see below the grid)
 local liverows = {} -- every completed row, for the oracle-liveness collector (CART-1927)
@@ -1117,7 +1140,7 @@ for _, name in ipairs(names) do
         -- 137 that prints as "137" is one lookup away from being understood and a 137 that
         -- prints as "failed" is not.
         local code, sig = proc and proc.code, proc and proc.signal
-        local why
+        local why, died
         -- ★★ `code` ALONE LAUNDERS A KILL INTO A CLEAN EXIT. A row child SIGKILLed by the
         -- OOM killer or a deadline arrives here with signal=9 and code=0, so the first
         -- version of this branch printed "exited 0 but emitted no @@MATRIX line — a
@@ -1134,6 +1157,7 @@ for _, name in ipairs(names) do
         -- signal 9 — identical to an OOM kill — so the signal-first branch below, correct
         -- for everything else, would report a deadline as "KILLED by signal 9 — a timeout
         -- or an OOM looks like this". It does. And here we are the ones who know which.
+        died = not proc or timedout[name] or KILLED(proc) ~= nil
         if not proc then
             why = launched[name]
                 and ('the row was LAUNCHED and was STILL RUNNING when the pool deadline'
@@ -1155,7 +1179,7 @@ for _, name in ipairs(names) do
             why = 'the row process exited 0 (signal 0) but emitted no @@MATRIX line — it'
                 .. ' really did run and say nothing, which is a REPORTING failure'
         else why = ('the row process exited %s'):format(tostring(code)) end
-        res = { corpus = name, err = why .. (proc and proc.stderr and #proc.stderr > 0
+        res = { corpus = name, died = died or nil, err = why .. (proc and proc.stderr and #proc.stderr > 0
             and ': ' .. proc.stderr:sub(-400) or '') }
     end
 
@@ -1171,9 +1195,21 @@ for _, name in ipairs(names) do
         anysoft = true
     end
 
+    -- (a row run twice: said beside it, whatever the second run did)
+    if retried[name] then
+        details[#details + 1] = { name, { ('★ RETRIED: the first run was killed by signal %d (not this run\'s'
+            .. ' deadline) and the row was run once more — %s'):format(retried[name],
+                res.died and 'it died again' or 'these cells are the SECOND run\'s') } }
+        anysoft = true
+    end
     if res.skip then
         io.stdout:write(('%7s SKIP: %s\n'):format('', res.skip))
         anysoft = true
+    elseif res.died then
+        -- (a row that never finished says nothing about the code: INCONCLUSIVE, not FAIL — CART-0408)
+        io.stdout:write(('%7s DIED\n'):format(''))
+        details[#details + 1] = { name, { res.err } }
+        anydied = true
     elseif res.err then
         io.stdout:write(('%7s ERR\n'):format(''))
         details[#details + 1] = { name, { res.err } }
@@ -1249,5 +1285,6 @@ if #parselines > 0 then
 end
 
 say('')
-say('MATRIX: ' .. (anyfail and 'FAIL' or anysoft and 'PASS (with notes)' or 'PASS'))
-os.exit(anyfail and 1 or (anysoft and 2 or 0))
+say('MATRIX: ' .. (anyfail and 'FAIL' or anydied and 'INCONCLUSIVE — a row DIED, so the sweep has no verdict for it'
+    or anysoft and 'PASS (with notes)' or 'PASS'))
+os.exit(anyfail and 1 or anydied and 3 or (anysoft and 2 or 0))
