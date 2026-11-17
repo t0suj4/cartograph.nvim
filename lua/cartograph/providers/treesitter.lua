@@ -10163,7 +10163,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- and the loss report counted every import statement dark (2586 on converse.js)
                                 local e = { from = file, to = target,
                                     kind = 'import', bind = bind, at = { pos_of(pathn) },
-                                    inferred = folded and folded.inferred or nil } -- (a tail-matched computed path: CART-0944)
+                                    inferred = folded and folded.inferred or nil, -- (a tail-matched computed path: CART-0944)
+                                    via = folded and folded.inferred and 'path-tail' or nil }
                                 -- all three fields together or none: setting
                                 -- `site` on a site whose KIND is unknown would
                                 -- claim half a fact
@@ -10714,8 +10715,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                     if pl and spec.import_call_like(full, pl) then
                         local target = spec.resolve_import(pl, importable, file, root)
                         if target and target ~= file then
+                            -- (via: WHY it is hedged — a loader recognised by its NAME, CART-2126)
                             edges[#edges + 1] = { from = file, to = target,
-                                kind = 'import', inferred = true, at = { pos_of(arg1n or calln) } }
+                                kind = 'import', inferred = true, via = 'loader-name', at = { pos_of(arg1n or calln) } }
                         end
                     end
                     -- instance chain `root.field.method()`: the root's TYPE and

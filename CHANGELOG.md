@@ -2,6 +2,13 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — graph_info and the require-cycle lint say which includes are a guess (agent surface; cache v335)
+
+- A hedged import edge (`inferred`) now carries `via`: `loader-name` (a verb recognised by its name, mantis's
+  `require_api`) or `path-tail` (a computed path matched by its tail), and the store's import index keeps both.
+- `graph_info` carries an `import-trust` note: how many import edges are hedged, and why. mantisbt: 2,869 of 3,294.
+- A require cycle through hedged imports says so: mantisbt's 60-module cycle rests on 487 hedged imports of 490 (486 loader-name).
+
 ## 2026-11-17 — PHP: a computed include path is an import edge (graph; cache v334)
 
 - `require_once( __DIR__ . '/x.php' )`, `dirname( __DIR__, 2 ) . '/core.php'` and a local bound once

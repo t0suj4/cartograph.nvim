@@ -960,6 +960,32 @@ local function v_graph_info(store)
                 or ('all %d files this graph read are unchanged on disk'):format(checked),
             evidence = { checked = checked, stale = stale, examples = ex } }
     end
+    -- ★ HOW MANY INCLUDES ARE A GUESS (CART-2126): an import edge carries `inferred` when the include is HEDGED — a
+    -- loader recognised by its NAME (mantis's require_api: a verb named require_* / include_* / load_ with a .php
+    -- argument), a computed path matched by its TAIL (CART-0944). Nothing read the mark, so every reader of the import
+    -- graph (require cycles, cones, the boundary summaries) took a guessed include as a fact
+    local ni, nh, vias, ex = 0, 0, {}, nil
+    for _, e in ipairs((store.data and store.data.edges) or {}) do
+        if e.kind == 'import' then
+            ni = ni + 1
+            if e.inferred then
+                nh = nh + 1
+                local v = e.via or 'inferred'
+                vias[v] = (vias[v] or 0) + 1
+                ex = ex or ('%s -> %s (%s)'):format(e.from, e.to, v)
+            end
+        end
+    end
+    if nh > 0 then
+        local vl = {}
+        for v, c in pairs(vias) do vl[#vl + 1] = ('%s %d'):format(v, c) end
+        table.sort(vl)
+        notes = notes or {}
+        notes[#notes + 1] = { kind = 'import-trust', premise = 'hedged-import',
+            why = ('%d of the %d import edges are HEDGED — %s (loader-name: a verb recognised by its name, path-tail: a computed path matched by its tail); a reading of the import graph rests on them as on a guess. First: %s')
+                :format(nh, ni, table.concat(vl, ', '), ex),
+            evidence = { imports = ni, hedged = nh, by_via = vias } }
+    end
     -- ★ WHERE `mentions` CANNOT SEE (CART-1008): per language, the nameable definitions whose name the mention index
     -- skipped and by which rule — so "0 files mention X" is read against how much of this language the index covers
     local cov = M.mention_coverage(store.data)

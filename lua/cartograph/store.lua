@@ -112,9 +112,12 @@ local function idx_edge(T, e)
         -- immediately dropped. `sideeffect` is normalized to a boolean because it
         -- is a two-state fact; once/soft/site pass through RAW because they are
         -- TRI-STATE and nil means "this language's syntax does not discriminate".
+        -- (inferred / via: a HEDGED import — a loader recognised by its name, a computed path matched by its tail —
+        -- and why; nothing read it, so a hedged include counted as certain everywhere, CART-2126)
         table.insert(T.imports_in[e.to], { from = e.from,
             sideeffect = e.sideeffect == true,
-            once = e.once, soft = e.soft, site = e.site, lazy = e.lazy })
+            once = e.once, soft = e.soft, site = e.site, lazy = e.lazy,
+            inferred = e.inferred or nil, via = e.via })
         T.imports_out[e.from] = T.imports_out[e.from] or {}
         table.insert(T.imports_out[e.from], e.to)
     elseif e.kind == 'use' then

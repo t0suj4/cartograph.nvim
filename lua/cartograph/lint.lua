@@ -904,9 +904,16 @@ local function cycle_findings(store)
     local scc = require 'cartograph.scc'
     local ids, adj = {}, {}
     -- (a LAZY require — a namespace's __index, CART-1619 — loads on first use: it closes no load-time cycle)
-    local eager = {}
+    local eager, hedged = {}, {}
     for to, ins in pairs(store.imports_in) do
-        for _, r in ipairs(ins) do if not r.lazy then eager[r.from .. '\0' .. to] = true end end
+        for _, r in ipairs(ins) do
+            if not r.lazy then eager[r.from .. '\0' .. to] = true end
+            -- (a HEDGED import — every site of the pair inferred — may not exist: a cycle through it is a guess, CART-2126)
+            local k = r.from .. '\0' .. to
+            if r.inferred then
+                if hedged[k] == nil then hedged[k] = r.via or 'inferred' end
+            else hedged[k] = false end
+        end
     end
     for f, tos in pairs(store.imports_out) do
         ids[#ids + 1] = f
@@ -921,9 +928,30 @@ local function cycle_findings(store)
         local m = con.members[ci]
         if #m > 1 then
             table.sort(m)
-            out[#out + 1] = { file = store.abs(m[1]), line = 1,
-                message = ('require cycle (%d modules): %s — fragile if any require is load-time (lazy requires break it; load-time-ness unrecorded)')
-                    :format(#m, table.concat(m, ' → ')) }
+            -- the cycle's own edges: those between two of its members
+            -- (one per PAIR: imports_out lists a pair once per site)
+            local inm, ne, nh, vias, seen = {}, 0, 0, {}, {}
+            for _, f in ipairs(m) do inm[f] = true end
+            for _, f in ipairs(m) do
+                for _, to in ipairs(adj[f] or {}) do
+                    if inm[to] and not seen[f .. '\0' .. to] then
+                        seen[f .. '\0' .. to] = true
+                        ne = ne + 1
+                        local h = hedged[f .. '\0' .. to]
+                        if h then nh = nh + 1; vias[h] = (vias[h] or 0) + 1 end
+                    end
+                end
+            end
+            local hedge = ''
+            if nh > 0 then
+                local vl = {}
+                for v, c in pairs(vias) do vl[#vl + 1] = ('%s %d'):format(v, c) end
+                table.sort(vl)
+                hedge = (' — %d of its %d imports are HEDGED (%s): the cycle may not exist'):format(nh, ne, table.concat(vl, ', '))
+            end
+            out[#out + 1] = { file = store.abs(m[1]), line = 1, hedged = nh > 0 or nil,
+                message = ('require cycle (%d modules): %s — fragile if any require is load-time (lazy requires break it; load-time-ness unrecorded)%s')
+                    :format(#m, table.concat(m, ' → '), hedge) }
         end
     end
     return out
