@@ -75,7 +75,7 @@ test('same-file arity: a samefile refusal over one class\'s overloads is decided
     vim.fn.delete(root, 'rf')
 end)
 
-test('same-file arity: overloads of two same-named nested classes are not one class — a variable of SIMPLE type K stays refused, of qualified type a.K is decided (CART-2121)', function ()
+test('same-file arity: overloads of two same-named nested classes are not one class — a parameter of simple type K and one of qualified type a.K both name a.K (CART-2121, CART-2123)', function ()
     if not parser_available('java') then skip 'no java parser' end
     local root = tree({ ['N.java'] = table.concat({
         'package p;',                                                                                   -- 0
@@ -88,8 +88,9 @@ test('same-file arity: overloads of two same-named nested classes are not one cl
     local data = ts.extract(root); data.root = root
     local c = calls_at(data, 'N.java')
     local h = c[2] and c[2][1]
-    eq(nil, h.cpath, 'a simple declared type is not decided here (CART-2123)')
-    eq(nil, h.to, 'one f per class, two classes: a count would choose the class: ' .. tostring(h.to))
+    -- (a PARAMETER of simple type K inside a: its lexical class, a.K — CART-2123; it was left undecided before)
+    eq('N.a.K', h.cpath, 'K inside a: a.K')
+    eq('N.java::K::f@2', h.to, 'a.K\'s f(int), never b.K\'s by count: ' .. tostring(h.to))
     eq('N.a.K', c[4][1].cpath, 'a.K: a is a member of N')
     eq('N.java::K::f@2', c[4][1].to, 'a.K\'s f(int)')
     vim.fn.delete(root, 'rf')

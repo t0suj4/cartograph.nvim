@@ -278,13 +278,33 @@ local function java_jdk_chain(e, src)
     return nil
 end
 
-local function java_call_path(calln, src, how, key, qcls)
+local function java_call_path(calln, src, how, key, qcls, model)
     -- (a receiver typed through a VARIABLE whose declared type is spelled QUALIFIED — `ImmutableOpenMap.Builder<..>
     -- indices` — is keyed by its last segment, `Builder::get`, as this file's own Builder is: the head decides, as for a
-    -- written `new B.K()`. A simple declared type is not decided here, CART-2123)
+    -- written `new B.K()`)
     if how == 'binder' then
         local chain = qcls and qcls:find('.', 1, true) and vim.split(qcls, '.', { plain = true }) or nil
-        if not chain then return nil end
+        if not chain then
+            -- ★ A SIMPLE declared type (CART-2123): thrift's `for (_Fields field : EnumSet.allOf(_Fields.class))
+            -- byName.put(field.getFieldName(), field)` in every struct's _Fields — 574 calls refused samefile on hive. A
+            -- LOCAL's / parameter's / loop variable's type is scoped where it is declared, which is the call's own class
+            -- chain, so the lexical lookup applies; a FIELD's type is scoped at the field's class, which may be an outer
+            -- one, so it is left undecided. Found = the path; not found = the resolver's reading, as before
+            local x = key and key:match('^([%w_$]+)::[%w_$]+$')
+            local obj = calln:field('object')[1]
+            if not (x and obj and obj:type() == 'identifier' and model and model.resolve) then return nil end
+            local bchain, k = model.resolve(node_text(obj, src), calln)
+            local b
+            for i = 1, k or 0 do
+                if bchain[i].kind == 'param' or bchain[i].ty ~= nil then b = bchain[i]; break end
+            end
+            if not (b and (b.kind == 'param' or b.kind == 'local')) then return nil end
+            -- ('' — an anonymous body on the way — is NOT undecidable for a variable's TYPE: what that body may inherit
+            -- is a member type, the rare case a supertype clause leaves to the resolver's reading too; as '' it withdrew
+            -- 36 server picks of `listener.onRecoveryDone(..)` inside an anonymous RecoveryListener)
+            local hp = java_lex_path(calln, src, x)
+            return (hp and hp ~= '') and hp or nil
+        end
         local hp = java_lex_path(calln, src, chain[1], true)
         if not hp or hp == '' then return '' end
         return hp .. '.' .. table.concat(chain, '.', 2)
@@ -648,7 +668,9 @@ local function jvt_binders(node, src, out) -- name -> {ty}
     local function put(nm, ty)
         if nm then
             local base = ty and java_base_type(ty, src) or nil
-            out[node_text(nm, src)] = { ty = base ~= 'var' and base or nil }
+            -- (tyq: the QUALIFIED nested type, as params / locals / fields record it — `for (FieldMapper.Builder b : ..)`
+            -- read as a bare `Builder` named the enclosing MultiFields.Builder, CART-2123)
+            out[node_text(nm, src)] = { ty = base ~= 'var' and base or nil, tyq = (base and base ~= 'var') and java_qual_type(ty, src) or nil }
         end
     end
     if t == 'enhanced_for_statement' then

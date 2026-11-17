@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — Java: a variable of a nested class type names its lexical class (graph; cache v333)
+
+- A call through a local, parameter or loop variable declared with a simple nested class name resolves on that
+  class's path: thrift's `for (_Fields field : ..) field.getFieldName()` in every struct (574 calls on hive). A field
+  of that type is still left to the earlier reading.
+- A loop / catch / resource variable declared with a qualified type keeps it: `for (IndexRoutingTable.Builder b : ..)
+  b.build()` in RoutingTable.java had reached RoutingTable's own Builder.build (7 such on elasticsearch server).
+
 ## 2026-11-17 — Java: receivers the expression itself types — JDK final-method chains, ternaries, casts (graph; cache v332)
 
 - `getClass().getName().compareTo(..)` is the JDK's String.compareTo (getClass is final, Class is final): external,

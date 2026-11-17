@@ -10716,7 +10716,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                         qhow = qhow, -- how qualify_call keyed it: `recv` vs `base` provenance (CART-0695)
                         rcls = rcls, -- the receiver's class (cpp spec.recv_class): the `recv` pass's key (CART-2111)
                         -- the NESTED-CLASS PATH of the class the key names (java, CART-1077): the same-file path pick
-                        cpath = qhow and spec.call_path and spec.call_path(calln, src, qhow, full, qcls) or nil,
+                        cpath = qhow and spec.call_path and spec.call_path(calln, src, qhow, full, qcls, jvt_sm) or nil,
                         rfld = rfld, -- a FIELD receiver: owner class \31 field \31 operator, typed via data.fieldtypes (CART-2112)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
