@@ -2,6 +2,17 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — PHP: a require wrapper is recognised by its body, not its name (graph; cache v336)
+
+- A function whose body includes a path ending in one of its parameters (mantis's `require_api`) includes, at each
+  call resolved to it, that path with the call's literal argument. The edge no longer rests on the verb's name
+  (`require_*` / `include_*` / `load_*`): `plugin_require_api` gets its edges, and a `require_*` verb whose body
+  provably includes nothing (`require_css`, which records a stylesheet) loses the edge its name gave it.
+- mantisbt: 2,821 `require_api` edges keep their targets and are hedged by their PATH now (`via = path-tail`:
+  `$g_core_path` is a global), 15 `require_css` edges withdrawn, 2 `plugin_require_api` edges added. No import edge
+  there rests on a name any more. Where the wrapper's body is outside the tree (mantis's core/ alone), the name stays
+  the fallback.
+
 ## 2026-11-17 — graph_info and the require-cycle lint say which includes are a guess (agent surface; cache v335)
 
 - A hedged import edge (`inferred`) now carries `via`: `loader-name` (a verb recognised by its name, mantis's

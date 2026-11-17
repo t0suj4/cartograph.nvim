@@ -85,3 +85,84 @@ test('import trust: a require cycle through a hedged import says the cycle may n
     ok(plain and not plain:find('HEDGED', 1, true), 'the literal cycle is stated as before: ' .. tostring(plain))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ★ AN INCLUDER BY ITS BODY (CART-2126). mantis's require_api had its 2,823 edges from its NAME (via loader-name). The
+-- body proves the verb an includer and says which parameter ends the path: require_api's $g_core_path is a global (the
+-- path's tail is matched, via path-tail); a rooted prefix (`__DIR__ . '/lib/'`) gives an exact edge; a wrapper named
+-- nothing like a loader gets its edges; a require_* verb whose body provably includes nothing (mantis's require_css,
+-- which records a stylesheet) loses its name-matched edge; one that hands its parameter on keeps it.
+local WRAP = {
+    ['core.php'] = P .. "function require_api( $p_api_name ) { global $g_core_path; require_once( $g_core_path . $p_api_name ); }\n"
+        .. "function load_lib( $f ) { require_once( __DIR__ . '/lib/' . $f ); }\n"
+        .. "function bring( $what ) { global $g_x; include_once( $g_x . $what ); }\n"
+        .. "function require_css( $p_path ) { global $g_css; $g_css[$p_path] = is_array( $p_path ); }\n"
+        .. "function require_wrap( $p ) { require_api( $p ); }\n"
+        .. "function require_mystery( $p ) { mystery_fn( $p ); }\n"
+        .. "function relay( $p ) { global $g_r; $p = 'fixed.php'; require_once( $g_r . $p ); }\n",
+    ['lib/q.php'] = P,
+    ['core/bug_api.php'] = P,
+    ['lib/x.php'] = P,
+    ['other/x.php'] = P,
+    ['plugins/graph_api.php'] = P,
+    ['css/status_config.php'] = P,
+    ['page.php'] = P .. "require_api( 'bug_api.php' );\nload_lib( 'x.php' );\nbring( 'graph_api.php' );\n"
+        .. "require_css( 'status_config.php' );\nrequire_wrap( 'bug_api.php' );\n"
+        .. "require_mystery( 'bug_api.php' );\nrelay( 'q.php' );\n",
+}
+local function page_edges()
+    local out = {}
+    for _, e in ipairs(store.data.edges) do
+        if e.kind == 'import' and e.from == 'page.php' then
+            local l = e.at and e.at[1] and require('cartograph.at').sl(e.at[1])
+            out[#out + 1] = ('%d %s %s'):format(l, e.to, tostring(e.via))
+        end
+    end
+    table.sort(out)
+    return out
+end
+-- (require_mystery calls a function this tree does not define: it MAY include, so its name-matched edge stays; relay
+-- writes its parameter before the include, so the argument is not the path: no includer, no edge)
+local WANT = { '1 core/bug_api.php path-tail', '2 lib/x.php nil', '3 plugins/graph_api.php path-tail',
+    '5 core/bug_api.php loader-name', '6 core/bug_api.php loader-name' }
+
+test('import trust: an includer is recognised by its BODY — upgraded, exact, added, withdrawn, kept (CART-2126)', function ()
+    if not parser_available('php') then skip 'no php parser' end
+    local root = setup(WRAP)
+    eq(WANT, page_edges(), 'require_api by its body (path-tail); load_lib exact; bring added; require_css withdrawn; '
+        .. 'require_wrap hands its parameter on, so its name-matched edge stays')
+    -- relink runs the pass again: nothing is added twice, nothing comes back
+    ts.relink(store.data)
+    eq(WANT, page_edges(), 'idempotent under relink')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('import trust: the body derivation is the same through parallel extraction (CART-2126)', function ()
+    if not parser_available('php') then skip 'no php parser' end
+    local root = tree(WRAP)
+    local inline = ts.extract(root)
+    local done
+    require('cartograph.parallel').extract(root, { workers = 2, on_done = function (d) done = d end })
+    vim.wait(120000, function () return done ~= nil end, 50)
+    local function sig(d)
+        local t = {}
+        for _, e in ipairs(d.edges) do if e.kind == 'import' then t[#t + 1] = e.from .. '>' .. e.to .. ':' .. tostring(e.via) end end
+        table.sort(t)
+        return t
+    end
+    ok(done, 'parallel finished')
+    eq(sig(inline), sig(done))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('import trust: the body pass run twice on one graph adds nothing twice (CART-2126)', function ()
+    if not parser_available('php') then skip 'no php parser' end
+    local root = tree(WRAP)
+    local data = ts.extract(root)
+    local idx = {}
+    for _, n in ipairs(data.nodes) do idx[n.id] = n end
+    local cv = require('cartograph.callview').of(data)
+    local before = #data.edges
+    ts._wrapper_imports(data, cv, idx)
+    eq(before, #data.edges, 'a second run over its own result changes nothing')
+    vim.fn.delete(root, 'rf')
+end)

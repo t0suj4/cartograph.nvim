@@ -628,6 +628,67 @@ local function php_norm(p)
     end
     return table.concat(out, '/')
 end
+-- ★ AN INCLUDER, BY ITS BODY (CART-2126). mantis's `function require_api( $p_api_name ) { … require_once(
+-- $g_core_path . $p_api_name ); }`: a function that includes a path ENDING IN one of its own parameters includes,
+-- at every call, that path with the call's argument in the parameter's place. The edge was minted from the verb's
+-- NAME (import_call_like: require_* / include_* / load_*); the body says it instead, and says which parameter.
+-- -> { i = the parameter's position, pre = a rooted prefix | nil, ptail = a known tail of an unknown prefix | nil }
+-- (pre and ptail both nil: the prefix is unknown — the argument alone is the tail). { noinc = true }: the body has
+-- no include expression at all. nil: an include the parameter does not end, or the parameter is written in the body.
+local PHP_INCLUDE = { require_once_expression = true, require_expression = true, include_once_expression = true,
+    include_expression = true }
+local function php_def_includes(defn, src, file)
+    local t = defn:type()
+    if t ~= 'function_definition' and t ~= 'method_declaration' then return nil end
+    local params, body = {}, defn:field('body')[1]
+    local fp = defn:field('parameters')[1]
+    for _, c in inext, fp or defn, -1 do
+        if c:type() == 'simple_parameter' or c:type() == 'variadic_parameter' then
+            local nm = c:field('name')[1]
+            if nm then params[node_text(nm, src)] = #params + 1; params[#params + 1] = node_text(nm, src) end
+        end
+    end
+    if not body then return nil end
+    local found, written, anyinc = nil, {}, false
+    local function walk(n)
+        local nt = n:type()
+        if n ~= body and (nt == 'function_definition' or nt == 'anonymous_function' or nt == 'arrow_function'
+            or nt == 'class_declaration') then return end
+        if (nt == 'assignment_expression' or PHP_PATH_WRITES[nt]) then
+            local l = n:field('left')[1]
+            if l and l:type() == 'variable_name' and params[node_text(l, src)] then written[node_text(l, src)] = true end
+        end
+        if PHP_INCLUDE[nt] then anyinc = true end
+        if PHP_INCLUDE[nt] and not found then
+            local e = n:named_child(0)
+            while e and e:type() == 'parenthesized_expression' do e = e:named_child(0) end
+            local pv, left
+            if e and e:type() == 'variable_name' then pv = node_text(e, src)
+            elseif e and e:type() == 'binary_expression' then
+                local op
+                for _, c in inext, e, -1 do if not c:named() then op = c:type(); break end end
+                local r = e:field('right')[1]
+                if op == '.' and r and r:type() == 'variable_name' then pv, left = node_text(r, src), e:field('left')[1] end
+            end
+            if pv and params[pv] then found = { pv = pv, left = left } end
+        end
+        for _, c in inext, n, -1 do if c:named() then walk(c) end end
+    end
+    walk(body)
+    -- (no include expression in the body at all: { noinc = true } — the post-pass then asks the body's CALLS, and
+    -- withdraws a name-matched edge only when none of them may include either; CART-2126)
+    if not anyinc then return { noinc = true } end
+    if not found or written[found.pv] then return nil end
+    local out = { i = params[found.pv] }
+    if found.left then
+        local f = php_fold(found.left, src, file, 0)
+        if f and f.bad then return nil end
+        if f and f.root then out.pre = f.root
+        elseif f and (f.tail or f.lit) then out.ptail = f.tail or f.lit end
+    end
+    return out
+end
+
 local function php_import_fold(n, src, file)
     local r = php_fold(n, src, file, 0)
     if not r then return nil end
@@ -940,6 +1001,13 @@ return {
         (class_interface_clause (qualified_name) @path)
     ]=],
     import_fold = php_import_fold,
+    def_includes = php_def_includes, -- (an includer by its body, CART-2126)
+    -- (the path an includer's call names: its signature from def_includes, and the call's literal argument)
+    include_path = function (sig, arg)
+        if sig.pre then local p = php_norm(sig.pre .. arg); return p and { path = p } or nil end
+        local t = php_norm((sig.ptail or '') .. arg)
+        return (t and t ~= '') and { tail = t } or nil
+    end,
     resolve_import = function (path, files, from)
         path = path:gsub('^["\']', ''):gsub('["\']$', '')
         -- (a leading `\` only says FULLY QUALIFIED: `extends \Base_Handler` names the global Base_Handler, whose PSR-0

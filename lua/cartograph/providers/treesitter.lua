@@ -5949,9 +5949,120 @@ local function run_resolve_passes(ctx)
         end
     end
     ctx.addref = raw_addref
+    M._wrapper_imports(ctx.whole_data or ctx.data, ctx.cv, nidx) -- (includers by their bodies, CART-2126)
     return n
 end
-M._run_resolve_passes = run_resolve_passes -- (the driver, for a spec that runs a probe pass through it, CART-2124)
+M._run_resolve_passes = run_resolve_passes
+
+-- ★ AN INCLUDER'S CALLS ARE INCLUDES (CART-2126). A function whose body includes a path ending in one of its own
+-- parameters (spec.def_includes -> node.incl) includes, at each call RESOLVED to it, that path with the call's
+-- literal argument in the parameter's place. mantis's 2,823 require_api('x.php') sites had their edge from the verb's
+-- NAME (import_call_like, via = 'loader-name'); the body proves the verb an includer and says which parameter, and
+-- plugin_require_api (no require_* name) gets its sites. The path resolves as a folded include does (M._fold_target):
+-- exact under a rooted prefix (`__DIR__ . '/lib/'`), a hedged unique tail under an unknown one (require_api's
+-- `$g_core_path` is a global) — via = 'path-tail', the hedge now naming the PATH, not the verb.
+-- Runs after resolution on the WHOLE graph (both drivers: a slice extract skips the passes and relink runs them
+-- globally): the body and the calls sit in different files. An edge the name heuristic minted at the same call line is
+-- UPGRADED in place; an edge already there is not added twice (relink runs this again). A name-matched edge at a call
+-- whose body is no includer is LEFT: a body may hand its parameter to another wrapper, which is not modelled here.
+function M._wrapper_imports(data, cv, node_index)
+    if not (data and cv and node_index and data.edges) then return 0 end
+    local cget = cv.get
+    local sigs = false
+    for _, nd in pairs(node_index) do if nd.incl then sigs = true; break end end
+    if not sigs then return 0 end
+    -- (MAY a function include? its own include (incl.i), or a call it makes that may — an unresolved call that is not
+    -- the language's vocabulary is unknown, so may; a cycle may. Only a body with no include whose every call is a
+    -- builtin or a function that provably cannot include is `false`: mantis's require_css, which records a stylesheet)
+    local outc = {}
+    for i = 1, cv.n do
+        local f = cget(i, 'fn')
+        if f then local l = outc[f]; if not l then l = {}; outc[f] = l end; l[#l + 1] = i end
+    end
+    local memo = {}
+    local function may(id)
+        if memo[id] ~= nil then return memo[id] end
+        local nd = node_index[id]
+        if not (nd and nd.incl) or nd.incl.i or not nd.incl.noinc then memo[id] = true; return true end
+        memo[id] = true -- (in progress: a cycle may)
+        local res = false
+        for _, ci in ipairs(outc[id] or {}) do
+            local t = cget(ci, 'to')
+            if t then if may(t) then res = true; break end
+            else
+                -- (only the language's own vocabulary / a stdlib member cannot include: `no-def` is a function this
+                -- tree does not define — a library's, which may. A builtin that runs a CALLBACK (call_user_func) is
+                -- an indirection not modelled here)
+                local x = cget(ci, 'ext')
+                if not (x and (x.why == 'vocab' or x.disp == 'stdlib')) then res = true; break end
+            end
+        end
+        memo[id] = res
+        return res
+    end
+    local drop = {}
+    local importable = {}
+    for _, nd in ipairs(data.nodes or {}) do if nd.kind == 'module' and nd.file then importable[nd.file] = true end end
+    local function line_of(at) return at and atr.sl(at) or nil end -- (packed after ingest, a table before)
+    local byline, have = {}, {}
+    for k, e in ipairs(data.edges) do
+        if e.kind == 'import' then
+            local l = line_of(e.at and e.at[1])
+            if l then
+                have[e.from .. '\31' .. e.to .. '\31' .. l] = true
+                if e.via == 'loader-name' then
+                    local key = e.from .. '\31' .. l
+                    local b = byline[key]; if not b then b = {}; byline[key] = b end
+                    b[#b + 1] = k
+                end
+            end
+        end
+    end
+    local n = 0
+    for i = 1, cv.n do
+        local to = cget(i, 'to')
+        local nd = to and node_index[to]
+        local sig = nd and nd.incl
+        if sig and not sig.i and not may(to) then
+            -- (the name said loader, the body says it includes nothing: the edge at this call line goes)
+            local l = line_of(cget(i, 'at')) or cget(i, 'line')
+            local ex = l and byline[cget(i, 'file') .. '\31' .. l]
+            if ex and #ex == 1 then drop[ex[1]] = true; byline[cget(i, 'file') .. '\31' .. l] = nil; n = n + 1 end
+        elseif sig and sig.i then
+            local argv = cget(i, 'argv')
+            local a = argv and argv[sig.i]
+            local _, sp = elang_for(nd.file)
+            if a and a.k == 'lit' and type(a.v) == 'string' and a.v ~= '' and sp and sp.include_path then
+                local file, at = cget(i, 'file'), cget(i, 'at')
+                local t, inf = M._fold_target(sp.include_path(sig, a.v), importable)
+                local l = line_of(at) or cget(i, 'line')
+                if t and t ~= file and l then
+                    local via = inf and 'path-tail' or nil
+                    local ex = byline[file .. '\31' .. l]
+                    if ex and #ex == 1 then
+                        local e = data.edges[ex[1]]
+                        e.to, e.inferred, e.via = t, inf or nil, via
+                        byline[file .. '\31' .. l] = nil
+                        have[file .. '\31' .. t .. '\31' .. l] = true
+                        n = n + 1
+                    elseif not have[file .. '\31' .. t .. '\31' .. l] then
+                        data.edges[#data.edges + 1] = { from = file, to = t, kind = 'import',
+                            inferred = inf or nil, via = via, at = { at } }
+                        have[file .. '\31' .. t .. '\31' .. l] = true
+                        n = n + 1
+                    end
+                end
+            end
+        end
+    end
+    if next(drop) then
+        local keep = {}
+        for k, e in ipairs(data.edges) do if not drop[k] then keep[#keep + 1] = e end end
+        for k = #data.edges, 1, -1 do data.edges[k] = nil end
+        for k, e in ipairs(keep) do data.edges[k] = e end
+    end
+    return n
+end -- (the driver, for a spec that runs a probe pass through it, CART-2124)
 
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
@@ -9462,6 +9573,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     cpath = spec.def_path and spec.def_path(defn, src) or nil,
                     -- the ANONYMOUS body around it (java): its name reaches it only from inside that body (CART-2124)
                     abody = spec.def_abody and spec.def_abody(defn, src) or nil,
+                    -- an INCLUDER by its body (php): which parameter ends the path it includes (CART-2126)
+                    incl = spec.def_includes and spec.def_includes(defn, src, file) or nil,
                     -- declared inside `extern "C"` (C/C++ join bridge, CART-1079)
                     clink = spec.clink and spec.clink(defn, src) or nil,
                     -- file-local by linkage (C `static`, a macro in a source file): confined (CART-1081)
@@ -12150,7 +12263,7 @@ local function build_symtab(nodes)
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab, drk = n.drk,
-            ret = n.ret, retclass = n.retclass, retflow = n.retflow, cpath = n.cpath, abody = n.abody, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
+            ret = n.ret, retclass = n.retclass, retflow = n.retflow, cpath = n.cpath, abody = n.abody, incl = n.incl, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             vfn = n.vfn, -- (the callback upgrade's target test in a language without bare method values, CART-1969)
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy

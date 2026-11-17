@@ -36,6 +36,7 @@ M.NODE_FIELDS = {
     retflow = true,  -- type-variable return: the return expressions as type terms (java_ret_flow, CART-1077)
     cpath = true,    -- the dotted NESTED-CLASS path of a java method's class (spec.def_path, CART-1077)
     abody = true,    -- the innermost anonymous / enum-constant class body around a def: { sl, sc, el, ec } (CART-2124)
+    incl = true,     -- an INCLUDER by its body (php): { i = parameter, pre | ptail } (spec.def_includes, CART-2126)
     entry = true, exported = true, effects = true, apertures = true, mtab = true, drk = true, -- (mtab: a module node's exported table; drk: a dotted def's root binder, CART-1715)
     annos = true,   -- (CART-0722) registration-CANDIDATE marks: annotation names
                     -- on this def that no supplied list claims. Carried, not
