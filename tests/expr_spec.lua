@@ -1986,3 +1986,44 @@ test('expr: a body-less member of a macro-headed C++ class gets no rows, not the
     eq(1, #em.fl.stmts, 'the method has its one row')
     eq(0, #expr.gate(em.fl, em.lang), 'and the IR agrees with du on it')
 end)
+
+-- CART-0015: the 8 rules are a TABLE — each one addressable by name, with a severity and a reason it has no mechanical
+-- fix — and a finding carries its rule's severity. The three rules no other spec reaches are pinned both sides here.
+test('exprlint: the rule table — every rule complete, FIX_WHY derived from it, a finding carries its severity (CART-0015)', function ()
+    local kinds = { bin = true, row = true, fn = true }
+    local names = {}
+    for _, r in ipairs(exprlint.RULES) do
+        names[#names + 1] = r.name
+        ok(type(r.name) == 'string' and kinds[r.on] and type(r.run) == 'function', r.name)
+        ok(r.severity == 'warn' or r.severity == 'info', r.name .. ' severity')
+        eq(r.fix_why, exprlint.FIX_WHY[r.name], r.name .. ': FIX_WHY is the table\'s')
+        eq(r, exprlint.BY_NAME[r.name])
+    end
+    eq({ 'self-compare', 'duplicated-operand', 'bool-comparison', 'pseudo-ternary', 'self-assignment', 'concat-in-loop',
+        'constant-condition', 'duplicated-condition' }, names, 'the eight, in their filing order')
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function h(a, b)',
+        '  local x = a and a',            -- L2 duplicated-operand
+        '  local y = a or b',             -- L3 clean
+        '  if a == true then x = 1 end',  -- L4 bool-comparison
+        '  if a == b then x = 2 end',     -- L5 clean
+        '  local z = a and nil or b',     -- L6 pseudo-ternary
+        '  local w = a and 1 or b',       -- L7 clean
+        '  local v = b or b',             -- L8 duplicated-operand, the `or` side
+        '  return x, y, z, w, v',
+        'end', 'return { h }',
+    }
+    local d = findings_at('h', 2)['duplicated-operand']
+    ok(d, 'a and a')
+    eq('warn', d.severity)
+    ok(not findings_at('h', 3)['duplicated-operand'], 'a or b')
+    ok(findings_at('h', 8)['duplicated-operand'], 'b or b')
+    local bc = findings_at('h', 4)['bool-comparison']
+    ok(bc, 'a == true')
+    eq('info', bc.severity)
+    eq(true, bc.hedged)
+    ok(not findings_at('h', 5)['bool-comparison'], 'a == b')
+    ok(findings_at('h', 6)['pseudo-ternary'], 'a and nil or b')
+    ok(not findings_at('h', 7)['pseudo-ternary'], 'a and 1 or b')
+end)

@@ -135,31 +135,146 @@ function M.suppressed_at(lines, lnum, rule)
     return nil
 end
 
---- Why a rule offers no MECHANICAL fix. Declared per rule, because "there is no
---- safe rewrite" and "nobody has written one yet" are different facts, and an
---- action list that simply omits the option states neither.
-M.FIX_WHY = {
-    ['concat-in-loop'] = 'the rewrite restructures the loop into a table + '
-        .. 'table.concat — a judgement, not a substitution',
-    ['self-compare'] = 'what the comparison SHOULD have said is not derivable',
-    ['duplicated-operand'] = 'mechanical in principle; not implemented yet',
-    ['bool-comparison'] = 'mechanical in principle; not implemented yet',
-    ['self-assignment'] = 'deleting the line is unsafe when it carries other '
-        .. 'statements; not implemented yet',
-    ['pseudo-ternary'] = 'the intended value is not derivable',
-    ['constant-condition'] = 'which branch to keep is a judgement',
-    ['duplicated-condition'] = 'the intended condition is not derivable',
+-- ── THE RULES, as a table (CART-0015) ───────────────────────────────────────
+-- Each rule is { name, severity, on, fix_why, run }. A rule with an IDENTITY is what a finding's title can descend
+-- into — the analyzer that produced it ([[cartograph-explaining-a-finding]]); eight inline call sites funnelling into
+-- one add() had none. `on` says what the rule is handed, and the driver below walks the function ONCE per kind:
+--   bin  run(e, row, x)   every binary expression inside a row's value / condition expressions
+--   row  run(row, r, x)   every statement row that carries an expression
+--   fn   run(x)           the whole function, once (a rule that relates rows to each other)
+-- x = { add, rows, in_loop, concat_op, LOOPISH }. `add(line, msg, hedged, node)` files a finding under THE RULE
+-- BEING RUN — a rule cannot file under another's name. `fix_why` says why the rule offers no MECHANICAL fix,
+-- because "there is no safe rewrite" and "nobody has written one yet" are different facts, and an action list that
+-- simply omits the option states neither. Order is significant: within a kind, rules run in table order, which is
+-- the order findings were filed before the table existed.
+M.RULES = {
+    { name = 'self-compare', severity = 'warn', on = 'bin',
+        fix_why = 'what the comparison SHOULD have said is not derivable',
+        run = function (e, _, x)
+            local sc = SELFCMP[e.op]
+            if sc and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
+                x.add(nil, ('both sides of `%s` are identical → always %s'):format(e.op, tostring(sc.v)),
+                    sc.nan, e) -- ==/~= hedged: NaN self-comparison is the deliberate exception
+            end
+        end },
+    { name = 'duplicated-operand', severity = 'warn', on = 'bin',
+        fix_why = 'mechanical in principle; not implemented yet',
+        run = function (e, _, x)
+            if (e.op == 'and' or e.op == 'or') and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
+                x.add(nil, ('`x %s x` — both operands identical, equals just `x`'):format(e.op), false, e)
+            end
+        end },
+    { name = 'bool-comparison', severity = 'info', on = 'bin',
+        fix_why = 'mechanical in principle; not implemented yet',
+        run = function (e, _, x)
+            if not BOOLCMP[e.op] then return end
+            local lb = e.l.k == 'lit' and e.l.ty == 'bool'
+            local rb = e.r.k == 'lit' and e.r.ty == 'bool'
+            if lb ~= rb then -- exactly one side a boolean literal
+                local bv = lb and e.l.v or e.r.v
+                x.add(nil, ('comparison to boolean literal `%s` — drop it (a value is truthy, not necessarily `== %s`)')
+                    :format(tostring(bv), tostring(bv)), true, e)
+            end
+        end },
+    { name = 'pseudo-ternary', severity = 'warn', on = 'bin',
+        fix_why = 'the intended value is not derivable',
+        -- `(c and x) or y` where x is statically falsy
+        run = function (e, _, x)
+            if e.op == 'or' and e.l.k == 'bin' and e.l.op == 'and' then
+                local okx, xv = expr.eval(e.l.r)
+                if okx and not expr.truthy(xv) then
+                    x.add(nil, 'lua `c and x or y` where `x` is falsy — the `or` ALWAYS falls through to `y`', false, e)
+                end
+            end
+        end },
+    { name = 'self-assignment', severity = 'warn', on = 'row',
+        fix_why = 'deleting the line is unsafe when it carries other statements; not implemented yet',
+        -- a REASSIGNMENT `x = x` (a `local x = x` is legitimate upvalue capture — excluded, it's a
+        -- variable_declaration not assignment)
+        run = function (row, _, x)
+            if PLAIN_ASSIGN[row.t or ''] and #(row.expr.lhs or {}) == 1 and #(row.expr.rhs or {}) == 1 then
+                local l, rr = row.expr.lhs[1], row.expr.rhs[1]
+                if expr.is_pure(l) and expr.is_pure(rr) and expr.key(l) == expr.key(rr) then
+                    x.add(nil, 'assignment of a value to itself — a no-op',
+                        l.k ~= 'name', l) -- field/index target hedged (a metamethod could fire)
+                end
+            end
+        end },
+    { name = 'concat-in-loop', severity = 'info', on = 'row',
+        fix_why = 'the rewrite restructures the loop into a table + table.concat — a judgement, not a substitution',
+        -- `s = s .. x` accumulation → O(n²), use table.concat
+        run = function (row, r, x)
+            if PLAIN_ASSIGN[row.t or ''] and #(row.expr.lhs or {}) == 1
+                and #(row.expr.rhs or {}) == 1 and x.in_loop(r) then
+                local l, rr = row.expr.lhs[1], row.expr.rhs[1]
+                if x.concat_op and l.k == 'name' and rr.k == 'bin' and rr.op == x.concat_op then
+                    local reads = {}
+                    for _, n in ipairs(expr.names({ rhs = { rr } })) do reads[n] = true end
+                    if reads[l.n] then
+                        x.add(nil, ('`%s = %s %s …` inside a loop is O(n²) — accumulate into a list and join once')
+                            :format(l.n, l.n, x.concat_op), false, rr)
+                    end
+                end
+            end
+        end },
+    { name = 'constant-condition', severity = 'warn', on = 'row',
+        fix_why = 'which branch to keep is a judgement',
+        run = function (row, _, x)
+            if not row.expr.cond then return end
+            local okc, cv = expr.eval(row.expr.cond)
+            if not okc then return end
+            local loop = x.LOOPISH[row.t or '']
+            local tv = expr.truthy(cv)
+            -- a bare `while true` is an idiomatic infinite loop — only flag a DEAD (false) loop; for if/elseif flag
+            -- either way.
+            if not (loop and tv) then
+                x.add(nil, ('condition is constant — always %s%s'):format(tostring(tv),
+                    (loop and not tv) and ' (loop body is dead)'
+                        or (not loop and (tv and ' (then-branch always taken)' or ' (then-branch dead)')) or ''),
+                    false, row.expr.cond)
+            end
+        end },
+    { name = 'duplicated-condition', severity = 'warn', on = 'fn',
+        fix_why = 'the intended condition is not derivable',
+        -- within an if-chain (the head `if` cond + its `elseif` conds) a later duplicate of an earlier one is
+        -- unreachable
+        run = function (x)
+            local rows = x.rows
+            for r, row in ipairs(rows) do
+                if tsutil.IF_HEAD[row.t or ''] and row.expr and row.expr.cond then
+                    local chain = { { line = row.l, cond = row.expr.cond } }
+                    for _, row2 in ipairs(rows) do
+                        if row2.parent == r and (tsutil.ELSEIF[row2.t or ''] or tsutil.ELSEIF[row2.kind or ''])
+                            and row2.expr and row2.expr.cond then
+                            chain[#chain + 1] = { line = row2.l, cond = row2.expr.cond }
+                        end
+                    end
+                    for i = 2, #chain do
+                        for j = 1, i - 1 do
+                            if expr.is_pure(chain[i].cond) and expr.is_pure(chain[j].cond)
+                                and expr.key(chain[i].cond) == expr.key(chain[j].cond) then
+                                x.add(chain[i].line,
+                                    ('same condition as the branch at L%d — this branch is unreachable'):format(chain[j].line),
+                                    false, chain[i].cond)
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end },
 }
+M.BY_NAME, M.FIX_WHY = {}, {}
+for _, rule in ipairs(M.RULES) do M.BY_NAME[rule.name] = rule; M.FIX_WHY[rule.name] = rule.fix_why end
 M.FIX_WHY_DEFAULT = 'no mechanical rewrite is implemented for this rule'
 
 -- ── the analysis ─────────────────────────────────────────────────────────────
 --- Rung-0 findings for the focused fn. @return table {
----   unsupported?, findings: { {line, rule, msg, hedged} }[], census: {total, unknown, kinds} }
+---   unsupported?, findings: { {line, rule, severity, msg, hedged, node} }[], census: {total, unknown, kinds} }
 function M.lint(store, fn_id)
     local got = expr.of(store, fn_id)
     if not got then return { unsupported = true, findings = {}, census = { total = 0, unknown = 0, kinds = {} } } end
     local rows = got.fl.stmts
-    local concat_op = CONCAT_OP[got.lang or '']
     local out, seen = {}, {}
     -- `node` is the OFFENDING EXPRESSION — the sub-expression the rule actually
     -- objected to, not the statement containing it. Every rule has it in hand when
@@ -167,11 +282,13 @@ function M.lint(store, fn_id)
     -- consumer can mark the construct itself: constant-condition marks `false`, not
     -- the whole `if`. This is what lets an explanation BE the offending node instead
     -- of a paragraph about it ([[cartograph-explaining-a-finding]]).
-    local function add(line, rule, msg, hedged, node)
-        local key = line .. '\1' .. rule .. '\1' .. msg
+    local cur, cur_line -- the rule being run, and the row line its finding defaults to
+    local function add(line, msg, hedged, node)
+        line = line or cur_line
+        local key = line .. '\1' .. cur.name .. '\1' .. msg
         if seen[key] then return end
         seen[key] = true
-        out[#out + 1] = { line = line, rule = rule, msg = msg,
+        out[#out + 1] = { line = line, rule = cur.name, severity = cur.severity, msg = msg,
             hedged = hedged or false, node = node }
     end
     -- ancestry: is row r inside a loop?
@@ -184,6 +301,9 @@ function M.lint(store, fn_id)
         end
         return false
     end
+    local x = { add = add, rows = rows, in_loop = in_loop, concat_op = CONCAT_OP[got.lang or ''], LOOPISH = LOOPISH }
+    local on = { bin = {}, row = {}, fn = {} }
+    for _, rule in ipairs(M.RULES) do local t = on[rule.on]; t[#t + 1] = rule end
     -- the value/condition exprs to scan for the general (nested) checks
     local function scan_exprs(row)
         local es = {}
@@ -194,114 +314,18 @@ function M.lint(store, fn_id)
 
     for r, row in ipairs(rows) do
         if row.expr then
-            -- (1) self-compare / (2) duplicated logical operand / (3) bool-literal
-            --     comparison / (5) pseudo-ternary — all walk every bin in the row.
+            cur_line = row.l
             for _, root in ipairs(scan_exprs(row)) do
                 expr.walk(root, function (e)
                     if e.k ~= 'bin' then return end
-                    local sc = SELFCMP[e.op]
-                    if sc and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
-                        add(row.l, 'self-compare',
-                            ('both sides of `%s` are identical → always %s'):format(e.op, tostring(sc.v)),
-                            sc.nan, e) -- ==/~= hedged: NaN self-comparison is the deliberate exception
-                    end
-                    if (e.op == 'and' or e.op == 'or')
-                        and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
-                        add(row.l, 'duplicated-operand',
-                            ('`x %s x` — both operands identical, equals just `x`'):format(e.op),
-                            false, e)
-                    end
-                    if BOOLCMP[e.op] then
-                        local lb = e.l.k == 'lit' and e.l.ty == 'bool'
-                        local rb = e.r.k == 'lit' and e.r.ty == 'bool'
-                        if lb ~= rb then -- exactly one side a boolean literal
-                            local bv = lb and e.l.v or e.r.v
-                            add(row.l, 'bool-comparison',
-                                ('comparison to boolean literal `%s` — drop it (a value is truthy, not necessarily `== %s`)')
-                                    :format(tostring(bv), tostring(bv)), true, e)
-                        end
-                    end
-                    -- pseudo-ternary hazard: `(c and x) or y` where x is statically falsy
-                    if e.op == 'or' and e.l.k == 'bin' and e.l.op == 'and' then
-                        local okx, xv = expr.eval(e.l.r)
-                        if okx and not expr.truthy(xv) then
-                            add(row.l, 'pseudo-ternary',
-                                'lua `c and x or y` where `x` is falsy — the `or` ALWAYS falls through to `y`',
-                                false, e)
-                        end
-                    end
+                    for _, rule in ipairs(on.bin) do cur = rule; rule.run(e, row, x) end
                 end)
             end
-            -- (4) self-assignment: a REASSIGNMENT `x = x` (a `local x = x` is legitimate
-            --     upvalue capture — excluded, it's a variable_declaration not assignment).
-            if PLAIN_ASSIGN[row.t or '']
-                and #(row.expr.lhs or {}) == 1 and #(row.expr.rhs or {}) == 1 then
-                local l, rr = row.expr.lhs[1], row.expr.rhs[1]
-                if expr.is_pure(l) and expr.is_pure(rr) and expr.key(l) == expr.key(rr) then
-                    add(row.l, 'self-assignment',
-                        'assignment of a value to itself — a no-op',
-                        l.k ~= 'name', l) -- field/index target hedged (a metamethod could fire)
-                end
-            end
-            -- (7) string-concat in a loop: `s = s .. x` accumulation → O(n²), use table.concat
-            if PLAIN_ASSIGN[row.t or ''] and #(row.expr.lhs or {}) == 1
-                and #(row.expr.rhs or {}) == 1 and in_loop(r) then
-                local l, rr = row.expr.lhs[1], row.expr.rhs[1]
-                if concat_op and l.k == 'name' and rr.k == 'bin' and rr.op == concat_op then
-                    local reads = {}
-                    for _, n in ipairs(expr.names({ rhs = { rr } })) do reads[n] = true end
-                    if reads[l.n] then
-                        add(row.l, 'concat-in-loop',
-                            ('`%s = %s %s …` inside a loop is O(n²) — accumulate into a list and join once')
-                                :format(l.n, l.n, concat_op),
-                            false, rr)
-                    end
-                end
-            end
-            -- (6) constant condition: a control condition that folds to a constant
-            if row.expr.cond then
-                local okc, cv = expr.eval(row.expr.cond)
-                if okc then
-                    local loop = LOOPISH[row.t or '']
-                    local tv = expr.truthy(cv)
-                    -- a bare `while true` is an idiomatic infinite loop — only flag a
-                    -- DEAD (false) loop; for if/elseif flag either way.
-                    if not (loop and tv) then
-                        add(row.l, 'constant-condition',
-                            ('condition is constant — always %s%s'):format(tostring(tv),
-                                (loop and not tv) and ' (loop body is dead)'
-                                    or (not loop and (tv and ' (then-branch always taken)' or ' (then-branch dead)')) or ''),
-                            false, row.expr.cond)
-                    end
-                end
-            end
+            for _, rule in ipairs(on.row) do cur = rule; rule.run(row, r, x) end
         end
     end
-
-    -- (8) duplicated condition within an if-chain: the head `if` cond + its `elseif`
-    --     conds; a later duplicate of an earlier one is unreachable.
-    for r, row in ipairs(rows) do
-        if tsutil.IF_HEAD[row.t or ''] and row.expr and row.expr.cond then
-            local chain = { { line = row.l, cond = row.expr.cond } }
-            for _, row2 in ipairs(rows) do
-                if row2.parent == r and (tsutil.ELSEIF[row2.t or ''] or tsutil.ELSEIF[row2.kind or ''])
-                    and row2.expr and row2.expr.cond then
-                    chain[#chain + 1] = { line = row2.l, cond = row2.expr.cond }
-                end
-            end
-            for i = 2, #chain do
-                for j = 1, i - 1 do
-                    if expr.is_pure(chain[i].cond) and expr.is_pure(chain[j].cond)
-                        and expr.key(chain[i].cond) == expr.key(chain[j].cond) then
-                        add(chain[i].line, 'duplicated-condition',
-                            ('same condition as the branch at L%d — this branch is unreachable'):format(chain[j].line),
-                            false, chain[i].cond)
-                        break
-                    end
-                end
-            end
-        end
-    end
+    cur_line = nil
+    for _, rule in ipairs(on.fn) do cur = rule; rule.run(x) end
 
     -- census: expr-node coverage (the honest '?' rate)
     --
