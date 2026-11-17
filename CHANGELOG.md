@@ -2,6 +2,14 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — Java: a method inside an anonymous class body is reached only from inside it (graph; cache v331)
+
+- A call outside an anonymous or enum-constant body no longer resolves to a method declared in it (such a method is
+  keyed to the named class around it, `Outer::execute`): it is refused `blocked`. elasticsearch server: 901 calls,
+  e.g. `masterClient().execute(..)` had linked to an anonymous `ClusterStateUpdateTask.execute`.
+- A `this` / implicit-this call inside such a body reaches that body's own member first (it shadows the outer
+  class's); several of the name there are overloads and refuse. server 122, hive 10, libs 8.
+
 ## 2026-11-17 — graph_info: how much of each language the mention index covers (agent surface, graph; cache v330)
 
 - `graph_info` carries a `mention-index-coverage` note: per language, the definitions whose name the mention index

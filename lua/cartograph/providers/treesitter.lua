@@ -4745,6 +4745,56 @@ function M._samefile_all(r) return SAMEALL[r] or r.cands end
 -- means (call.cpath, java_call_path) takes the ONE same-file candidate declared in that class (node.cpath). Two on the
 -- path are overloads — arity's question, not scope's — and stay refused. A same-file candidate WITHOUT a path is a node
 -- the spec did not place (a mint that never learned cpath): it may be the one on the path, so the pick declines.
+-- ★ AN ANONYMOUS CLASS'S MEMBER IS NAMED ONLY FROM INSIDE ITS BODY (CART-2124). A member of an anonymous / enum-constant
+-- body (path '', `abody` = the body's range) is keyed to the named class around it (`Outer::execute`), and the joins had
+-- landed 1,258 calls on elasticsearch server on one (`masterClient().execute(..)` on an anonymous ClusterStateUpdateTask's
+-- execute). It STAYS in the name indexes — for a receiver of unknown type an anonymous implementation is a possible
+-- runtime target, and its presence keeps the name join ambiguous where it should be — but it is never the RESOLVED
+-- target of a call outside its body (M._anon_veto). From INSIDE, Java looks a name up in the innermost class declaring it:
+-- a `this` / implicit-this call (call path '') takes the member of the innermost body around it that declares the name —
+-- one such member resolves, several are overloads and refuse; a body that declares none leaves the usual reading.
+-- -> node | nil, the overload list | nil
+M._ANONIDX = setmetatable({}, { __mode = 'k' }) -- (on M: the main chunk is at its 200-local limit)
+function M._anon_index(nodes)
+    local c = M._ANONIDX[nodes]
+    if c and c.n == #nodes then return c.by end
+    local by = {}
+    for _, n in ipairs(nodes) do
+        if n.cpath == '' and n.abody and n.file then
+            local l = by[n.file]
+            if not l then l = {}; by[n.file] = l end
+            l[#l + 1] = n
+        end
+    end
+    M._ANONIDX[nodes] = { n = #nodes, by = by }
+    return by
+end
+function M._anon_inside(b, at) -- (on M: the main chunk is at its 200-local limit)
+    local cl, cc = atr.sl(at), atr.sc(at)
+    return (cl > b[1] or (cl == b[1] and cc >= b[2])) and (cl < b[3] or (cl == b[3] and cc <= b[4]))
+end
+--- the veto: a resolved target inside an anonymous body, reached from outside that body -> refusal | nil
+function M._anon_veto(target, file, at)
+    if not (target and target.cpath == '') then return nil end
+    if target.abody and target.file == file and at and M._anon_inside(target.abody, at) then return nil end
+    return tsutil.refusal('blocked', { target })
+end
+function M._anon_own_pick(by, file, at, key)
+    local list = by and by[file]
+    if not (list and at and key) then return nil end
+    local best, bsize, hits
+    for _, n in ipairs(list) do
+        local b = n.abody
+        if n.name == key and M._anon_inside(b, at) then
+            local size = (b[3] - b[1]) * 100000 + (b[4] - b[2])
+            if not best or size < bsize then best, bsize, hits = b, size, { n }
+            elseif size == bsize and b[1] == best[1] and b[2] == best[2] then hits[#hits + 1] = n end
+        end
+    end
+    if not hits then return nil end
+    if #hits == 1 then return hits[1] end
+    return nil, hits
+end
 function M._path_pick(cands, cpath, file, node_index)
     -- ('' on the call: undecidable; '' on a def: an anonymous body's member, on no named path — never equal to a call's)
     if not cpath or cpath == '' then return nil end
@@ -5866,6 +5916,16 @@ local function run_resolve_passes(ctx)
     -- difference: a `self:walk` the full graph refuses as ambiguous). The pass then resolves over every call, as the
     -- full relink would; the rest see only the subset.
     local whole_data = ctx.whole_data
+    -- ★ NO PASS RESOLVES A CALL TO AN ANONYMOUS BODY'S MEMBER FROM OUTSIDE THAT BODY (CART-2124): the base sites veto it
+    -- (M._anon_veto); a pass's reference to one is not added, and the call is refused `blocked` below, as the base's is
+    local nidx, raw_addref = ctx.node_index, ctx.addref
+    local function anon_out(to, file, at) local t = nidx and nidx[to]; return t and t.cpath == '' and M._anon_veto(t, file, at) end
+    if raw_addref and nidx then
+        ctx.addref = function (from, to, at, ...)
+            if anon_out(to, from and from:match('^(.-)::'), at) then return end
+            return raw_addref(from, to, at, ...)
+        end
+    end
     for _, p in ipairs(RESOLVE_PASSES) do
         local saved_cv, saved_data = ctx.cv, ctx.data
         if p.whole and whole_data then ctx.data = whole_data; ctx.cv = require('cartograph.callview').of(whole_data) end
@@ -5873,11 +5933,22 @@ local function run_resolve_passes(ctx)
         local pcv = ctx.cv
         ctx.cv, ctx.data = saved_cv, saved_data
         for i = 1, pcv.n do
-            if pcv.get(i, 'to') and not pcv.get(i, 'prov') then pcv.set(i, 'prov', p.name) end
+            local to = pcv.get(i, 'to')
+            if to and not pcv.get(i, 'prov') then
+                local veto = anon_out(to, pcv.get(i, 'file'), pcv.get(i, 'at'))
+                if veto then
+                    pcv.set(i, 'to', nil); pcv.set(i, 'inferred', nil); pcv.set(i, 'refused', veto)
+                    n = n - 1
+                else
+                    pcv.set(i, 'prov', p.name)
+                end
+            end
         end
     end
+    ctx.addref = raw_addref
     return n
 end
+M._run_resolve_passes = run_resolve_passes -- (the driver, for a spec that runs a probe pass through it, CART-2124)
 
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
@@ -9355,6 +9426,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                     retflow = dretflow,
                     -- the NESTED-CLASS PATH of its class (java `Outer.a_args._Fields`): a same-file pick by lexical class (CART-1077)
                     cpath = spec.def_path and spec.def_path(defn, src) or nil,
+                    -- the ANONYMOUS body around it (java): its name reaches it only from inside that body (CART-2124)
+                    abody = spec.def_abody and spec.def_abody(defn, src) or nil,
                     -- declared inside `extern "C"` (C/C++ join bridge, CART-1079)
                     clink = spec.clink and spec.clink(defn, src) or nil,
                     -- file-local by linkage (C `static`, a macro in a source file): confined (CART-1081)
@@ -11703,12 +11776,19 @@ local MATCH_OPTS = { match_limit = 65536 }
                         or M._path_pick(M._samefile_all(refused), p.call.cpath, p.file, node_index) -- (the nested-class path, CART-1077)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
+                if p.call.cpath == '' and p.call.qhow == 'self' then -- (inside an anonymous body: its own member first, CART-2124)
+                    local ap, al = M._anon_own_pick(M._anon_index(nodes), p.file, p.at, p.full or p.call.callee)
+                    if ap then target, inferred, refused, ext = ap, false, nil, nil
+                    elseif al then target, inferred, refused, ext = nil, nil, M._samefile_refusal(al), nil end
+                end
                 local veto = M._method_veto(target, p.full or p.call.callee, p.file) -- (CART-1491)
+                    or M._anon_veto(target, p.file, p.at) -- (an anonymous body's member, from outside it: CART-2124)
                     or M._callee_veto(target, p.call.cb, p.call.cbe, p.call.full, p.file) -- (CART-1602)
                     or (p.call.qcls and M._class_veto(target, p.call.qcls, p.file, data, select(2, elang_for(p.file)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if not target and p.call.qcls then -- (the class-chain pick, CART-2069: fills an empty slot only)
                     local pick = M._class_chain_pick(p.call.qcls, p.full or p.call.callee, p.file, data, select(2, elang_for(p.file)))
+                    if pick and M._anon_veto(pick, p.file, p.at) then pick = nil end -- (CART-2124)
                     if pick then target, inferred, refused, ext = pick, true, nil, nil end
                 end
                 -- (a call through a same-name FIELD alias `local f = H.f` reaches the def of that NAME — the binder's value is
@@ -12026,7 +12106,7 @@ local function build_symtab(nodes)
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name, order = n.order or (n.range and n.range.start and n.range.start.line), mtab = n.mtab, drk = n.drk,
-            ret = n.ret, retclass = n.retclass, retflow = n.retflow, cpath = n.cpath, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
+            ret = n.ret, retclass = n.retclass, retflow = n.retflow, cpath = n.cpath, abody = n.abody, clink = n.clink, flocal = n.flocal, arrow = n.arrow,
             vfn = n.vfn, -- (the callback upgrade's target test in a language without bare method values, CART-1969)
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             -- `override` rides along or the monkey-patch fence dies in the copy
@@ -12609,12 +12689,19 @@ function M._relink(data, touched, opts)
                     local pick = M._path_pick(M._samefile_all(refused), cget(i, 'cpath'), cfile, node_index)
                     if pick then target, inferred, refused = pick, false, nil end
                 end
+                if cget(i, 'cpath') == '' and cget(i, 'qhow') == 'self' then -- (inside an anonymous body: its own member first, CART-2124)
+                    local ap, al = M._anon_own_pick(M._anon_index(data.nodes), cfile, cget(i, 'at'), cfull or ccallee)
+                    if ap then target, inferred, refused, ext = ap, false, nil, nil
+                    elseif al then target, inferred, refused, ext = nil, nil, M._samefile_refusal(al), nil end
+                end
                 local veto = M._method_veto(target, cfull or ccallee, cfile) -- (CART-1491)
+                    or M._anon_veto(target, cfile, cget(i, 'at')) -- (an anonymous body's member, from outside it: CART-2124)
                     or M._callee_veto(target, cget(i, 'cb'), cget(i, 'cbe'), cfull, cfile) -- (CART-1602)
                     or (cget(i, 'qcls') and M._class_veto(target, cget(i, 'qcls'), cfile, data, select(2, elang_for(cfile)))) -- (CART-0735)
                 if veto then target, inferred, refused = nil, nil, veto end
                 if not target and cget(i, 'qcls') then -- (the class-chain pick, CART-2069: fills an empty slot only)
                     local pick = M._class_chain_pick(cget(i, 'qcls'), cfull or ccallee, cfile, data, select(2, elang_for(cfile)))
+                    if pick and M._anon_veto(pick, cfile, cget(i, 'at')) then pick = nil end -- (CART-2124)
                     if pick then target, inferred, refused, ext = pick, true, nil, nil end
                 end
                 if target and cget(i, 'cba') then inferred = true end -- (a same-name field alias: a guess, CART-1715)

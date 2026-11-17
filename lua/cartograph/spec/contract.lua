@@ -96,7 +96,8 @@ M.SLOTS = {
     -- resolver's class veto compares a class-keyed call's class with its target's by these
     class_names = 'SCOPE&KEY', class_fqcn = 'SCOPE&KEY',
     nested_file = 'SCOPE&KEY', -- (CART-1963) java: the file a qualified nested class `Outer.Inner` lives in
-    def_path = 'SCOPE&KEY', call_path = 'SCOPE&KEY', -- (CART-1077) java: the nested-class path of a def's class / of the class a call's key names
+    def_path = 'SCOPE&KEY', call_path = 'SCOPE&KEY', def_abody = 'SCOPE&KEY', -- (CART-2124: an anonymous body's range)
+    -- (CART-1077) java: the nested-class path of a def's class / of the class a call's key names
     alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
     exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection

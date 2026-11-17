@@ -1514,7 +1514,24 @@ return {
         if java_anon_between(defn, c) then return '' end
         return java_class_path(c, src, true)
     end,
-    call_path = java_call_path, -- the class names each field's type refers to: data.typerefs (CART-0697)
+    call_path = java_call_path,
+    -- the range of the innermost ANONYMOUS / enum-constant class body around a def (its members are reachable by name
+    -- only from inside it, CART-2124) -> { sl, sc, el, ec } | nil
+    def_abody = function (defn, src)
+        local _, c = java_enclosing_class(defn, src)
+        local cid, p = c and c:id(), defn:parent()
+        while p and p:id() ~= cid do
+            if p:type() == 'class_body' then
+                local pp = p:parent()
+                if pp and (pp:type() == 'object_creation_expression' or pp:type() == 'enum_constant') then
+                    local sl, sc, el, ec = p:range()
+                    return { sl, sc, el, ec }
+                end
+            end
+            p = p:parent()
+        end
+        return nil
+    end, -- the class names each field's type refers to: data.typerefs (CART-0697)
     qualify_call = function (calln, name, src, model)
         -- ★ `new T(…)` CALLS T's CONSTRUCTOR (CART-2070): the row carried the bare class name and the constructor node
         -- lives under T::T, so no constructor was ever a call target. Keyed like any Class::m call — the same exact /
