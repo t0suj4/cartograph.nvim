@@ -506,6 +506,16 @@ return {
         functions = [=[
             (function_declaration name: (identifier) @name) @def
         ]=],
+        -- CONTAINER-SCOPE bindings (CART-0538): a zig file IS a struct, and its `var x: T = …` / `const x = …` are its
+        -- state. No vars query minted ZERO var nodes, so the write axis, the atlas ladder and every var consumer were
+        -- empty for zig whatever is_write said. At source_file scope every variable_declaration declares (an
+        -- assignment cannot stand there), and the name is the identifier right after the `const` / `var` token — the
+        -- value sits after `=`, never there. `extern var x: T;` / `extern const x: T addrspace(.input);` declare with no
+        -- value (@vdecl: no `=` in the declaration at all — an `addrspace(…)` after the type defeated a positional form).
+        vars = [=[
+            (source_file (variable_declaration ["const" "var"] . (identifier) @vname "=" . _ @value) @vdef)
+            (source_file ((variable_declaration ["const" "var"] . (identifier) @vname) @vdecl (#not-match? @vdecl "=")))
+        ]=],
         calls = [=[
             (call_expression function: (identifier) @name) @call
             (call_expression
