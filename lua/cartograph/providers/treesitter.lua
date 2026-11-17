@@ -7164,6 +7164,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     for nt in pairs(spec.index_positions or {}) do FLDGATE[nt] = true end
     local dfid = spec.df_ids
     local modskip = spec.binding_modifiers -- CART-0234
+    local nread = spec.nonread_fields -- CART-0403: the legacy df skips the child du skips (flow.nonread_child)
+    local nonread_child = nread and require('cartograph.flow').nonread_child
     local escnv = esc and spec.escape_nonvalue -- CART-0236
     -- WHICH PARENT NODE TYPES HOLD A CALLEE NAME, declared per language rather
     -- than guessed from a global list (CART-0499). Same shape as escape_nonvalue
@@ -7307,6 +7309,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     or nt == 'list_literal')
             end
         end
+        local nrc = nctx > 0 and dfon and nread and nread[nt] and nonread_child(n, nread[nt]) -- (CART-0403)
+        nrc = nrc and nrc:id() or nil
         local i, c = 0, n:named_child(0) -- (named children only: every per-child action below needs a named one — a mention, a statement, a df use — and the 40% that are tokens were 7.9 M node handles per corpus run, CART-1664)
         while c do
             local ct = c:type()
@@ -7356,7 +7360,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                     if ct == 'identifier' or ct == 'name'
                         or (dfid and dfid[ct]) then cdfid = true end
                 end
-                cdfon = dfon and cnamed and not cdfid
+                -- (a literal key / a type's name: no df read, and nothing under it either — CART-0403)
+                if nrc and cnamed and c:id() == nrc then cdfid = nil; cdfon = false
+                else cdfon = dfon and cnamed and not cdfid end
             else
                 cdfon = true -- df restarts fresh at the next body anyway
             end
@@ -9470,6 +9476,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                     binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
                     pattern = spec.pattern,                 -- pattern binding (CART-0957)
                     name_skip = spec.name_skip,             -- a name that is not a variable (CART-1121)
+                    nonread_fields = spec.nonread_fields,   -- a literal key / a type's name (CART-0403)
                     arith_reads = spec.arith_reads,         -- a bare word that is a variable by field (CART-0668)
                     regime = spec.regime, method = method and lang == 'lua' }
                 end

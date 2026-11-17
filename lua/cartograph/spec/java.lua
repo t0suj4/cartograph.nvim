@@ -1889,6 +1889,8 @@ return {
     reg_invoke_query = ([=[
         (method_invocation name: (identifier) @imeth (#any-of? @imeth %s))
     ]=]):format('"' .. table.concat(JAVA_REFLECT_INVOKES, '" "') .. '"'),
+    -- an ANNOTATION's name (`@SuppressWarnings(..)`) is a type, not a variable read; its arguments are read (CART-0403)
+    nonread_fields = { annotation = 'name', marker_annotation = 'name' },
     exported_def = function (defn, src)
         local mods = defn:child(0)
         if mods and mods:type() == 'modifiers' then

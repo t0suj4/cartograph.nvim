@@ -391,6 +391,7 @@ M.SLOTS = {
     -- erlang's `?MODULE` is (macro_call_expr name: (var)), the same node type as a variable; flow's du, its
     -- pattern_parts and the expression IR all read this one declaration, so they cannot draw it differently.
     name_skip = 'ANALYSIS',
+    nonread_fields = 'ANALYSIS', -- a field holding a literal key / a type's name: no variable read (CART-0403)
     -- TYPE-TEST GUARDS (CART-1125): <guard BIF> -> the literal node kinds it admits. A derived generator reads an
     -- interpreter clause's guard three-valued against a site (yes / no / unknown).
     guard_kinds = 'ANALYSIS',

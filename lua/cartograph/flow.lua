@@ -496,11 +496,24 @@ end
 -- DU_SEG (all normal code) never takes the branch, so output is identical. An explicit
 -- stack was measured first: identical output, but ~7% slower on a whole extraction.
 local DU_SEG = 1000
+--- ★ A NAME IN A NON-READ FIELD IS NO VARIABLE READ (CART-0403): spec.nonread_fields names, per node type, the field
+--- holding a LITERAL key or a type's name — lua's `{ k = 2 }` (field.name), java's `@SuppressWarnings` (annotation.name).
+--- Not lua's `{ [a] = 3 }`: a key written in brackets is an EXPRESSION and is read, and it sits in the very same field,
+--- so the bracket token decides. Both df builders ask this one function, so they skip the same child (dfparity).
+--- -> the child to skip, or nil
+function M.nonread_child(node, field)
+    local x = node:field(field)[1]
+    if not x then return nil end
+    local c0 = node:child(0)
+    if c0 and not c0:named() and c0:type() == '[' then return nil end
+    return x
+end
 local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
     local ids = (lang and lang.ids) or DFID
     local mods, bindf = lang and lang.mods, lang and lang.binder_fields
     local patf, patr = lang and lang.patf, lang and lang.patr
     local nskip = lang and lang.name_skip -- a field whose leaves are not variables (CART-1121)
+    local nread = lang and lang.nonread_fields -- a literal key / a type's name: no read (CART-0403)
     local arith = lang and lang.arith -- a bare `word` that is a variable by field (CART-0668)
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
@@ -520,7 +533,8 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         local bodyc = (stop_body and ctrlset and ctrlset[t])
             and M.body_children(node, ctrlset, clauseset) or nil
         local asgleft, decld, k, declist, rngskip, bindset, bindskip, flatskip, cmpd
-        local nsn = nskip and nskip[t] and node:field(nskip[t])[1]
+        local nsn = (nskip and nskip[t] and node:field(nskip[t])[1])
+            or (nread and nread[t] and M.nonread_child(node, nread[t])) or nil
         -- ★★ A DESTRUCTURING PATTERN DECIDES DEF-POSITION FOR ITS OWN CHILDREN (CART-0358),
         -- and it does so UNCONDITIONALLY — this branch is first, and it ignores the incoming
         -- `defpos`. That is what makes ONE table cover three sites that had nothing in
@@ -1155,6 +1169,7 @@ function M.build(fnnode, src, cfg)
     -- have meant nil-padding at three of the six call sites, which is how a caller ends up
     -- passing the wrong table. One bundle, passed unchanged by every caller.
     local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields, name_skip = cfg.name_skip, -- CART-1121
+        nonread_fields = cfg.nonread_fields, -- CART-0403
         arith = cfg.arith_reads, -- CART-0668
         patf = cfg.pattern and cfg.pattern.fields, patr = cfg.pattern and cfg.pattern.reads } -- CART-0957
     local stmts = {}

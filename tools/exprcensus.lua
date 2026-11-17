@@ -299,9 +299,9 @@ end
 --   extra:*  on js                       CART-0402 — `xs.length`: expr counts a field
 --       SELECTOR as a read (true for lua, where it is an `identifier`), du does not count
 --       js's `property_identifier`. A lua-shaped assumption in a language-agnostic IR.
---   missing:*  on lua/java               CART-0403 — du counts a table-constructor KEY
---       (`{ k = 2 }`) and a java ANNOTATION (`@SuppressWarnings`) as reads. Neither is a
---       variable read; this side is du's, and fixing it moves the df census.
+--   missing:*  on lua/java               CART-0403 — FIXED 2026-11-17: du counted a table-constructor
+--       KEY (`{ k = 2 }`) and a java ANNOTATION (`@SuppressWarnings`) as reads. spec.nonread_fields
+--       now names both, and the LEGACY df builder skips the same child, so dfparity did not move.
 --   binder:declaration                   CART-0404 — the DECLARATOR long tail: cpp 110,
 --       cppmodern 106, v8 3859 distinct rows. C/C++ only, and it is what is LEFT after the
 --       flat-declaration split below; the shapes here have an `init_declarator` and no `=`
@@ -447,8 +447,13 @@ M.EXPECTED = {
     -- cleared the head's `rmw`, which the blanking had left behind — a row's read census is
     -- `use u rmw`, so half the names survived a zeroing that meant to remove all of them.
     -- (CART-0433: 205 -> 204, binder:for_statement 2 -> 1)
-    libs = { total = 204, ['missing:declaration'] = 133, ['binder:class_declaration'] = 21,
-        ['missing:local_variable_declaration'] = 16, ['binder:return_statement'] = 13,
+    -- recalib 2026-11-17 (CART-0403, spec.nonread_fields): 204 -> 188. missing:local_variable_declaration 16 -> 0, all
+    -- `@SuppressWarnings` on a local that du read as a variable. One row RE-CLASSED, not fixed: ObjectParserTests.java:237's
+    -- method-local `class TestStruct` was binder:class_declaration (21 -> 20) and is now extra:class_declaration — du no
+    -- longer reads the annotation name, and the IR's opaque `?` for a local class still reads every leaf in it
+    -- (`SuppressWarnings`, `test`). du is the right side there; the opaque class row is the IR's.
+    libs = { total = 188, ['missing:declaration'] = 133, ['binder:class_declaration'] = 20,
+        ['extra:class_declaration'] = 1, ['binder:return_statement'] = 13,
         ['binder:block'] = 6, ['missing:match_arm'] = 5,
         ['binder:local_variable_declaration'] = 3, ['binder:call_expression'] = 2,
         ['binder:for_statement'] = 1, ['extra:match_block'] = 2,
@@ -521,9 +526,9 @@ M.EXPECTED = {
         ['missing:struct_expression'] = 1, ['missing:variable_assignment'] = 1 },
     synjava = { total = 0 },
     synjs = { total = 10, ['binder:statement_block'] = 10 },
-    synlua = { total = 49, ['missing:variable_declaration'] = 35, ['missing:function_call'] = 6,
-        ['missing:return_statement'] = 4, ['missing:elseif_statement'] = 2,
-        ['missing:cond'] = 1, ['missing:if_statement'] = 1 },
+    -- recalib 2026-11-17 (CART-0403, spec.nonread_fields): 49 -> 0. EVERY ONE of the 49 was a table constructor's bare
+    -- KEY (`{ k = 2 }`) that du counted as a read; the bracketed `{ [a] = 3 }` is still read on both sides.
+    synlua = { total = 0 },
     -- ★★ FIRST PIN EVER (CART-0423), and the FOURTH and last of the corpora that could not
     -- be censused at all. v8 is also the one that says the per-file parse was not merely a
     -- big-file fix: it never hit a CodeGen.zig-sized file, it died on 146k subjects.

@@ -1826,6 +1826,8 @@ return {
     -- kind`). The scope model names the binder; one marked `byname` (a forward declaration, a same-name field alias)
     -- still resolves by name
     bound_names_shadow = true,
+    -- a table constructor's bare KEY (`{ k = 2 }`) is a literal, not a read of k; `{ [a] = 3 }` is (CART-0403)
+    nonread_fields = { field = 'name' },
     -- and the converse (CART-2128): a bare name FREE at its site — no binder in any enclosing scope — is a global, so it
     -- never reaches a def whose syntax made it a LOCAL (exported_def -> false: `local function f`, `local f = function`).
     -- The function-level picks could not see blocks: a call after `if … local function h … end` reached that h, as did

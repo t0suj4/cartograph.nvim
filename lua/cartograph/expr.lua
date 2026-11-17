@@ -2584,6 +2584,7 @@ local function flow_cfg(lang, s, method)
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
+        nonread_fields = s.nonread_fields, -- a literal key / a type's name (CART-0403)
         arith_reads = s.arith_reads, -- a bare word that is a variable by field (CART-0668)
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
@@ -2834,6 +2835,7 @@ function M.of_module(store, mod_id)
         binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         pattern = s.pattern, -- pattern binding (CART-0957); FOUR cfg sites, all must agree
         name_skip = s.name_skip, -- a name that is not a variable (CART-1121)
+        nonread_fields = s.nonread_fields, -- a literal key / a type's name (CART-0403)
         arith_reads = s.arith_reads, -- a bare word that is a variable by field (CART-0668)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
