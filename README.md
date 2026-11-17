@@ -2007,7 +2007,23 @@ The rules:
   tree to re-run it against — a justification you cannot re-run is a story.
 - **require-cycle** — SCCs over the *import* edges (call-cycle covers calls).
   Hedged in the message itself: import edges don't record load-time vs lazy,
-  and a lazy require breaks the cycle at runtime.
+  and a lazy require breaks the cycle at runtime. A cycle through *hedged*
+  imports (`inferred`: a computed path matched by its tail) says how many of
+  its imports are hedged — the cycle may then not exist.
+- **dynamic-dispatch** (info, suggestive) — one finding per file counting the
+  call sites whose callee is runtime state (`$fn()`, an unresolved
+  `call_user_func`): the graph names what it cannot see.
+- **db-audit** (needs `setup{ db = … }`) — the code↔database boundary: tables the
+  code queries that the database lacks (a typo, a missing migration), and tables
+  the database holds that nothing queries.
+- **route-audit** — the URL boundary (Django): a `{% url %}` / `reverse()` naming
+  an unregistered route, a registered route nothing names, a cross-file route
+  name collision.
+- **ansible-audit** — Ansible's boundary: a `notify` naming no handler (a silent
+  no-op), a handler nothing notifies, an include pointing at a missing file.
+- **ansible-vars** (info) — a role variable declared in `defaults/` or `vars/`
+  whose name appears nowhere else in the role; soft, since `hostvars` / `lookup`
+  can still read it.
 - **sink-concat** (PHP) — a *divergent* SQL-injection smell: one function
   string-concatenates a param into a query-shaped sink **without** sanitizing
   it, while a *sibling* concatenates the same shape into the same sink and

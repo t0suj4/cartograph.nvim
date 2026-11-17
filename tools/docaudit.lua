@@ -52,6 +52,12 @@
 --     so: an UNTAGGED claim is invisible here and is not counted as a finding,
 --     because a live claim and a dated record of a past measurement look the same
 --     from outside.
+--   LINT RULES (proof) — lint.rules, the table :CartographLint runs, versus the
+--     rule names README.md mentions (CART-0252). Ratchet 0: a rule ships with its
+--     README bullet.
+--   TOOLS (evidence) — the tools/*.lua files on disk, versus the file names
+--     README.md mentions at a word boundary (CART-0274). A ratchet that may only
+--     shrink: most of the bench predates the fence, a new tool may not join it.
 --
 -- Two tiers of finding, never conflated:
 --   CONFIRMED DRIFT — the doc states something FALSE: a :Cartograph name that
@@ -78,6 +84,16 @@ package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.pa
 local FLOOR = 0
 -- The same ratchet for config.keys fields missing from the KEYS table.
 local KEYS_FLOOR = 0
+-- ★ LINT RULES (CART-0252): every rule lint.M.rules registers must be NAMED in README.md. Five rules shipped with no
+-- README entry (db-audit, route-audit, ansible-audit, ansible-vars, dynamic-dispatch) and nothing could see it — the
+-- shipping checklist names README as a surface, and only COMMANDS were a population here. Backfilled: 0.
+local RULES_FLOOR = 0
+-- ★ TOOLS (CART-0274): every tools/*.lua must be named in README.md — the dev bench is the surface that rots (three
+-- sessions found a shipped tool missing from it; exprcensus and genmatrix were named nowhere). 124 of 213 were unnamed
+-- on 2026-11-17: the ratchet starts there and may only shrink — a NEW tool is named in the commit that adds it. The
+-- name is matched at a word boundary: a plain substring search counted 121, because distill.lua, replay.lua and
+-- variants.lua were only ever "named" inside luadistill.lua, queryreplay.lua and invariants.lua.
+local TOOLS_FLOOR = 124
 
 local EMIT = false
 for _, a in ipairs(arg or {}) do
@@ -527,9 +543,48 @@ if EMIT then
     end
 end
 
+-- the LINT RULES and TOOLS populations, against README's text (a name must appear as a whole word / file name)
+local readme_txt = table.concat(READ.lines, '\n')
+local rulegap = {}
+do
+    local okl, lint = pcall(require, 'cartograph.lint')
+    for _, r in ipairs((okl and lint.rules) or {}) do
+        local nm = type(r) == 'table' and r.name or nil
+        if nm and not readme_txt:find('%f[%w%-]' .. vim.pesc(nm) .. '%f[^%w%-]') then rulegap[#rulegap + 1] = nm end
+    end
+    table.sort(rulegap)
+end
+local toolgap, ntools = {}, 0
+for name, t in vim.fs.dir(REPO .. '/tools') do
+    if t == 'file' and name:match('%.lua$') then
+        ntools = ntools + 1
+        if not readme_txt:find('%f[%w_]' .. vim.pesc(name), 1) then toolgap[#toolgap + 1] = name end
+    end
+end
+table.sort(toolgap)
+print('')
+print(('== LINT RULES: registered in lint.rules but never named in README.md (ratchet: %d) =='):format(RULES_FLOOR))
+print(#rulegap == 0 and '  (none)' or ('  ' .. table.concat(rulegap, ' ')))
+print('')
+print(('== TOOLS: tools/*.lua never named in README.md — %d of %d (ratchet: %d) =='):format(#toolgap, ntools, TOOLS_FLOOR))
+if #toolgap > TOOLS_FLOOR then
+    -- (the NEW ones are the point: list what the ratchet now exceeds by, newest-looking first is unknowable, so all)
+    print('  ' .. table.concat(toolgap, ' '))
+end
+
 print('')
 if #confirmed > 0 then
     print(('docaudit: FAIL — %d confirmed drift(s)'):format(#confirmed))
+    os.exit(1)
+end
+if #rulegap > RULES_FLOOR then
+    print(('docaudit: FAIL — %d lint rule(s) not named in README, ratchet allows %d: %s')
+        :format(#rulegap, RULES_FLOOR, table.concat(rulegap, ' ')))
+    os.exit(1)
+end
+if #toolgap > TOOLS_FLOOR then
+    print(('docaudit: FAIL — %d tools/*.lua not named in README, ratchet allows %d — name the new tool in README')
+        :format(#toolgap, TOOLS_FLOOR))
     os.exit(1)
 end
 if #undoc > FLOOR then
@@ -542,7 +597,9 @@ if #keygap > KEYS_FLOOR then
         :format(#keygap, KEYS_FLOOR))
     os.exit(1)
 end
-if #undoc < FLOOR then
+if #toolgap < TOOLS_FLOOR then
+    print(('docaudit: ok — the TOOLS gap SHRANK to %d; lower TOOLS_FLOOR in this file'):format(#toolgap))
+elseif #undoc < FLOOR then
     print(('docaudit: ok — and the gap SHRANK to %d; lower FLOOR in this file')
         :format(#undoc))
 else
