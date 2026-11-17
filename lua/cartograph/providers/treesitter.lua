@@ -5460,6 +5460,60 @@ function M._resolve_class_package(cv, node_index, addref, edges)
     return n
 end
 
+-- ★ A NAME A NAMED IMPORT BINDS IS THAT MEMBER OF THE TARGET (CART-0419). `import {N1, N2 as N3} from './a'` and
+-- `const {N2: Q} = require('./c')` bind N1 / N3 / Q to members of an IN-TREE module; the edge says which (`members`,
+-- from spec.import_members — the same reading CART-0804 gave a bare package's members). A bare call through such a
+-- local resolves to the unique def of that member in the target file. Like field_alias, the binding is authoritative:
+-- it fills a silent call and CORRECTS one the name join landed outside the bound module. Not when the call's own
+-- function chain binds the name — a parameter or local declaration shadows the import — and not for a local two
+-- imports of this file bind differently. Not `inferred`: the caller's import line names the member.
+function M._resolve_import_member(cv, edges, tail, exact, addref, node_index, parent_fn)
+    local mmap = {} -- file -> local -> { member, mod } | false (bound twice, differently)
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.members and e.from and e.to then
+            local m = mmap[e.from]; if not m then m = {}; mmap[e.from] = m end
+            for l, mem in pairs(e.members) do
+                local prev = m[l]
+                if prev == nil then m[l] = { member = mem, mod = e.to }
+                elseif prev and (prev.member ~= mem or prev.mod ~= e.to) then m[l] = false end
+            end
+        end
+    end
+    if not next(mmap) then return 0 end
+    local cget, cset = cv.get, cv.set
+    local n = 0
+    for i = 1, cv.n do
+        local cfile = cget(i, 'file')
+        local m = cfile and mmap[cfile]
+        local callee = m and tostring(cget(i, 'callee') or '')
+        local b = callee and m[callee]
+        local cfull = b and cget(i, 'full')
+        if b and (cfull == nil or cfull == callee) then
+            local fid = cget(i, 'fn')
+            local fnn = fid and node_index[fid]
+            local kind = fnn and callee_binding(callee, fnn, parent_fn)
+            -- (a df-tracked local of the MODULE region is the import itself; anywhere else it is a shadow)
+            local shadow = kind == 'higher-order' or kind == 'localdecl'
+                or (kind == 'local' and fnn.kind ~= 'region' and fnn.kind ~= 'module')
+            local fit, dup
+            if not shadow then fit, dup = fit_in_file(tail, exact, b.member, b.mod) end
+            local cto = cget(i, 'to')
+            local cur = cto and node_index[cto]
+            if fit and not dup and fit.id ~= cto and (not cto or (cur and cur.file ~= b.mod)) then
+                cset(i, 'to', fit.id)
+                cset(i, 'inferred', nil); cset(i, 'refused', nil); cset(i, 'ext', nil)
+                if fid then
+                    local cline = cget(i, 'line')
+                    addref(fid, fit.id, cget(i, 'at') or { start = { line = cline, char = 0 },
+                        ['end'] = { line = cline, char = 0 } }, nil)
+                end
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index, x.data.edges) end },
@@ -5475,6 +5529,8 @@ local RESOLVE_PASSES = {
     { name = 'field_alias', run = function (x) -- `local f = mod.field` then bare f()
         return resolve_field_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.data.fieldalias) end },
+    { name = 'import_member', run = function (x) -- `import {N2 as N3} from './a'` then bare N3() (CART-0419)
+        return M._resolve_import_member(x.cv, x.data.edges, x.tail, x.exact, x.addref, x.node_index, x.parent_fn) end },
     { name = 'chain_type', run = function (x)
         return resolve_chain_type(x.cv, x.exact, x.addref, x.node_index) end },
     { name = 'field_chain', run = function (x)
@@ -10251,6 +10307,9 @@ local MATCH_OPTS = { match_limit = 65536 }
                             -- a binding — a fact that survived my guess that it was
                             -- "the cheapest win").
                             local bind = bindn and node_text(bindn, src) or nil
+                            -- (the MEMBERS a destructuring / named import binds — `import {N2 as N3}`, `const {N2: Q} =
+                            -- require(..)` — { local = member }: each local IS that member of the target, CART-0419)
+                            local members = spec.import_members and spec.import_members(pathn, src, node_text) or nil
                             if not bind and spec.import_bind_path then
                                 bind = spec.import_bind_path(node_text(pathn, src))
                             end
@@ -10285,6 +10344,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 if bind and not edges[idx].bind then
                                     edges[idx].bind = bind
                                 end
+                                if members and not edges[idx].members then edges[idx].members = members end
                                 -- MERGE LIKE `bind`: several patterns match one
                                 -- site (a CJS require matches its declaration AND
                                 -- the bare call), and only some carry a kind. Test
@@ -10301,7 +10361,7 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- ★ THE SITE IS THE PATH (CART-1122), as a call's is its callee name: import
                                 -- edges carried no `at`, so an import could not be navigated to from its edge
                                 -- and the loss report counted every import statement dark (2586 on converse.js)
-                                local e = { from = file, to = target,
+                                local e = { from = file, to = target, members = members,
                                     kind = 'import', bind = bind, at = { pos_of(pathn) },
                                     inferred = folded and folded.inferred or nil, -- (a tail-matched computed path: CART-0944)
                                     via = folded and folded.inferred and 'path-tail' or nil }

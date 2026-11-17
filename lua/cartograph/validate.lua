@@ -167,6 +167,7 @@ M.EDGE_FIELDS = {
                    -- alias binding / env profile ([[cartograph-stdlib-profile]])
     bind = true, -- import edges: the local name the import binds (v8);
                  -- absent from the 17-corpus inventory until SE exercised it
+    members = true, -- import edges: { local = member } a named / destructuring import binds (CART-0419)
     sideeffect = true, -- import edges: required for effect, no binding
     -- import edges, from spec.import_kinds (CART-0510). TRI-STATE, and the
     -- absence is load-bearing: nil = this language's syntax does not
