@@ -6902,6 +6902,37 @@ end
 --- ⚠ FILE-SCOPE, NOT A CLOSURE IN THE CALL WALK. It is reached once per call
 --- site in every file of every corpus, and a closure built there would allocate
 --- per site for a function that captures nothing it cannot be handed.
+--- a FOLDED computed include (spec.import_fold, CART-0944) -> target file, inferred. `path`: root-relative and exact,
+--- the file or nothing. `tail`: a prefix the fold could not know — matched at a PATH-SEGMENT boundary (`'.txt'` names
+--- no file; `api/soap/x.php` names one) and only while UNIQUE; the edge is hedged, because which root the unknown
+--- prefix names is a guess.
+function M._fold_target(r, importable)
+    if not (r and importable) then return nil end
+    if r.path then return importable[r.path] and r.path or nil, nil end
+    if r.tail then
+        local idx = M._FOLDBASE[importable]
+        if not idx then
+            idx = {}
+            for f in pairs(importable) do
+                local b = f:match('([^/]+)$')
+                local l = idx[b]; if not l then l = {}; idx[b] = l end
+                l[#l + 1] = f
+            end
+            M._FOLDBASE[importable] = idx
+        end
+        local hit
+        for _, f in ipairs(idx[r.tail:match('([^/]+)$') or ''] or {}) do
+            if f == r.tail or f:sub(-#r.tail - 1) == '/' .. r.tail then
+                if hit then return nil end
+                hit = f
+            end
+        end
+        return hit, hit and true or nil
+    end
+    return nil
+end
+M._FOLDBASE = setmetatable({}, { __mode = 'k' }) -- (basename -> files, per file set)
+
 local function import_path(args, arg1n, src, spec, consts)
     if args[1] and args[1] ~= '' then return args[1] end
     return arg1n and fold_str(arg1n, src, spec, consts) or nil
@@ -10023,17 +10054,24 @@ local MATCH_OPTS = { match_limit = 65536 }
                 -- every JS corpus gate.
                 local at_site = {}
                 for _, match in q:iter_matches(tsroot, src, 0, -1, MATCH_OPTS) do
-                    local pathn, bindn
+                    local pathn, bindn, folded
                     for id, ns in pairs(match) do
                         local cn = q.captures[id]
                         if cn == 'path' then pathn = cap_node(ns)
-                        elseif cn == 'bind' then bindn = cap_node(ns) end
+                        elseif cn == 'bind' then bindn = cap_node(ns)
+                        elseif cn == 'cpath' and spec.import_fold then
+                            -- (a COMPUTED path the spec folds, CART-0944: exact when rooted, a hedged unique tail match
+                            -- when only a prefix is unknown — M._fold_target)
+                            local cn2 = cap_node(ns)
+                            local t, inf = M._fold_target(spec.import_fold(cn2, src, file), importable)
+                            if t then pathn, folded = cn2, { target = t, inferred = inf } end
+                        end
                     end
                     if pathn then
                         local sr, sc = pathn:start()
                         local site = sr * 4096 + sc
                         local rawpath = node_text(pathn, src)
-                        local target = spec.resolve_import(
+                        local target = folded and folded.target or spec.resolve_import(
                             rawpath, importable, file, root, ictx)
                         if not target and bindn then
                             -- a BARE specifier: not relative, not absolute, not a
@@ -10124,7 +10162,8 @@ local MATCH_OPTS = { match_limit = 65536 }
                                 -- edges carried no `at`, so an import could not be navigated to from its edge
                                 -- and the loss report counted every import statement dark (2586 on converse.js)
                                 local e = { from = file, to = target,
-                                    kind = 'import', bind = bind, at = { pos_of(pathn) } }
+                                    kind = 'import', bind = bind, at = { pos_of(pathn) },
+                                    inferred = folded and folded.inferred or nil } -- (a tail-matched computed path: CART-0944)
                                 -- all three fields together or none: setting
                                 -- `site` on a site whose KIND is unknown would
                                 -- claim half a fact

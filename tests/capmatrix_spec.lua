@@ -32,7 +32,7 @@ test('capmatrix: the pass table is derived from the provider, capture by capture
         'value', 'vdecl', 'vdef', 'vname' }, keys(defs.captures), 'the defs dispatch')
     ok(defs.catchall, 'and its catch-all (an unknown capture becomes a CATEGORY)')
     ok(set(defs.slots).super_query and set(defs.slots).fields, 'its slots come from the concat list')
-    eq({ 'bind', 'path' }, keys(by.import_query.captures), 'import_query')
+    eq({ 'bind', 'cpath', 'path' }, keys(by.import_query.captures), 'import_query (cpath: a folded computed path, CART-0944)')
     eq({ 'ichild', 'idecl', 'iface' }, keys(by.iface_query.captures), 'iface_query')
     eq({ 'rcls' }, keys(by.reg_read_query.captures), 'reg_read_query (captures[id] form)')
     eq({ 'call', 'name' }, keys(by.calls.captures), 'calls')

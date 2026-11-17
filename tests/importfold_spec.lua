@@ -155,3 +155,69 @@ test('import fold: an INTERPOLATED php string is not a literal', function ()
         'an interpolated string names a VARIABLE and never folds, got '
             .. vim.inspect(imports_of(data, 'main.php')))
 end)
+
+-- ★ PHP COMPUTED INCLUDES (CART-0944): mantisbt had 72 `require_once( $dir . 'x.php' )` and none produced an import
+-- edge — the import query left a computed path a frontier. PHP's own path constants and a local bound once FOLD:
+-- __DIR__ / __FILE__ / DIRECTORY_SEPARATOR / dirname( X [, n] ) / a set-once $x. A prefix the fold cannot know (a
+-- global set in another file, a function's return) leaves a literal TAIL, matched at a path-segment boundary while
+-- unique, and that edge is hedged.
+local function php_edges(data, from)
+    local out = {}
+    for _, e in ipairs(data.edges or {}) do
+        if e.kind == 'import' and e.from == from then out[#out + 1] = e.to .. (e.inferred and ' ~' or '') end
+    end
+    table.sort(out)
+    return out
+end
+local P = '<?php\n'
+
+test('import fold php: __DIR__, dirname( __DIR__, n ), DIRECTORY_SEPARATOR and a set-once local are EXACT (CART-0944)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local data = extract({
+        ['core.php'] = P,
+        ['admin/schema.php'] = P,
+        ['admin/check/x.php'] = P,
+        ['admin/install.php'] = P .. "require_once( dirname( __DIR__ ) . '/core.php' );\nrequire_once( __DIR__ . '/schema.php' );\n",
+        ['admin/check/index.php'] = P .. "require_once( dirname( __DIR__, 2 ) . '/core.php' );\n"
+            .. "$t_dir = __DIR__ . DIRECTORY_SEPARATOR;\nrequire_once( $t_dir . 'x.php' );\n",
+    })
+    eq({ 'admin/schema.php', 'core.php' }, php_edges(data, 'admin/install.php'))
+    eq({ 'admin/check/x.php', 'core.php' }, php_edges(data, 'admin/check/index.php'), 'n levels up; the local folds through its one binding')
+end)
+
+test('import fold php: an unknown PREFIX leaves a hedged unique tail; a tail no file ends with, or two files do, is no edge (CART-0944)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local data = extract({
+        ['api/soap/mc_api.php'] = P,
+        ['lib/mc_api.php'] = P,
+        ['lang/strings_english.txt'] = 'x',
+        ['dup/a/z.php'] = P, ['dup/b/z.php'] = P,
+        ['core/f.php'] = P .. "function f( $p_dir, $p_lang ) {\n  global $g_absolute_path;\n"
+            .. "  $t_soap_dir = $g_absolute_path . 'api/soap/';\n  require_once( $t_soap_dir . 'mc_api.php' );\n"
+            .. "  include_once( $p_dir . 'strings_' . $p_lang . '.txt' );\n  require_once( $g_root . 'z.php' );\n}\n",
+    })
+    eq({ 'api/soap/mc_api.php ~' }, php_edges(data, 'core/f.php'),
+        'api/soap/mc_api.php by its tail, hedged — never lib/mc_api.php; a parameter in the middle and an ambiguous tail mint nothing')
+end)
+
+test('import fold php: a variable bound twice, bound after the use, or written by .= is not folded as a path (CART-0944)', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local data = extract({
+        ['a/x.php'] = P, ['b/x.php'] = P,
+        ['top.php'] = P, ['a/$g.php'] = P, ['api/xsoap/mc.php'] = P,
+        -- (each wrong reading lands on a REAL file, so a guard that did not fire would show as an edge)
+        ['a/m.php'] = P .. "$d = __DIR__ . '/../b/';\n$d = __DIR__ . '/';\nrequire_once( $d . 'x.php' );\n",
+        ['a/n.php'] = P .. "require_once( $e . 'x.php' );\n$e = __DIR__ . '/';\n",
+        ['a/o.php'] = P .. "$f = __DIR__ . '/';\n$f .= 'sub/';\nrequire_once( $f . 'x.php' );\n",
+        ['a/q.php'] = P .. "require_once( dirname( __DIR__, 5 ) . '/top.php' );\nrequire_once( __DIR__ . '/../../top.php' );\n",
+        ['a/r.php'] = P .. 'require_once( __DIR__ . "/$g.php" );\n',
+        ['a/s.php'] = P .. "require_once( $g_root . 'soap/mc.php' );\n",
+    })
+    for _, f in ipairs { 'a/m.php', 'a/n.php', 'a/o.php' } do
+        -- (an unknown prefix leaves the tail x.php, which two files end with: no edge — never a/x.php by a guess)
+        eq({}, php_edges(data, f), f .. ': not set-once, so not a path')
+    end
+    eq({}, php_edges(data, 'a/q.php'), 'above the root, by dirname or by ..: outside the tree — never top.php')
+    eq({}, php_edges(data, 'a/r.php'), 'an interpolated string is no literal — never the file named $g.php')
+    eq({}, php_edges(data, 'a/s.php'), 'a tail matches at a path-segment boundary: soap/ is not xsoap/')
+end)

@@ -502,6 +502,146 @@ local PHP_LEXICAL_SCOPES = {
     anonymous_function = { kind = 'param', harvest = php_fn_scope }, arrow_function = { kind = 'param', harvest = php_params },
 }
 
+-- ★ A COMPUTED INCLUDE PATH, FOLDED (CART-0944). mantisbt has 72 `require_once( $dir . 'x.php' )` and none produced
+-- an import edge: the query left a computed path a frontier. Most of them are KNOWN from the file alone — PHP's own
+-- path constants and a local bound once:
+--   __DIR__ / __FILE__        the file's directory / the file, root-relative (the source fixes them)
+--   DIRECTORY_SEPARATOR       '/' (as a path, the separator; the platform's spelling does not change the file)
+--   dirname( X [, n] )        X's directory, n levels up
+--   $x                        the ONE assignment to $x in the enclosing scope, made before the use; any other write
+--                             (`.=`, a second `=`, `global $x`, `static`, a foreach / list binding, `&`) and it is
+--                             unknown
+--   A . B                     concatenation
+-- -> { path = '/root/relative/path' } (rooted: exact), or { tail = 'api/soap/x.php' } when only a PREFIX is unknown
+-- (`$g_absolute_path . 'api/soap/'`, a global set in another file): the caller matches the tail at a path-segment
+-- boundary and hedges the edge. A tail that is itself unknown is no answer: nil.
+local PHP_PATH_WRITES = { augmented_assignment_expression = true, reference_assignment_expression = true }
+local function php_scope_of(n)
+    local p = n:parent()
+    while p do
+        local t = p:type()
+        if t == 'function_definition' or t == 'method_declaration' or t == 'anonymous_function'
+            or t == 'arrow_function' then return p:field('body')[1] or p end
+        if t == 'program' then return p end
+        p = p:parent()
+    end
+end
+-- the ONE value bound to `$name` in `scope` before byte `before`, or nil when the binding is not provably single
+local function php_set_once(scope, name, src, before)
+    local val, bad = nil, false
+    local pat = vim.pesc(name) .. '%f[^%w_]'
+    local function mentions(n) return (node_text(n, src) .. ' '):find(pat) ~= nil end
+    local function walk(n)
+        if bad then return end
+        local t = n:type()
+        if n ~= scope and (t == 'function_definition' or t == 'method_declaration' or t == 'anonymous_function'
+            or t == 'arrow_function' or t == 'class_declaration') then return end
+        if t == 'assignment_expression' then
+            local l = n:field('left')[1]
+            if l and l:type() == 'variable_name' and node_text(l, src) == name then
+                if val then bad = true; return end
+                if select(3, n:start()) >= before then bad = true; return end
+                val = n:field('right')[1]
+            elseif l and l:type() ~= 'variable_name' and mentions(l) then bad = true; return end -- (list() / array destructuring)
+        elseif PHP_PATH_WRITES[t] then
+            local l = n:field('left')[1]
+            if l and node_text(l, src) == name then bad = true; return end
+        elseif t == 'global_declaration' or t == 'static_variable_declaration' or t == 'foreach_statement' then
+            if mentions(n) then bad = true; return end
+        end
+        for _, c in inext, n, -1 do if c:named() then walk(c) end end
+    end
+    walk(scope)
+    if bad then return nil end
+    return val
+end
+local function php_dirname(p, k)
+    for _ = 1, k do
+        if p == '/' or p == '' then return nil end -- (above the root: outside the tree)
+        p = p:match('^(.*)/[^/]*$')
+        if not p then return nil end
+        if p == '' then p = '/' end
+    end
+    return p
+end
+local function php_fold(n, src, file, depth)
+    depth = depth + 1
+    if not n or depth > 8 then return nil end
+    local t = n:type()
+    if t == 'parenthesized_expression' then
+        for _, c in inext, n, -1 do if c:named() then return php_fold(c, src, file, depth) end end
+        return nil
+    end
+    if t == 'string' or t == 'encapsed_string' then
+        for _, c in inext, n, -1 do
+            if c:named() and c:type() ~= 'string_content' and c:type() ~= 'string_value' then return nil end -- (interpolated)
+        end
+        return { lit = (node_text(n, src):gsub('^["\']', ''):gsub('["\']$', '')) }
+    end
+    if t == 'name' then
+        local nm = node_text(n, src)
+        if nm == '__DIR__' then return { root = '/' .. (file:match('^(.*)/[^/]*$') or '') } end
+        if nm == '__FILE__' then return { root = '/' .. file } end
+        if nm == 'DIRECTORY_SEPARATOR' then return { lit = '/' } end
+        return nil
+    end
+    if t == 'function_call_expression' then
+        local f = n:field('function')[1]
+        if not (f and node_text(f, src) == 'dirname') then return nil end
+        local args = {}
+        for _, a in inext, n:field('arguments')[1] or n, -1 do
+            if a:type() == 'argument' then args[#args + 1] = a:named_child(0) end
+        end
+        local x = args[1] and php_fold(args[1], src, file, depth)
+        local k = args[2] and tonumber(node_text(args[2], src)) or (args[2] and -1) or 1
+        if not (x and x.root) or k < 1 then return nil end
+        local d = php_dirname((x.root:gsub('/+$', '')), k)
+        -- (above the root is not an UNKNOWN prefix to match a tail under: it names no file of this tree)
+        return d and { root = d } or { bad = true }
+    end
+    if t == 'variable_name' then
+        local scope = php_scope_of(n)
+        local v = scope and php_set_once(scope, node_text(n, src), src, (select(3, n:start())))
+        return v and php_fold(v, src, file, depth) or { unknown = true }
+    end
+    if t == 'binary_expression' then
+        local op
+        for _, c in inext, n, -1 do if not c:named() then op = c:type(); break end end
+        if op ~= '.' then return nil end
+        local l = php_fold(n:field('left')[1], src, file, depth)
+        local r = php_fold(n:field('right')[1], src, file, depth)
+        if (l and l.bad) or not r or r.unknown or r.root or r.bad then return nil end -- (the tail must be KNOWN text)
+        if not l or l.unknown then return { tail = r.lit } end
+        if l.tail then return { tail = l.tail .. r.lit } end
+        if l.root then return { root = l.root .. r.lit } end
+        return { lit = l.lit .. r.lit }
+    end
+    return nil
+end
+local function php_norm(p)
+    local out = {}
+    for seg in p:gmatch('[^/]+') do
+        if seg == '..' then
+            if #out == 0 then return nil end -- (above the root: outside the tree)
+            out[#out] = nil
+        elseif seg ~= '.' then out[#out + 1] = seg end
+    end
+    return table.concat(out, '/')
+end
+local function php_import_fold(n, src, file)
+    local r = php_fold(n, src, file, 0)
+    if not r then return nil end
+    if r.root then
+        local p = php_norm(r.root)
+        return p and { path = p } or nil
+    end
+    if r.tail then
+        local t = php_norm(r.tail)
+        return (t and t ~= '') and { tail = t } or nil
+    end
+    return nil -- (a bare literal is the plain @path pattern's; an unknown alone is no path)
+end
+
 return {
     lexical_scopes = PHP_LEXICAL_SCOPES, -- CART-1598
     -- a function's variable may BE the file's (CART-2076): an included file's top level runs in its INCLUDER's function
@@ -782,12 +922,24 @@ return {
         (require_expression (parenthesized_expression (string) @path))
         (include_once_expression (parenthesized_expression (string) @path))
         (include_expression (parenthesized_expression (string) @path))
+        ; ★ A COMPUTED PATH (CART-0944): captured as @cpath and FOLDED by import_fold — `__DIR__ . '/restcore/x.php'`,
+        ; a set-once `$t_dir`, `dirname( __DIR__, 2 )`. What the fold cannot know (page dispatch from request data,
+        ; a parameter) stays the frontier it always was: no edge.
+        (require_once_expression [(binary_expression) (variable_name)] @cpath)
+        (require_expression [(binary_expression) (variable_name)] @cpath)
+        (include_once_expression [(binary_expression) (variable_name)] @cpath)
+        (include_expression [(binary_expression) (variable_name)] @cpath)
+        (require_once_expression (parenthesized_expression [(binary_expression) (variable_name)] @cpath))
+        (require_expression (parenthesized_expression [(binary_expression) (variable_name)] @cpath))
+        (include_once_expression (parenthesized_expression [(binary_expression) (variable_name)] @cpath))
+        (include_expression (parenthesized_expression [(binary_expression) (variable_name)] @cpath))
         (namespace_use_clause (qualified_name) @path)
         (base_clause (name) @path)
         (base_clause (qualified_name) @path)
         (class_interface_clause (name) @path)
         (class_interface_clause (qualified_name) @path)
     ]=],
+    import_fold = php_import_fold,
     resolve_import = function (path, files, from)
         path = path:gsub('^["\']', ''):gsub('["\']$', '')
         -- (a leading `\` only says FULLY QUALIFIED: `extends \Base_Handler` names the global Base_Handler, whose PSR-0

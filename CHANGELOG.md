@@ -2,6 +2,15 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
+## 2026-11-17 — PHP: a computed include path is an import edge (graph; cache v334)
+
+- `require_once( __DIR__ . '/x.php' )`, `dirname( __DIR__, 2 ) . '/core.php'` and a local bound once
+  (`$t_dir = __DIR__ . DIRECTORY_SEPARATOR; require_once( $t_dir . 'x.php' )`) now give an exact import edge; they gave
+  none. A prefix that cannot be known from the file (`$g_absolute_path . 'api/soap/' . 'mc_api.php'`, a config call)
+  leaves the literal tail, matched at a path-segment boundary while unique, and the edge is hedged (`inferred`).
+- Page dispatch from request data, a parameter in the middle of the path and a path above the root stay without an edge.
+- mantisbt: 108 import edges added (75 exact, 33 hedged), none removed; 64 of its 72 `$dir . 'x.php'` includes resolve.
+
 ## 2026-11-17 — versionfloor: Lua's string escapes are a ceiling and a behaviour split (report)
 
 - An escape 5.1 reads as the bare letter and 5.2+ refuse (`"\."`, `"\%"`, a backslash before a UTF-8 byte, a
