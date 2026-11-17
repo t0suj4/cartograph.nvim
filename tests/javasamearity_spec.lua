@@ -311,3 +311,24 @@ test('same-file arity: a VARIABLE whose declared type is spelled qualified names
     eq('PM.java::Builder::get@4', c[6][1].to, 'and the count decides')
     vim.fn.delete(root, 'rf')
 end)
+
+test('same-file arity: a receiver CREATED from a qualified class, `new Z.Kay().f(1)`, is another file\'s Kay (CART-2121)', function ()
+    if not parser_available('java') then skip 'no java parser' end
+    local root = tree({ ['Y.java'] = table.concat({
+        'package p;',                                                                          -- 0
+        'public class Y {',                                                                    -- 1
+        '  static class Kay { int f(int x) { return x; } int f(int x, int y) { return y; } }',  -- 2
+        '  int a() { return new Z.Kay().f(1); }',                                              -- 3
+        '  int b() { return new Y.Kay().f(1); }',                                              -- 4
+        '  int c() { return new Kay().f(1); }',                                                -- 5
+        '}',
+    }, '\n') .. '\n' })
+    local data = ts.extract(root); data.root = root
+    local c = calls_at(data, 'Y.java')
+    local function f(line) for _, x in ipairs(c[line]) do if x.callee == 'f' then return x end end end
+    eq('', f(3).cpath, 'Z is no enclosing scope\'s name')
+    eq(nil, f(3).to, 'never this file\'s Kay.f: ' .. tostring(f(3).to))
+    eq('Y.Kay', f(4).cpath); eq('Y.java::Kay::f@2', f(4).to)
+    eq('Y.Kay', f(5).cpath); eq('Y.java::Kay::f@2', f(5).to)
+    vim.fn.delete(root, 'rf')
+end)

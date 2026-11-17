@@ -265,9 +265,14 @@ local function java_call_path(calln, src, how, key, qcls)
         if java_anon_between(calln, c) then return '' end
         return java_class_path(c, src) -- (nil at the top level: nothing to decide)
     end
-    if how ~= 'written' then return nil end
+    -- (`new B.K().m()`: the receiver's creation names the class as a written `new B.K()` does — read off that node)
+    local site = calln
+    if how == 'ctor' then
+        site = calln:field('object')[1]
+        if not (site and site:type() == 'object_creation_expression') then return nil end
+    elseif how ~= 'written' then return nil end
     local x = key and key:match('^([%w_$]+)::[%w_$]+$')
-    local chain = java_written_chain(calln, src)
+    local chain = java_written_chain(site, src)
     if not (x and chain and chain[#chain] == x) then return nil end
     if #chain == 1 then return java_lex_path(calln, src, x) or nil end
     -- (a qualified head no enclosing scope names is another file's class: undecidable here)

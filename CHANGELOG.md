@@ -2,7 +2,7 @@
 
 Breaking or client-visible changes to cartograph's surfaces. Internal changes are in the git log.
 
-## 2026-11-17 — Java: overloads in the caller's own file are decided by argument count (graph; cache v327)
+## 2026-11-17 — Java: overloads in the caller's own file are decided by argument count (graph; cache v329)
 
 - The arity pass now also reads a same-file refusal whose candidates are overloads of one class: `new x_result()`
   beside `x_result(int)` and a copy constructor reaches the no-argument one. Overloads that share a count (they
@@ -12,7 +12,7 @@ Breaking or client-visible changes to cartograph's surfaces. Internal changes ar
   take one argument).
 - A method inside an anonymous or enum-constant body is no candidate of a call outside that body, and a call inside
   one is not decided by either same-file pick (the anonymous class may inherit the name).
-- A class spelled qualified, `new B.K()` or a variable declared `B.K<..>`, is decided by its head: an enclosing
+- A class spelled qualified, `new B.K()`, `new B.K().m()` or a variable declared `B.K<..>`, is decided by its head: an enclosing
   class or its member gives the path; a head no enclosing scope names is another file's class, and the call is not
   matched to this file's `K` (`settings.build()` on a `Settings.Builder` had linked to the file's own `Builder`).
 - hive standalone-metastore: 3,910 calls resolved; elasticsearch server 10,151 (plus 59 record constructor calls, 7
